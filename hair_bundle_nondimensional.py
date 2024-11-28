@@ -52,7 +52,7 @@ class HairBundleNonDimensional:
     def __c(c_min: float, p_m: float) -> float:
         """
         Climbing rate
-        :param s_min: minimum climbing rate
+        :param c_min: minimum climbing rate
         :param p_m: calcium binding probability for adaptation motors
         :return: equation for the climbing rate
         """
@@ -112,10 +112,10 @@ class HairBundleNonDimensional:
     def __p_gs_dot(tau_gs: float, ca2_gs: float, p_t: float, p_gs: float) -> float:
         """
         Calcium binding probability for gating spring dynamics
-        :param tau_m: finite time constant for gating spring
-        :param ca2_m: calcium ion concentration near gating spring
+        :param tau_gs: finite time constant for gating spring
+        :param ca2_gs: calcium ion concentration near gating spring
         :param p_t: open channel probability
-        :param p_m: calcium binding probability for gating spring
+        :param p_gs: calcium binding probability for gating spring
         :return: time derivative of calcium binding probability for gating spring
         """
         return (ca2_gs * p_t * (1 - p_gs) - p_gs) / tau_gs
@@ -136,7 +136,7 @@ class HairBundleNonDimensional:
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float):
         # parameters
-        '''
+        """
         self.tau_hb = sym.Symbol('tau_hb') # finite time constant for hair bundle
         self.tau_m = sym.Symbol('tau_m') # finite time constant for adaptation motor
         self.tau_gs = sym.Symbol('tau_gs') # finite time constant for gating spring
@@ -152,7 +152,7 @@ class HairBundleNonDimensional:
         self.chi_hb = sym.Symbol('chi_hb') # hair bundle conversion factor
         self.chi_a = sym.Symbol('chi_a') # adaptation conversion factor
         self.x_c = sym.Symbol('x_c') # average equilibrium position of the adaptation motors
-        '''
+        """
 
         # hair bundle variables
         x_hb = sym.symbols('x_hb') # hair bundle displacement
