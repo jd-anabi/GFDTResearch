@@ -3,7 +3,6 @@ from jedi.inference.gradual.typing import Callable
 
 class HairBundleNonDimensional:
     # -------------------------------- Helper functions (begin) --------------------------------
-    # -------------------------------- variable parameters --------------------------------
     @staticmethod
     def __k_gs(p_gs: float, k_gs_min: float) -> float:
         """
