@@ -136,53 +136,81 @@ class HairBundleNonDimensional:
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float):
         # parameters
-        """
-        self.tau_hb = sym.Symbol('tau_hb') # finite time constant for hair bundle
-        self.tau_m = sym.Symbol('tau_m') # finite time constant for adaptation motor
-        self.tau_gs = sym.Symbol('tau_gs') # finite time constant for gating spring
-        self.tau_t = sym.Symbol('tau_t') # finite time constant
-        self.c_min = sym.Symbol('c_min') # min climbing rate
-        self.s_min = sym.Symbol('s_min') # min slipping rate
-        self.s_max = sym.Symbol('s_max') # max slipping rate
-        self.ca2_m = sym.Symbol('ca2_m') # calcium ion concentration near adaptation motor
-        self.ca2_gs = sym.Symbol('ca2_gs') # calcium ion concentration near gating spring
-        self.u_gs_max = sym.Symbol('u_gs_max') # max gating spring potential
-        self.delta_e = sym.Symbol('delta_e') # intrinsic energy difference between the transduction channel's two states
-        self.k_gs_min = sym.Symbol('k_gs_min') # min gating spring stiffness
-        self.chi_hb = sym.Symbol('chi_hb') # hair bundle conversion factor
-        self.chi_a = sym.Symbol('chi_a') # adaptation conversion factor
-        self.x_c = sym.Symbol('x_c') # average equilibrium position of the adaptation motors
-        """
+        self.tau_hb = tau_hb # finite time constant for hair bundle
+        self.tau_m = tau_m # finite time constant for adaptation motor
+        self.tau_gs = tau_gs # finite time constant for gating spring
+        self.tau_t = tau_t # finite time constant
+        self.c_min = c_min # min climbing rate
+        self.s_min = s_min # min slipping rate
+        self.s_max = s_max # max slipping rate
+        self.ca2_m = ca2_m # calcium ion concentration near adaptation motor
+        self.ca2_gs = ca2_gs # calcium ion concentration near gating spring
+        self.u_gs_max = u_gs_max # max gating spring potential
+        self.delta_e = delta_e # intrinsic energy difference between the transduction channel's two states
+        self.k_gs_min = k_gs_min # min gating spring stiffness
+        self.chi_hb = chi_hb # hair bundle conversion factor
+        self.chi_a = chi_a # adaptation conversion factor
+        self.x_c = x_c # average equilibrium position of the adaptation motors
 
         # hair bundle variables
-        x_hb = sym.symbols('x_hb') # hair bundle displacement
-        x_a = sym.symbols('x_a') # adaptation motor displacement
-        p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
-        p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
-        p_t = sym.symbols('p_t') # open channel probability
-        self.hb_symbols = sym.Tuple(x_hb, x_a, p_m, p_gs, p_t)
-
-        # varying parameters
-        k_gs = sym.simplify(self.__k_gs(p_gs, k_gs_min))
-        x_gs = sym.simplify(self.__x_gs(chi_hb, chi_a, x_hb, x_a, x_c))
-        f_gs = sym.simplify(self.__f_gs(k_gs, p_t, x_gs))
-        s = sym.simplify(self.__s(s_min, p_m))
-        c = sym.simplify(self.__c(c_min, p_m))
-        p_t0 = sym.simplify(self.__p_t0(u_gs_max, delta_e, k_gs, x_gs))
-        self.var_params = sym.Tuple(k_gs, x_gs, f_gs, s, c, p_t0)
+        self.x_hb = sym.symbols('x_hb') # hair bundle displacement
+        self.x_a = sym.symbols('x_a') # adaptation motor displacement
+        self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
+        self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
+        self.p_t = sym.symbols('p_t') # open channel probability
+        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs, self.p_t)
 
         # ODEs
-        x_hb_dot = sym.simplify(self.__x_hb_dot(tau_hb, f_gs, x_hb))
-        x_a_dot = sym.simplify(self.__x_a_dot(s_max, s, c, f_gs, x_a))
-        p_m_dot = sym.simplify(self.__p_m_dot(tau_m, ca2_m, p_t, p_m))
-        p_gs_dot = sym.simplify(self.__p_gs_dot(tau_gs, ca2_gs, p_t, p_gs))
-        p_t_dot = sym.simplify(self.__p_t(tau_t, p_t0, p_t))
-        self.odes = sym.Tuple(x_hb_dot, x_a_dot, p_m_dot, p_gs_dot, p_t_dot)
+        odes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot, self.p_t_dot)
 
-        self.ode_sym_lambda_func = sym.lambdify(tuple(self.hb_symbols), list(self.odes)) # lambdify ode system
+        self.ode_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(odes)) # lambdify ode system
 
         def odes_for_solver(t: list, z: tuple) -> Callable:
             x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var = z
             return self.ode_sym_lambda_func(x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var)
 
         self.odes_for_solver = odes_for_solver
+
+    # -------------------------------- Varying parameters (begin) ----------------------------------
+    @property
+    def k_gs(self) -> float:
+        return sym.simplify(self.__k_gs(self.p_gs, self.k_gs_min))
+
+    @property
+    def x_gs(self) -> float:
+        return sym.simplify(self.__x_gs(self.chi_hb, self.chi_a, self.x_hb, self.x_a, self.x_c))
+
+    @property
+    def f_gs(self) -> float:
+        return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_gs))
+
+    @property
+    def s(self) -> float:
+        return sym.simplify(self.__s(self.s_min, self.p_m))
+
+    @property
+    def c(self) -> float:
+        return sym.simplify(self.__c(self.c_min, self.p_m))
+
+    @property
+    def p_t0(self) -> float:
+        return sym.simplify(self.__p_t0(self.u_gs_max, self.delta_e, self.k_gs, self.x_gs))
+    # -------------------------------- Varying parameters (end) ----------------------------------
+
+    # -------------------------------- ODEs (begin) ----------------------------------
+    @property
+    def x_hb_dot(self) -> float:
+        return sym.simplify(self.__x_hb_dot(self.tau_hb, self.f_gs, self.x_hb))
+    @property
+    def x_a_dot(self) -> float:
+        return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a))
+    @property
+    def p_m_dot(self) -> float:
+        return sym.simplify(self.__p_m_dot(self.tau_m, self.ca2_m, self.p_t, self.p_m))
+    @property
+    def p_gs_dot(self) -> float:
+        return sym.simplify(self.__p_gs_dot(self.tau_gs, self.ca2_gs, self.p_t, self.p_gs))
+    @property
+    def p_t_dot(self) -> float:
+        return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))
+    # -------------------------------- ODEs (end) ----------------------------------
