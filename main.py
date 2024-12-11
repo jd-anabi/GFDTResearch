@@ -41,7 +41,7 @@ if __name__ == '__main__':
                                                     1, x_c)
     w_sol = sp.integrate.solve_ivp(hair_bundle_nd.odes_for_solver, t_interval, z0, t_eval=t, method='LSODA', dense_output=True)
     plt.plot(t, w_sol.y[0])
-    plt.xlim(t_interval[0] + 900, t_interval[1] - 1000)
+    plt.xlim(t_interval[0] + 975, t_interval[1] - 976)
     plt.ylim(np.min(w_sol.y[0][int(len(t) / 2):]) - 0.25, np.max(w_sol.y[0][int(len(t) / 2):]) + 0.25)
     plt.show()
     # rest of the varying parameters
