@@ -1,35 +1,46 @@
+import csv
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
 import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
-    # initial conditions
-    x_hb0 = 0.0
-    x_a0 = 0.0
-    p_m0 = 0
-    p_gs0 = 0
-    p_t0 = 1
-    z0 = (x_hb0, x_a0, p_m0, p_gs0, p_t0)
+    row_num = 0
+    with open('hair_cell_0.csv', newline='') as csvfile:
+        params = csv.reader(csvfile, delimiter=',')
+        for row in params:
+            match row_num:
+                case 0:
+                    # initial conditions
+                    x_hb0 = float(row[0])
+                    x_a0 = float(row[1])
+                    p_m0 = float(row[2])
+                    p_gs0 = float(row[3])
+                    p_t0 = float(row[4])
+                    z0 = (x_hb0, x_a0, p_m0, p_gs0, p_t0)
 
-    # fixed parameters
-    tau_hb = 1
-    tau_gs = 1
-    tau_t = 1e-9
-    c_min = 1
-    s_min = 1e-9
-    s_max = 0.5
-    ca2_m = 1
-    ca2_gs = 1000
-    chi_hb = 1
-    x_c = 1e-9
+                case 1:
+                    # fixed parameters
+                    tau_hb = float(row[0])
+                    tau_gs = float(row[1])
+                    tau_t = float(row[2])
+                    c_min = float(row[3])
+                    s_min = float(row[4])
+                    s_max = float(row[5])
+                    ca2_m = float(row[6])
+                    ca2_gs = float(row[7])
+                    chi_hb = float(row[8])
+                    x_c = float(row[9])
 
-    # varying parameters
-    tau_m = 10
-    u_gs_max = 10
-    delta_e = 1
-    k_gs_min = 1
-    chi_a = 1
+                case 2:
+                    # varying parameters
+                    tau_m = float(row[0])
+                    u_gs_max = float(row[1])
+                    delta_e = float(row[2])
+                    k_gs_min = float(row[3])
+                    chi_a = float(row[4])
+
+            row_num += 1
 
     # time interval
     t_interval = [250, 1000]
