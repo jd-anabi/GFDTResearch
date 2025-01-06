@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
+    # read hair cell from csv file
     row_num = 0
     with open('hair_cell_0.csv', newline='') as csvfile:
         params = csv.reader(csvfile, delimiter=',')
