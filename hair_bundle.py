@@ -146,30 +146,30 @@ class HairBundle:
         return -1 * c + s * (f_gs - k_es * (x_a + x_es))
 
     @staticmethod
-    def __p_m_dot(k_m_max: float, k_m_min: float, ca2_m: float, p_t: float, p_m: float) -> float:
+    def __p_m_dot(k_m_plus: float, k_m_minus: float, ca2_m: float, p_t: float, p_m: float) -> float:
         """
         Calcium binding probability for adaptation motors dynamics
-        :param k_m_max: association constant for adaptation motors
-        :param k_m_min: dissociation constant for adaptation motors
+        :param k_m_plus: association constant for adaptation motors
+        :param k_m_minus: dissociation constant for adaptation motors
         :param ca2_m: calcium ion concentration near adaptation motor
         :param p_t: open channel probability
         :param p_m: calcium binding probability for adaptation motors
         :return: time derivative of calcium binding probability for adaptation motors
         """
-        return k_m_max * ca2_m * (1 - p_m) - k_m_min * p_m
+        return k_m_plus * ca2_m * (1 - p_m) - k_m_minus * p_m
 
     @staticmethod
-    def __p_gs_dot(k_gs_max: float, k_gs_min: float, ca2_gs: float, p_t: float, p_gs: float) -> float:
+    def __p_gs_dot(k_gs_plus: float, k_gs_minus: float, ca2_gs: float, p_t: float, p_gs: float) -> float:
         """
         Calcium binding probability for gating spring dynamics
-        :param k_gs_max: association constant for gating spring
-        :param k_gs_min: dissociation constant for gating spring
+        :param k_gs_plus: association constant for gating spring
+        :param k_gs_minus: dissociation constant for gating spring
         :param ca2_gs: calcium ion concentration near gating spring
         :param p_t: open channel probability
         :param p_gs: calcium binding probability for gating spring
         :return: time derivative of calcium binding probability for gating spring
         """
-        return k_gs_max * ca2_gs * (1 - p_gs) - k_gs_min * p_gs
+        return k_gs_plus * ca2_gs * (1 - p_gs) - k_gs_minus * p_gs
 
     @staticmethod
     def __p_t(tau_t: float, p_t0: float, p_t: float) -> float:
@@ -184,10 +184,10 @@ class HairBundle:
     # -------------------------------- Helper functions (end) ----------------------------------
 
     def __init__(self, tau_t: float, c_min: float, c_max: float, s_min: float, s_max: float,
-                 delta_e: float, k_m_max: float, k_m_min: float, k_gs_min: float, k_gs_max: float, x_c: float,
-                 temp: float, z_ca: float, d_ca: float, r_m: float, r_gs: float,
-                 v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float, ca2_hb_ext: float,
-                 gamma: float, n: float, lambda_hb: float, k_sp: float, x_sp: float,
+                 delta_e: float, k_m_plus: float, k_m_minus: float, k_gs_plus: float, k_gs_minus: float,
+                 k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
+                 r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
+                 ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, k_sp: float, x_sp: float,
                  k_es: float, x_es: float, d: float):
         # parameters
         self.tau_t = tau_t # finite time constant
@@ -196,8 +196,10 @@ class HairBundle:
         self.s_min = s_min # min slipping rate
         self.s_max = s_max # max slipping rate
         self.delta_e = delta_e # intrinsic energy difference between the transduction channel's two states
-        self.k_m_max = k_m_max
-        self.k_m_min = k_m_min
+        self.k_m_plus = k_m_plus
+        self.k_m_minus = k_m_minus
+        self.k_gs_plus = k_gs_plus
+        self.k_gs_minus = k_gs_minus
         self.k_gs_min = k_gs_min # min gating spring stiffness
         self.k_gs_max = k_gs_max
         self.x_c = x_c # average equilibrium position of the adaptation motors
@@ -278,10 +280,10 @@ class HairBundle:
         return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
     @property
     def p_m_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_m_max, self.k_m_min, self.ca2_m, self.p_t, self.p_m))
+        return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_t, self.p_m))
     @property
     def p_gs_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_gs_max, self.k_gs_min, self.ca2_gs, self.p_t, self.p_gs))
+        return sym.simplify(self.__p_m_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_t, self.p_gs))
     @property
     def p_t_dot(self) -> float:
         return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))
