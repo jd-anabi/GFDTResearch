@@ -1,76 +1,288 @@
-import scipy.constants as sc
-import numpy as np
+import sympy as sym
+import scipy.constants as constants
+from jedi.inference.gradual.typing import Callable
 
 class HairBundle:
-    k_B = sc.k
-    pi = sc.pi
-    q_e = sc.elementary_charge
-    def __init__(self, lambda_hb=130e-9, k_sp=200e-6, k_gs=1000e-6, k_es=140e-6,
-                 n=35, gamma=0.14, x_sp=2.46e-7, x_c=15e-9, x_es=0.0,
-                 d=7e-9, c_max=0.04e-6, c_min=0.0e-6, s_max=0.2e6, s_min=0.0, k_m_plus=1e9, k_m_minus=200e3, k_gs_plus=2e9, k_gs_minus=35e3,
-                 zca=2, dca=800e-12, pca=1e-18, r_m=20e-9, r_gs=10e-9, v_m=-55e-3, cca_in=0, cca_ext=0.25e-3, e_t=0, temp=295.0, p_t_inf=0.5, tau_t=1.0):
-        # constant parameters
-        self.lambda_hb = lambda_hb # hair bundle drag coefficient
-        self.k_sp = k_sp # stiffness of the stereociliary pivot
-        self.k_gs = k_gs # stiffness of gating spring
-        self.k_es = k_es # stiffness of extent spring
-        self.n = n # number of gating springs
-        self.gamma = gamma # geometric conversion factor
-        self.x_sp = x_sp # equilibrium position of the stereociliary pivot
-        self.x_c = x_c # average equilibrium position of the adaptation motors
-        self.x_es = x_es # equilibrium position of extent spring
-        self.d = d # gating spring swing
-        self.c_max = c_max # max climbing rate
-        self.c_min = c_min # min climbing rate
-        self.s_max = s_max # max slipping rate
-        self.s_min = s_min # min slipping rate
-        self.k_m_plus = k_m_plus # association constant of motor
-        self.k_m_minus = k_m_minus # dissociation constant of motor
-        self.k_gs_plus = k_gs_plus # association constant of gating spring
-        self.k_gs_minus = k_gs_minus # dissociation constant of gating spring
-        self.zca = zca # valence number for calcium ion
-        self.dca = dca # diffusion constant for calcium ion
-        self.pca = pca # calcium ion permeability of the channel
-        self.r_m = r_m # distance of adaptation motor from corresponding transduction channel
-        self.r_gs = r_gs # distance of gating spring from corresponding transduction chanel
-        self.v_m = v_m # resting membrane potential of the hair cell
-        self.cca_in = cca_in # intracellular calcium ion concentration
-        self.cca_ext = cca_ext # extracellular calcium ion concentration
-        self.e_t = e_t # reversal voltage for calcium
-        self.temp = temp # temperature
-        self.p_t_inf = p_t_inf # channel open probability at equilibrium
+    # -------------------------------- Helper functions (begin) --------------------------------
+    @staticmethod
+    def __k_gs(p_gs: float, k_gs_min: float, k_gs_max: float) -> float:
+        """
+        Gating spring stiffness
+        :param p_gs: calcium binding probability for gating spring
+        :param k_gs_min: min gating spring stiffness
+        :param k_gs_max: max gating spring stiffness
+        :return: equation for the gating spring stiffness
+        """
+        return k_gs_max - p_gs * (k_gs_max - k_gs_min)
+
+    @staticmethod
+    def __f_gs(k_gs: float, p_t: float, x_hb: float, x_a: float, x_c: float, d: float, gamma: float) -> float:
+        """
+        Gating spring force
+        :param k_gs: stiffness of gating spring
+        :param p_t: open channel probability
+        :param x_hb: hair bundle displacement
+        :param x_a: adaptation motor displacement
+        :param x_c: average equilibrium position of adaptation motor
+        :param d: channel gate opening distance
+        :param gamma: geometric conversion factor
+        :return: equation for the gating spring force
+        """
+        return -1 * k_gs * (gamma * x_hb - x_a + x_c - p_t * d)
+
+    @staticmethod
+    def __s(s_min: float, s_max: float, p_m: float) -> float:
+        """
+        Slipping rate
+        :param s_min: minimum slipping rate
+        :param s_max: maximum slipping rate
+        :param p_m: calcium binding probability for adaptation motors
+        :return: equation for the slipping rate
+        """
+        return s_min + p_m * (s_max - s_min)
+
+    @staticmethod
+    def __c(c_min: float, c_max: float, p_m: float) -> float:
+        """
+        Climbing rate
+        :param c_min: minimum climbing rate
+        :param c_max: maximum climbing rate
+        :param p_m: calcium binding probability for adaptation motors
+        :return: equation for the climbing rate
+        """
+        return c_max - p_m * (c_max - c_min)
+
+    @staticmethod
+    def __p_t0(delta_e: float, temp: float, k_gs: float, d: float, x_hb: float, x_a: float, x_c: float) -> float:
+        """
+        Open channel probability at equilibrium
+        :param delta_e: intrinsic energy difference between the transduction channel's two states
+        :param temp: temperature
+        :param k_gs: gating spring stiffness
+        :param d: channel gate opening distance
+        :param x_hb: hair bundle displacement
+        :param x_a: adaptation motor displacement
+        :param x_c: average equilibrium position of adaptation motor
+        :return: equation fot the open channel probability at equilibrium
+        """
+        return 1 / (1 + sym.exp(delta_e / (constants.k * temp) - k_gs * d / (constants.k * temp) * (x_hb - x_a + x_c - d / 2)))
+
+    @staticmethod
+    def __ca2_m(z_ca: float, d_ca: float, r_m: float, v_m: float, e_t_ca: float, p_t_ca: float, temp: float,
+                ca2_hb_in: float, ca2_hb_ext: float, p_t: float) -> float:
+        """
+        Calcium ion concentration near adaptation motor
+        :param z_ca: valence number
+        :param d_ca: diffusion constant
+        :param r_m: distance of adaptation motor
+        :param v_m: voltage
+        :param e_t_ca: reversal voltage for calcium
+        :param p_t_ca: transduction-channel permeability fo calcium
+        :param temp: temperature
+        :param ca2_hb_in: intracellular concentration
+        :param ca2_hb_ext: extracellular concentration
+        :param p_t: open channel probability
+        :return: equation for the calcium ion concentration near adaptation motor
+        """
+        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (constants.k * temp))
+        g_t_ca_max = p_t_ca * z_ca**2 * constants.elementary_charge**2 / (constants.k * temp) * (ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (v_m - e_t_ca)
+        return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_m)
+
+    @staticmethod
+    def __ca2_gs(z_ca: float, d_ca: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, temp: float,
+                ca2_hb_in: float, ca2_hb_ext: float, p_t: float) -> float:
+        """
+        Calcium ion concentration near gating spring
+        :param z_ca: valence number
+        :param d_ca: diffusion constant
+        :param r_m: distance of gating spring
+        :param v_m: voltage
+        :param e_t_ca: reversal voltage for calcium
+        :param p_t_ca: transduction-channel permeability fo calcium
+        :param temp: temperature
+        :param ca2_hb_in: intracellular concentration
+        :param ca2_hb_ext: extracellular concentration
+        :param p_t: open channel probability
+        :return: equation for the calcium ion concentration near gating spring
+        """
+        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (constants.k * temp))
+        g_t_ca_max = p_t_ca * z_ca ** 2 * constants.elementary_charge ** 2 / (constants.k * temp) * (
+                    ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (v_m - e_t_ca)
+        return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_gs)
+
+
+    # -------------------------------- ODEs --------------------------------
+    @staticmethod
+    def __x_hb_dot(gamma: float, n: float, f_gs: float, lambda_hb: float, k_sp: float, x_sp: float, x_hb: float) -> float:
+        """
+        Hair bundle displacement dynamics
+        :param gamma: geometric conversion factor
+        :param n: number of gating springs
+        :param f_gs: gating spring force
+        :param lambda_hb: hair bundle drag coefficient
+        :param k_sp: stiffness of stereocilliary pivot
+        :param x_sp: displacement of stereocilliary pivot
+        :param x_hb: hair bundle displacement`
+        :return: time derivative of hair bundle displacement
+        """
+        return -1 * (gamma * n * f_gs + k_sp * (x_hb - x_sp)) / lambda_hb
+
+    @staticmethod
+    def __x_a_dot(s: float, c: float, f_gs: float, k_es: float, x_es: float, x_a: float) -> float:
+        """
+        Adaptation motor displacement dynamics
+        :param s: slipping rate
+        :param c: climbing rate
+        :param f_gs: gating spring force
+        :param k_es: stiffness of the extent spring
+        :param x_es: displacement of the extent spring
+        :param x_a: adaptation motor displacement
+        :return: time derivative of adaptation motor displacement
+        """
+        return -1 * c + s * (f_gs - k_es * (x_a + x_es))
+
+    @staticmethod
+    def __p_m_dot(k_m_max: float, k_m_min: float, ca2_m: float, p_t: float, p_m: float) -> float:
+        """
+        Calcium binding probability for adaptation motors dynamics
+        :param k_m_max: association constant for adaptation motors
+        :param k_m_min: dissociation constant for adaptation motors
+        :param ca2_m: calcium ion concentration near adaptation motor
+        :param p_t: open channel probability
+        :param p_m: calcium binding probability for adaptation motors
+        :return: time derivative of calcium binding probability for adaptation motors
+        """
+        return k_m_max * ca2_m * (1 - p_m) - k_m_min * p_m
+
+    @staticmethod
+    def __p_gs_dot(k_gs_max: float, k_gs_min: float, ca2_gs: float, p_t: float, p_gs: float) -> float:
+        """
+        Calcium binding probability for gating spring dynamics
+        :param k_gs_max: association constant for gating spring
+        :param k_gs_min: dissociation constant for gating spring
+        :param ca2_gs: calcium ion concentration near gating spring
+        :param p_t: open channel probability
+        :param p_gs: calcium binding probability for gating spring
+        :return: time derivative of calcium binding probability for gating spring
+        """
+        return k_gs_max * ca2_gs * (1 - p_gs) - k_gs_min * p_gs
+
+    @staticmethod
+    def __p_t(tau_t: float, p_t0: float, p_t: float) -> float:
+        """
+        Open channel probability dynamics
+        :param tau_t: finite time constant for open channel
+        :param p_t0: open channel probability at equilibrium
+        :param p_t: open channel probability
+        :return: time derivative of open channel probability
+        """
+        return (p_t0 - p_t) / tau_t
+    # -------------------------------- Helper functions (end) ----------------------------------
+
+    def __init__(self, tau_t: float, c_min: float, c_max: float, s_min: float, s_max: float,
+                 delta_e: float, k_m_max: float, k_m_min: float, k_gs_min: float, k_gs_max: float, x_c: float,
+                 temp: float, z_ca: float, d_ca: float, r_m: float, r_gs: float,
+                 v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float, ca2_hb_ext: float,
+                 gamma: float, n: float, lambda_hb: float, k_sp: float, x_sp: float,
+                 k_es: float, x_es: float, d: float):
+        # parameters
         self.tau_t = tau_t # finite time constant
+        self.c_min = c_min # min climbing rate
+        self.c_max = c_max
+        self.s_min = s_min # min slipping rate
+        self.s_max = s_max # max slipping rate
+        self.delta_e = delta_e # intrinsic energy difference between the transduction channel's two states
+        self.k_m_max = k_m_max
+        self.k_m_min = k_m_min
+        self.k_gs_min = k_gs_min # min gating spring stiffness
+        self.k_gs_max = k_gs_max
+        self.x_c = x_c # average equilibrium position of the adaptation motors
+        self.temp = temp
+        self.z_ca = z_ca
+        self.d_ca = d_ca
+        self.r_m = r_m
+        self.r_gs = r_gs
+        self.v_m = v_m
+        self.e_t_ca = e_t_ca
+        self.p_t_ca = p_t_ca
+        self.ca2_hb_in = ca2_hb_in
+        self.ca2_hb_ext = ca2_hb_ext
+        self.gamma = gamma
+        self.n = n
+        self.lambda_hb = lambda_hb
+        self.k_sp = k_sp
+        self.x_sp = x_sp
+        self.k_es = k_es
+        self.x_es = x_es
+        self.d = d
 
-        # initial conditions
-        #self.ca_plus_m0 = (self.p_t_inf * self.pca * self.zca ** 2 * self.q_e**2 * self.v_m * self.cca_ext / (self.k_B * self.temp * (1 - np.exp(self.zca * self.q_e * self.v_m / (self.k_B * self.temp))))) / (2 * self.pi * self.zca * self.q_e * self.dca * self.r_m)
+        # hair bundle variables
+        self.x_hb = sym.symbols('x_hb') # hair bundle displacement
+        self.x_a = sym.symbols('x_a') # adaptation motor displacement
+        self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
+        self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
+        self.p_t = sym.symbols('p_t') # open channel probability
+        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs, self.p_t)
 
-        def model(t, w):
-            """
-            Set of differential equations to describe the hair-bundle dynamics
-            :param w: array of state variables
-            :param t: time
-            :return: solution array
-            """
-            x_hb, x_a, p_gs = w
+        # ODEs
+        odes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot, self.p_t_dot)
 
-            # variables to tidy things up and make it more readable
-            #ghk_exp = np.exp(self.zca*self.q_e*self.v_m/(self.k_B*self.temp))
-            #g_t_ca_max = self.pca * self.zca**2 * self.q_e**2 * (self.cca_in - self.cca_ext)/(self.k_B * self.temp * (1 - ghk_exp))
-            #e_conc_den = 2*self.pi*self.zca*self.q_e**self.dca*self.r_m
-            ca_plus_m = (self.p_t_inf * self.pca * self.zca ** 2 * self.q_e ** 2 * self.v_m * self.cca_ext / (self.k_B * self.temp * (1 - np.exp(self.zca * self.q_e * self.v_m / (self.k_B * self.temp))))) / (2 * self.pi * self.zca * self.q_e * self.dca * self.r_m)
-            #A = np.exp(np.log(1 / self.p_t_inf - 1) + (self.k_gs_minus + (self.k_gs_plus - self.k_gs_minus) * p_gs) * self.d * (self.x_c - self.d / 2) / (self.k_B * self.temp))
-            p_m = 1 / (1 + self.k_m_minus / (self.k_m_plus * ca_plus_m))
+        self.ode_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(odes)) # lambdify ode system
 
-            # create array f = [x_hb'(t), x_a'(t), p_m'(t), p_t'(t)]
-            x_hb_dot = (-1 * self.gamma * self.n * (self.k_gs_minus + (self.k_gs_plus - self.k_gs_minus) * p_gs) * (self.gamma * x_hb - x_a + self.x_c - self.d / (1 + (np.exp(np.log(1 / self.p_t_inf - 1) + (self.k_gs_minus + (self.k_gs_plus - self.k_gs_minus) * p_gs) * self.d * (self.x_c - self.d / 2) / (self.k_B * self.temp))) * np.exp(-1 * self.k_gs * self.d * (x_hb - x_a + self.x_c - self.d / 2))) - self.k_sp * (x_hb - self.x_sp))) / self.lambda_hb
-            x_a_dot = (self.c_max - self.c_min) * p_m - self.c_max + ((self.s_max - self.s_min) * p_m + self.s_min) * ((self.k_gs_minus + (self.k_gs_plus - self.k_gs_minus) * p_gs) * (self.gamma * x_hb - x_a + self.x_c - self.d / (1 + (np.exp(np.log(1 / self.p_t_inf - 1) + (self.k_gs_minus + (self.k_gs_plus - self.k_gs_minus) * p_gs) * self.d * (self.x_c - self.d / 2) / (self.k_B * self.temp))) * np.exp(-1 * self.k_gs * self.d * (x_hb - x_a + self.x_c - self.d / 2)))) - self.k_es * (x_a - self.k_es))
-            p_gs_dot = self.k_gs_plus * ca_plus_m * (1 - p_gs) - self.k_gs_minus * p_gs
-            #x_hb_dot = (-1 * self.gamma * self.n * (self.gamma*x_hb - x_a + self.x_c - ((1/(1 + A*np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp))))))*self.d) - self.k_sp * (x_hb - self.x_sp)) / self.lambda_hb
-            #x_a_dot = (-1*self.k_gs*(self.c_max - p_m*(self.c_max - self.c_min))) + (self.s_min + p_m*(self.s_max - self.s_min)) * ((self.gamma*x_hb - x_a + self.x_c - ((1/(1 + A*np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp))))))*self.d) - self.k_es * (x_a + self.x_es))
-            #p_m_dot = -1*self.k_m_plus * ((((1/(1 + A*np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp))))))*g_t_ca_max*(self.v_m - self.e_t))/e_conc_den) * (1 - p_m) - self.k_m_minus * p_m
-            #p_t_dot = ((1/(1 + A*np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp))))) - p_t) / self.tau_t
-            #p_t_dot = ((-self.k_gs*self.d*A*np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp)))*(x_hb_dot - x_a_dot))/(A + np.exp((-1*self.k_gs*self.d * (x_hb - x_a + self.x_c - self.d/2)/(self.k_B*self.temp))))**2)
-            f = [x_hb_dot, x_a_dot, p_gs_dot]
-            return f
+        def odes_for_solver(t: list, z: tuple) -> Callable:
+            x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var = z
+            return self.ode_sym_lambda_func(x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var)
 
-        self.model = model
+        self.odes_for_solver = odes_for_solver
+
+    # -------------------------------- Varying parameters (begin) ----------------------------------
+    @property
+    def k_gs(self) -> float:
+        return sym.simplify(self.__k_gs(self.p_gs, self.k_gs_min, self.k_gs_max))
+
+    @property
+    def f_gs(self) -> float:
+        return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.gamma, self.d))
+
+    @property
+    def s(self) -> float:
+        return sym.simplify(self.__s(self.s_min, self.s_max, self.p_m))
+
+    @property
+    def c(self) -> float:
+        return sym.simplify(self.__c(self.c_min, self.c_max, self.p_m))
+
+    @property
+    def p_t0(self) -> float:
+        return sym.simplify(self.__p_t0(self.delta_e, self.temp, self.k_gs, self.d, self.x_hb, self.x_a, self.x_c))
+
+    @property
+    def ca2_m(self) -> float:
+        return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_m, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
+
+    @property
+    def ca2_gs(self) -> float:
+        return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
+    # -------------------------------- Varying parameters (end) ----------------------------------
+
+    # -------------------------------- ODEs (begin) ----------------------------------
+    @property
+    def x_hb_dot(self) -> float:
+        return sym.simplify(self.__x_hb_dot(self.gamma, self.n, self.f_gs, self.lambda_hb, self.k_sp, self.x_sp, self.x_hb))
+    @property
+    def x_a_dot(self) -> float:
+        return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
+    @property
+    def p_m_dot(self) -> float:
+        return sym.simplify(self.__p_m_dot(self.k_m_max, self.k_m_min, self.ca2_m, self.p_t, self.p_m))
+    @property
+    def p_gs_dot(self) -> float:
+        return sym.simplify(self.__p_m_dot(self.k_gs_max, self.k_gs_min, self.ca2_gs, self.p_t, self.p_gs))
+    @property
+    def p_t_dot(self) -> float:
+        return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))
+    # -------------------------------- ODEs (end) ----------------------------------
