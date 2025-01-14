@@ -6,7 +6,7 @@ import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
-    nd = True
+    nd = False
     if nd:
         # read non-dimensional hair cell from csv file
         with open('nd_hair_cell_0.csv', newline='') as csvfile:
@@ -39,7 +39,7 @@ if __name__ == '__main__':
         t = np.linspace(t_interval[0], t_interval[1], 1000000)
 
         # initial
-        hair_bundle = hb.HairBundleDimensional(*[float(i) for i in rows[1]])
+        hair_bundle = hb.HairBundle(*[float(i) for i in rows[1]])
         w_sol = sp.integrate.solve_ivp(hair_bundle.odes_for_solver, t_interval, z0, t_eval=t, method='LSODA',
                                        dense_output=True)
         plt.plot(t, w_sol.y[0])
