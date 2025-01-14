@@ -97,7 +97,7 @@ class HairBundle:
         Calcium ion concentration near gating spring
         :param z_ca: valence number
         :param d_ca: diffusion constant
-        :param r_m: distance of gating spring
+        :param r_gs: distance of gating spring
         :param v_m: voltage
         :param e_t_ca: reversal voltage for calcium
         :param p_t_ca: transduction-channel permeability fo calcium
@@ -192,35 +192,35 @@ class HairBundle:
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
-        self.c_max = c_max
+        self.c_max = c_max # max climbing rate
         self.s_min = s_min # min slipping rate
         self.s_max = s_max # max slipping rate
         self.delta_e = delta_e # intrinsic energy difference between the transduction channel's two states
-        self.k_m_plus = k_m_plus
-        self.k_m_minus = k_m_minus
-        self.k_gs_plus = k_gs_plus
-        self.k_gs_minus = k_gs_minus
+        self.k_m_plus = k_m_plus # association constant for adaptation motors
+        self.k_m_minus = k_m_minus # dissociation constant for adaptation motors
+        self.k_gs_plus = k_gs_plus # association constant for gating springs
+        self.k_gs_minus = k_gs_minus # dissociation constant for gating springs
         self.k_gs_min = k_gs_min # min gating spring stiffness
-        self.k_gs_max = k_gs_max
+        self.k_gs_max = k_gs_max # max gating spring stiffness
         self.x_c = x_c # average equilibrium position of the adaptation motors
-        self.temp = temp
-        self.z_ca = z_ca
-        self.d_ca = d_ca
-        self.r_m = r_m
-        self.r_gs = r_gs
-        self.v_m = v_m
-        self.e_t_ca = e_t_ca
-        self.p_t_ca = p_t_ca
-        self.ca2_hb_in = ca2_hb_in
-        self.ca2_hb_ext = ca2_hb_ext
-        self.gamma = gamma
-        self.n = n
-        self.lambda_hb = lambda_hb
-        self.k_sp = k_sp
-        self.x_sp = x_sp
-        self.k_es = k_es
-        self.x_es = x_es
-        self.d = d
+        self.temp = temp # temperature
+        self.z_ca = z_ca # valence number
+        self.d_ca = d_ca # diffusion constant
+        self.r_m = r_m # distance of adaptation motor
+        self.r_gs = r_gs # distance of gating spring
+        self.v_m = v_m # membrane voltage
+        self.e_t_ca = e_t_ca # reversal voltage
+        self.p_t_ca = p_t_ca # transduction-channel permeability fo calcium
+        self.ca2_hb_in = ca2_hb_in # intracellular concentration
+        self.ca2_hb_ext = ca2_hb_ext # extracellular concentration
+        self.gamma = gamma # geometric conversion factor
+        self.n = n # number of gating springs
+        self.lambda_hb = lambda_hb # viscous drag coefficient
+        self.k_sp = k_sp # stereocilliary pivot stiffness
+        self.x_sp = x_sp # stereocilliary pivot displacement
+        self.k_es = k_es # extent spring stiffness
+        self.x_es = x_es # extent spring displacement
+        self.d = d # channel gate opening distance
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement

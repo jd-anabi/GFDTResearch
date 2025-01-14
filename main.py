@@ -6,7 +6,7 @@ import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
-    nd = False
+    nd = True
     if nd:
         # read non-dimensional hair cell from csv file
         with open('nd_hair_cell_0.csv', newline='') as csvfile:
