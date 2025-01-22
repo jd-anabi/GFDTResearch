@@ -66,13 +66,35 @@ class HairBundleNonDimensional:
         :param delta_e: intrinsic energy difference between the transduction channel's two states
         :param k_gs: gating spring stiffness
         :param x_gs: gating spring displacement
-        :return: equation fot the open channel probability at equilibrium
+        :return: equation for the open channel probability at equilibrium
         """
         return 1 / (1 + sym.exp(u_gs_max * (delta_e - k_gs * (x_gs - 0.5))))
 
+    @staticmethod
+    def __hb_noise(eta_hb: float, max_time: float, num_steps: int) -> float:
+        """
+        White noise for hair bundle
+        :param eta_hb: noise control variable
+        :param max_time: time interval simulating over
+        :param num_steps: number of discrete time points
+        :return: equation for the hair bundle noise
+        """
+        return eta_hb * np.sqrt(max_time / num_steps) * np.random.normal(0, 1)
+
+    @staticmethod
+    def __a_noise(eta_a: float, max_time: float, num_steps: int) -> float:
+        """
+        White noise for adaptation motor
+        :param eta_a: noise control variable
+        :param max_time: time interval simulating over
+        :param num_steps: number of discrete time points
+        :return: equation for the adaptation motor noise
+        """
+        return eta_a * np.sqrt(max_time / num_steps) * np.random.normal(0, 1)
+
     # -------------------------------- ODEs --------------------------------
     @staticmethod
-    def __x_hb_dot(tau_hb: float, f_gs: float, x_hb: float, epsilon: float) -> float:
+    def __x_hb_dot(tau_hb: float, f_gs: float, x_hb: float, hb_noise: float) -> float:
         """
         Hair bundle displacement dynamics
         :param tau_hb: finite time constant for hair bundle
@@ -80,10 +102,10 @@ class HairBundleNonDimensional:
         :param x_hb: hair bundle displacement
         :return: time derivative of hair bundle displacement
         """
-        return -1 * (f_gs + x_hb - epsilon * np.random.normal()) / tau_hb
+        return -1 * (f_gs + x_hb - hb_noise) / tau_hb
 
     @staticmethod
-    def __x_a_dot(s_max: float, s: float, c: float, f_gs: float, x_a: float, epsilon: float) -> float:
+    def __x_a_dot(s_max: float, s: float, c: float, f_gs: float, x_a: float, a_noise: float) -> float:
         """
         Adaptation motor displacement dynamics
         :param s_max: max slipping rate
@@ -94,7 +116,7 @@ class HairBundleNonDimensional:
         :return: time derivative of adaptation motor displacement
         """
         c_max = 1 - s_max
-        return s_max * s * (f_gs - x_a + epsilon * np.random.normal()) - c_max * c
+        return s_max * s * (f_gs - x_a + a_noise) - c_max * c
 
     @staticmethod
     def __p_m_dot(tau_m: float, ca2_m: float, p_t: float, p_m: float) -> float:
@@ -134,7 +156,8 @@ class HairBundleNonDimensional:
 
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
-                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float, epsilon: float):
+                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float,
+                 eta_hb: float, eta_a: float, max_time: float, num_steps: int):
         # parameters
         self.tau_hb = tau_hb # finite time constant for hair bundle
         self.tau_m = tau_m # finite time constant for adaptation motor
@@ -151,7 +174,10 @@ class HairBundleNonDimensional:
         self.chi_hb = chi_hb # hair bundle conversion factor
         self.chi_a = chi_a # adaptation conversion factor
         self.x_c = x_c # average equilibrium position of the adaptation motors
-        self.epsilon = epsilon # variable that controls noise (0 - no noise, 1 - full noise)
+        self.eta_hb = eta_hb
+        self.eta_a = eta_a
+        self.max_time = max_time
+        self.num_steps = num_steps
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -196,15 +222,23 @@ class HairBundleNonDimensional:
     @property
     def p_t0(self) -> float:
         return sym.simplify(self.__p_t0(self.u_gs_max, self.delta_e, self.k_gs, self.x_gs))
+
+    @property
+    def hb_noise(self) -> float:
+        return sym.simplify(self.__hb_noise(self.eta_hb, self.max_time, self.num_steps))
+
+    @property
+    def a_noise(self) -> float:
+        return sym.simplify(self.__a_noise(self.eta_a, self.max_time, self.num_steps))
     # -------------------------------- Varying parameters (end) ----------------------------------
 
     # -------------------------------- ODEs (begin) ----------------------------------
     @property
     def x_hb_dot(self) -> float:
-        return sym.simplify(self.__x_hb_dot(self.tau_hb, self.f_gs, self.x_hb, self.epsilon))
+        return sym.simplify(self.__x_hb_dot(self.tau_hb, self.f_gs, self.x_hb, self.hb_noise))
     @property
     def x_a_dot(self) -> float:
-        return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a, self.epsilon))
+        return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a, self.a_noise))
     @property
     def p_m_dot(self) -> float:
         return sym.simplify(self.__p_m_dot(self.tau_m, self.ca2_m, self.p_t, self.p_m))
