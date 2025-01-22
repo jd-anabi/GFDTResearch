@@ -102,6 +102,7 @@ class HairBundleNonDimensional:
         :param x_hb: hair bundle displacement
         :return: time derivative of hair bundle displacement
         """
+        print(hb_noise)
         return -1 * (f_gs + x_hb - hb_noise) / tau_hb
 
     @staticmethod
