@@ -1,4 +1,5 @@
 import sympy as sym
+import numpy as np
 from jedi.inference.gradual.typing import Callable
 
 class HairBundleNonDimensional:
@@ -71,7 +72,7 @@ class HairBundleNonDimensional:
 
     # -------------------------------- ODEs --------------------------------
     @staticmethod
-    def __x_hb_dot(tau_hb: float, f_gs: float, x_hb: float) -> float:
+    def __x_hb_dot(tau_hb: float, f_gs: float, x_hb: float, epsilon: float) -> float:
         """
         Hair bundle displacement dynamics
         :param tau_hb: finite time constant for hair bundle
@@ -79,10 +80,10 @@ class HairBundleNonDimensional:
         :param x_hb: hair bundle displacement
         :return: time derivative of hair bundle displacement
         """
-        return -1 * (f_gs + x_hb) / tau_hb
+        return -1 * (f_gs + x_hb - epsilon * np.random.normal()) / tau_hb
 
     @staticmethod
-    def __x_a_dot(s_max: float, s: float, c: float, f_gs: float, x_a: float) -> float:
+    def __x_a_dot(s_max: float, s: float, c: float, f_gs: float, x_a: float, epsilon: float) -> float:
         """
         Adaptation motor displacement dynamics
         :param s_max: max slipping rate
@@ -93,7 +94,7 @@ class HairBundleNonDimensional:
         :return: time derivative of adaptation motor displacement
         """
         c_max = 1 - s_max
-        return s_max * s * (f_gs - x_a) - c_max * c
+        return s_max * s * (f_gs - x_a + epsilon * np.random.normal()) - c_max * c
 
     @staticmethod
     def __p_m_dot(tau_m: float, ca2_m: float, p_t: float, p_m: float) -> float:
@@ -120,7 +121,7 @@ class HairBundleNonDimensional:
         return (ca2_gs * p_t * (1 - p_gs) - p_gs) / tau_gs
 
     @staticmethod
-    def __p_t(tau_t: float, p_t0: float, p_t: float) -> float:
+    def __p_t_dot(tau_t: float, p_t0: float, p_t: float) -> float:
         """
         Open channel probability dynamics
         :param tau_t: finite time constant for open channel
@@ -133,7 +134,7 @@ class HairBundleNonDimensional:
 
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
-                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float):
+                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float, epsilon: float):
         # parameters
         self.tau_hb = tau_hb # finite time constant for hair bundle
         self.tau_m = tau_m # finite time constant for adaptation motor
@@ -150,6 +151,7 @@ class HairBundleNonDimensional:
         self.chi_hb = chi_hb # hair bundle conversion factor
         self.chi_a = chi_a # adaptation conversion factor
         self.x_c = x_c # average equilibrium position of the adaptation motors
+        self.epsilon = epsilon # variable that controls noise (0 - no noise, 1 - full noise)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -199,10 +201,10 @@ class HairBundleNonDimensional:
     # -------------------------------- ODEs (begin) ----------------------------------
     @property
     def x_hb_dot(self) -> float:
-        return sym.simplify(self.__x_hb_dot(self.tau_hb, self.f_gs, self.x_hb))
+        return sym.simplify(self.__x_hb_dot(self.tau_hb, self.f_gs, self.x_hb, self.epsilon))
     @property
     def x_a_dot(self) -> float:
-        return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a))
+        return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a, self.epsilon))
     @property
     def p_m_dot(self) -> float:
         return sym.simplify(self.__p_m_dot(self.tau_m, self.ca2_m, self.p_t, self.p_m))
@@ -211,5 +213,5 @@ class HairBundleNonDimensional:
         return sym.simplify(self.__p_gs_dot(self.tau_gs, self.ca2_gs, self.p_t, self.p_gs))
     @property
     def p_t_dot(self) -> float:
-        return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))
+        return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
     # -------------------------------- ODEs (end) ----------------------------------

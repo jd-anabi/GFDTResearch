@@ -16,18 +16,16 @@ def __linear_response_freq(hb_disp: list) -> np.ndarray:
     hb_acc_freq = sp.fft.fft(hb_acc)
     return np.array([hb_disp_freq[i] / hb_acc_freq[i] for i in range(len(hb_disp))])
 
-def fdt_test(hb_test_runs: list, max_time: int, time_step: float, temp: float) -> bool:
+def fdt_test(hb_test_runs: list, num_steps: int, time_step: float, temp: float) -> np.ndarray:
     fdt_status = True
-    ratio = 1
-    omega = sp.fft.fftfreq(max_time, time_step)
+    ratio = np.zeros(num_steps)
+    omega = sp.fft.fftfreq(num_steps, time_step)
     omega = sp.fft.fftshift(omega)
-    c = __correlation(hb_test_runs, len(hb_test_runs[0]))
+    c = __correlation(hb_test_runs, num_steps)
     c_freq = sp.fft.fft(c)
     c_freq = sp.fft.fftshift(c_freq)
     chi_freq = __linear_response_freq(hb_test_runs[0])
     chi_freq = sp.fft.fftshift(chi_freq)
     for i in range(len(chi_freq)):
-        ratio = omega[i] * chi_freq[i] / (2 * sp.constants.k * temp * chi_freq[i].imag)
-        if not math.isclose(ratio, 1):
-            fdt_status = False
-    return fdt_status
+        ratio[i] = omega[i] * c_freq[i] / (2 * sp.constants.k * temp * chi_freq[i].imag)
+    return ratio
