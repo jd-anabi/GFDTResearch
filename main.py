@@ -4,6 +4,7 @@ import scipy as sp
 import matplotlib.pyplot as plt
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
+import fdt_helper_functions as fdt_hf
 
 if __name__ == '__main__':
     nd = True
@@ -22,18 +23,28 @@ if __name__ == '__main__':
         hb_pos = np.zeros(num_steps)
         time_step = 0
 
+        # number of simulations
+        sim_num = 50
+        hb_sims = np.zeros((sim_num, num_steps))
+
         # initial
         hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]], t_interval[1], num_steps)
-        while time_step < num_steps:
-            w_sol = sp.integrate.solve_ivp(hair_bundle_nd.odes_for_solver, t_interval, z0, t_eval=t, method='LSODA', dense_output=True)
-            if len(w_sol.y[0]) == num_steps:
-                hb_pos[time_step] = w_sol.y[0][time_step]
-                time_step += 1
-            hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]], t_interval[1], num_steps)
+        for i in range(sim_num):
+            while time_step < num_steps:
+                w_sol = sp.integrate.solve_ivp(hair_bundle_nd.odes_for_solver, t_interval, z0, t_eval=t, method='LSODA', dense_output=True)
+                if len(w_sol.y[0]) == num_steps:
+                    hb_pos[time_step] = w_sol.y[0][time_step]
+                    time_step += 1
+                hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]], t_interval[1], num_steps)
+            hb_sims[i] = hb_pos
 
         plt.plot(t, hb_pos)
         plt.xlim(t_interval[0] + 250, t_interval[1] - 150)
         plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
+        plt.show()
+
+        omega, ratio = fdt_hf.fdt_test(hb_sims, num_steps, t_interval[1] / num_steps)
+        plt.plot(omega, ratio)
         plt.show()
     else:
         # read non-dimensional hair cell from csv file
