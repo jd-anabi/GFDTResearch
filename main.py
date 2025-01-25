@@ -1,10 +1,10 @@
 import csv
+import sdeint
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
-import fdt_helper_functions as fdt_hf
 
 if __name__ == '__main__':
     nd = True
@@ -14,15 +14,18 @@ if __name__ == '__main__':
             params = csv.reader(csvfile, delimiter=',')
             rows = [row for row in params]
 
-        z0 = tuple([float(i) for i in rows[0]])
+        z0 = tuple([float(i) for i in rows[0]]) # initial conditions
 
         # time interval
-        t_interval = [0, 500]
-        num_steps = 1000
-        t = np.linspace(t_interval[0], t_interval[1], num_steps)
-        hb_pos = np.zeros(num_steps)
-        time_step = 0
+        t_interval = [0, 5000]
+        dt = 0.1
+        t = np.arange(t_interval[0], t_interval[1], dt)
 
+        # hair bundle
+        hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
+        hb_pos = sdeint.itoEuler(hair_bundle_nd.f, hair_bundle_nd.g, z0, t)
+
+        '''
         # number of simulations
         sim_num = 50
         hb_sims = np.zeros((sim_num, num_steps))
@@ -37,15 +40,19 @@ if __name__ == '__main__':
                     time_step += 1
                 hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]], t_interval[1], num_steps)
             hb_sims[i] = hb_pos
+        '''
+        print(hb_pos[:, 0])
 
-        plt.plot(t, hb_pos)
-        plt.xlim(t_interval[0] + 250, t_interval[1] - 150)
-        plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
+        plt.plot(t, hb_pos[:, 0])
+        #plt.xlim(t_interval[0] + 250, t_interval[1] - 150)
+        #plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
         plt.show()
 
+        '''
         omega, ratio = fdt_hf.fdt_test(hb_sims, num_steps, t_interval[1] / num_steps)
         plt.plot(omega, ratio)
         plt.show()
+        '''
     else:
         # read non-dimensional hair cell from csv file
         with open('hair_cell_0.csv', newline='') as csvfile:
