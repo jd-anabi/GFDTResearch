@@ -14,12 +14,12 @@ if __name__ == '__main__':
 
     # time interval
     t_interval = [0, 1000]
-    dt = 0.00001
+    dt = 1e-4
     t = np.arange(t_interval[0], t_interval[1], dt)
 
     # hair bundle
     hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
-    hb_pos = sdeint.itoint(hair_bundle_nd.f, hair_bundle_nd.g, z0, t)
+    hb_pos = sdeint.stratKP2iS(hair_bundle_nd.f, hair_bundle_nd.g, z0, t, rtol=1e-9)
 
     '''
     # number of simulations
