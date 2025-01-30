@@ -1,8 +1,5 @@
-import inspect
-
 import sympy as sym
 import numpy as np
-from jedi.inference.gradual.typing import Callable
 
 class HairBundleNonDimensional:
     # -------------------------------- Helper functions (begin) --------------------------------
@@ -202,7 +199,7 @@ class HairBundleNonDimensional:
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
         def f(x: list, t: list) -> np.ndarray:
-            return np.ndarray((5,), buffer=np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3], x[4])))
+            return np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3], x[4]))
 
         def g(x: list, t: list) -> np.ndarray:
             a_noise = self.a_noise0 - x[2] * (1 - self.s_min) * self.eta_a

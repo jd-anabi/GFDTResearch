@@ -10,16 +10,17 @@ if __name__ == '__main__':
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
 
-    z0 = tuple([float(i) for i in rows[0]]) # initial conditions
+    x0 = np.array([float(i) for i in rows[0]]) # initial conditions
 
     # time interval
-    t_interval = [0, 1000]
-    dt = 1e-4
+    t_interval = [0, 500]
+    dt = 1e-3
     t = np.arange(t_interval[0], t_interval[1], dt)
 
     # hair bundle
     hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
-    hb_pos = sdeint.stratKP2iS(hair_bundle_nd.f, hair_bundle_nd.g, z0, t, rtol=1e-9)
+    hb_sol = sdeint.itoEuler(hair_bundle_nd.f, hair_bundle_nd.g, x0, t)
+    hb_pos = hb_sol[:, 0]
 
     '''
     # number of simulations
@@ -37,9 +38,8 @@ if __name__ == '__main__':
             hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]], t_interval[1], num_steps)
         hb_sims[i] = hb_pos
     '''
-    print(hb_pos[:, 0])
 
-    plt.plot(t, hb_pos[:, 0])
-    #plt.xlim(t_interval[0] + 250, t_interval[1] - 150)
-    #plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
+    plt.plot(t, hb_pos)
+    plt.xlim(t_interval[0] + 400, t_interval[1])
+    plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
     plt.show()
