@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import hair_bundle_nondimensional as hb_nd
+import fdt_helper_functions as fdt_hf
 
 if __name__ == '__main__':
     # read non-dimensional hair cell from csv file
@@ -15,16 +16,44 @@ if __name__ == '__main__':
     x0 = np.array([float(i) for i in rows[0]]) # initial conditions
 
     # time interval
-    t_interval = [0, 500]
+    t_interval = [0, 300]
     dt = 1e-3
     t = np.arange(t_interval[0], t_interval[1], dt)
 
     # hair bundle
     hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
-    hb_sol = sdeint.itoEuler(hair_bundle_nd.f, hair_bundle_nd.g, x0, t)
-    hb_pos = hb_sol[:, 0]
 
-    plt.plot(t, hb_pos)
-    plt.xlim(t_interval[0] + 400, t_interval[1])
-    plt.ylim(np.min(hb_pos[int(len(t) / 2):]) - 0.25, np.max(hb_pos[int(len(t) / 2):]) + 0.25)
+    # run multiple trials
+    num_trials = 10
+    num_vars = 5
+    hb_sols = np.zeros((num_trials, len(t), num_vars))
+    for n in range(num_trials):
+        hb_sols[n, :, :] = sdeint.itoEuler(hair_bundle_nd.f, hair_bundle_nd.g, x0, t)
+
+    # write to files so we don't have to keep rerunning it
+    n = 0
+    hb_file_names = ['hb_pos_nd0.csv', 'a_pos_nd0.csv', 'p_m_nd0.csv', 'p_gs_nd0.csv', 'p_t_nd0.csv']
+    for file_name in hb_file_names:
+        with open(file_name, 'w+', newline='') as csvfile:
+            row = csv.writer(csvfile, delimiter=',')
+            row.writerows(hb_sols[:, :, n])
+        n += 1
+    hb_pos = hb_sols[:, :, 0]
+    print(hb_pos)
+
+    plt.plot(t, hb_pos[0])
+    plt.xlim(t_interval[0] + 200, t_interval[1])
+    plt.ylim(np.min(hb_pos[0, int(len(t) / 2):]) - 0.25, np.max(hb_pos[0, int(len(t) / 2):]) + 0.25)
     plt.show()
+
+    # fdt
+    '''
+    a_pos = hb_sols[:, :, 1]
+    p_t = hb_sols[:, :, 4]
+    f_hb0 = hair_bundle_nd.f_hb0
+    f_a = hair_bundle_nd.k_gs * (hair_bundle_nd.chi_a * a_pos + p_t) / hair_bundle_nd.tau_hb
+
+    omega, ratio = fdt_hf.fdt_test(hb_pos, len(t), dt, f_a, f_hb0)
+    plt.plot(omega, ratio)
+    plt.show()
+    '''

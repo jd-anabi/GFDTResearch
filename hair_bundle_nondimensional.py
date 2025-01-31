@@ -73,9 +73,8 @@ class HairBundleNonDimensional:
     def __hb_noise(eta: float, tau: float) -> float:
         """
         White noise for hair bundle
-        :param eta_hb: noise control variable
-        :param max_time: time interval simulating over
-        :param num_steps: number of discrete time points
+        :param eta: noise control variable
+        :param tau: finite time constant
         :return: equation for the hair bundle noise
         """
         return eta / tau
@@ -83,13 +82,24 @@ class HairBundleNonDimensional:
     @staticmethod
     def __a_noise0(eta: float, s_max: float, s_min: float) -> float:
         """
-        White noise for hair bundle
-        :param eta_hb: noise control variable
-        :param max_time: time interval simulating over
-        :param num_steps: number of discrete time points
-        :return: equation for the hair bundle noise
+        Time-independent white noise for the adaptation motor
+        :param eta: noise control variable
+        :param s_max: max slipping rate
+        :param s_min: min slipping rate
+        :return: equation for the adaptation motor noise
         """
         return -1 * s_max * s_min * eta
+
+    @staticmethod
+    def __f_hb0(k_gs: float, tau_hb: float, x_c: float) -> float:
+        """
+        Time-independent external force on the hair bundle
+        :param k_gs: gating spring stiffness
+        :param tau_hb: finite time constant
+        :param x_c: average equilibrium position of the adaptation motors
+        :return: time-independent external force on the hair bundle
+        """
+        return -1 * k_gs * x_c / tau_hb
 
     # -------------------------------- ODEs --------------------------------
     @staticmethod
@@ -184,16 +194,6 @@ class HairBundleNonDimensional:
         self.p_t = sym.symbols('p_t') # open channel probability
         hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs, self.p_t)
 
-        '''
-        # ODEs
-
-        def odes_for_solver(t: list, z: tuple) -> tuple:
-            x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var = z
-            return self.ode_sym_lambda_func(x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var)
-
-        self.odes_for_solver = odes_for_solver
-        '''
-
         # SDEs
         sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot, self.p_t_dot)
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
@@ -240,6 +240,10 @@ class HairBundleNonDimensional:
     @property
     def a_noise0(self) -> float:
         return sym.simplify(self.__a_noise0(self.eta_a, self.s_max, self.s_min))
+
+    @property
+    def f_hb0(self) -> float:
+        return sym.simplify(self.__f_hb0(self.k_gs, self.tau_hb, self.x_c))
     # -------------------------------- Varying parameters (end) ----------------------------------
 
     # -------------------------------- ODEs (begin) ----------------------------------
