@@ -47,10 +47,12 @@ if __name__ == '__main__':
     plt.ylim(np.min(hb_pos[0, int(len(t) / 2):]) - 0.25, np.max(hb_pos[0, int(len(t) / 2):]) + 0.25)
     plt.show()
     '''
+
     with open('hb_pos_nd0.csv', newline='') as csvfile:
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
     hb_pos1 = [float(i) for i in rows[0]]
+    #hb_pos1 = hb_pos[0]
 
     plt.plot(t, hb_pos1)
     plt.xlim(t_interval[0] + 200, t_interval[1])
@@ -63,7 +65,7 @@ if __name__ == '__main__':
     plt.xlim(0, 0.5)
     plt.show()
 
-    spon_osc_freq = freq[np.where(hb_pos1_freq == np.max(hb_pos1_freq))[0][0]]
+    spon_osc_freq = freq[np.where(np.abs(hb_pos1_freq) == np.max(np.abs(hb_pos1_freq)))[0][0]]
     print(f'Frequency of spontaneous oscillations: {spon_osc_freq}')
 
     # fdt
