@@ -166,7 +166,7 @@ class HairBundleNonDimensional:
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float,
-                 eta_hb: float, eta_a: float):
+                 eta_hb: float, eta_a: float, p_t_steady: bool):
         # parameters
         self.tau_hb = tau_hb # finite time constant for hair bundle
         self.tau_m = tau_m # finite time constant for adaptation motor
@@ -185,6 +185,7 @@ class HairBundleNonDimensional:
         self.x_c = x_c # average equilibrium position of the adaptation motors
         self.eta_hb = eta_hb # hair bundle diffusion constant
         self.eta_a = eta_a # adaptation motor diffusion constant
+        self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -219,6 +220,8 @@ class HairBundleNonDimensional:
 
     @property
     def f_gs(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_gs))
         return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_gs))
 
     @property
@@ -255,11 +258,17 @@ class HairBundleNonDimensional:
         return sym.simplify(self.__x_a_dot(self.s_max, self.s, self.c, self.f_gs, self.x_a))
     @property
     def p_m_dot(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__p_m_dot(self.tau_m, self.ca2_m, self.p_t0, self.p_m))
         return sym.simplify(self.__p_m_dot(self.tau_m, self.ca2_m, self.p_t, self.p_m))
     @property
     def p_gs_dot(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__p_gs_dot(self.tau_gs, self.ca2_gs, self.p_t0, self.p_gs))
         return sym.simplify(self.__p_gs_dot(self.tau_gs, self.ca2_gs, self.p_t, self.p_gs))
     @property
     def p_t_dot(self) -> float:
+        if self.p_t_steady:
+            return 0
         return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
     # -------------------------------- ODEs (end) ----------------------------------

@@ -18,11 +18,11 @@ if __name__ == '__main__':
 
     # time interval
     t_interval = [0, 300]
-    dt = 1e-5
+    dt = 1e-3
     t = np.arange(t_interval[0], t_interval[1], dt)
 
     # hair bundle
-    hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
+    hair_bundle_nd = hb_nd.HairBundleNonDimensional(*([float(i) for i in rows[1]] + [True]))
 
     # run multiple trials
     num_trials = 1
@@ -64,15 +64,3 @@ if __name__ == '__main__':
 
     spon_osc_freq = freq[np.where(np.abs(hb_pos1_freq) == np.max(np.abs(hb_pos1_freq)))[0][0]]
     print(f'Frequency of spontaneous oscillations: {spon_osc_freq}')
-
-    # fdt
-    '''
-    a_pos = hb_sols[:, :, 1]
-    p_t = hb_sols[:, :, 4]
-    f_hb0 = hair_bundle_nd.f_hb0
-    f_a = hair_bundle_nd.k_gs * (hair_bundle_nd.chi_a * a_pos + p_t) / hair_bundle_nd.tau_hb
-
-    omega, ratio = fdt_hf.fdt_test(hb_pos, len(t), dt, f_a, f_hb0)
-    plt.plot(omega, ratio)
-    plt.show()
-    '''
