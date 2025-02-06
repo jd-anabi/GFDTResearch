@@ -18,15 +18,14 @@ if __name__ == '__main__':
 
     # time interval
     t_interval = [0, 300]
-    dt = 1e-3
+    dt = 1e-5
     t = np.arange(t_interval[0], t_interval[1], dt)
 
     # hair bundle
     hair_bundle_nd = hb_nd.HairBundleNonDimensional(*[float(i) for i in rows[1]])
 
-    '''
     # run multiple trials
-    num_trials = 10
+    num_trials = 1
     num_vars = 5
     hb_sols = np.zeros((num_trials, len(t), num_vars))
     for n in range(num_trials):
@@ -41,20 +40,18 @@ if __name__ == '__main__':
             row.writerows(hb_sols[:, :, n])
         n += 1
     hb_pos = hb_sols[:, :, 0]
+    p_t = hb_sols[:, :, 4]
 
-    plt.plot(t, hb_pos[0])
-    plt.xlim(t_interval[0] + 200, t_interval[1])
-    plt.ylim(np.min(hb_pos[0, int(len(t) / 2):]) - 0.25, np.max(hb_pos[0, int(len(t) / 2):]) + 0.25)
-    plt.show()
     '''
-
     with open('hb_pos_nd0.csv', newline='') as csvfile:
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
     hb_pos1 = [float(i) for i in rows[0]]
-    #hb_pos1 = hb_pos[0]
+    '''
+    hb_pos1 = hb_pos[0]
 
     plt.plot(t, hb_pos1)
+    plt.plot(t, p_t[0])
     plt.xlim(t_interval[0] + 200, t_interval[1])
     plt.ylim(np.min(hb_pos1[int(len(t) / 2):]) - 0.25, np.max(hb_pos1[int(len(t) / 2):]) + 0.25)
     plt.show()
