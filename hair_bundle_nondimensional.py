@@ -193,17 +193,26 @@ class HairBundleNonDimensional:
         self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
         self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
         self.p_t = sym.symbols('p_t') # open channel probability
-        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs, self.p_t)
 
-        # SDEs
-        sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot, self.p_t_dot)
+        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs) # hb sympy symbols
+        sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot)  # SDEs
+
+        # check if we don't want to use the steady state solution for the open channel probability
+        if not self.p_t_steady:
+            hb_symbols = hb_symbols + sym.Tuple(self.p_t)
+            sdes = sdes + sym.Tuple(self.p_t_dot)
+
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
         def f(x: list, t: list) -> np.ndarray:
+            if self.p_t_steady:
+                return np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3]))
             return np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3], x[4]))
 
         def g(x: list, t: list) -> np.ndarray:
             a_noise = self.a_noise0 - x[2] * (1 - self.s_min) * self.eta_a
+            if self.p_t_steady:
+                return np.diag([self.hb_noise, a_noise, 0, 0])
             return np.diag([self.hb_noise, a_noise, 0, 0, 0])
 
         self.f = f
@@ -268,7 +277,5 @@ class HairBundleNonDimensional:
         return sym.simplify(self.__p_gs_dot(self.tau_gs, self.ca2_gs, self.p_t, self.p_gs))
     @property
     def p_t_dot(self) -> float:
-        if self.p_t_steady:
-            return 0
         return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
     # -------------------------------- ODEs (end) ----------------------------------
