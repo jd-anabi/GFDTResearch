@@ -20,7 +20,7 @@ if __name__ == '__main__':
     t = np.arange(0, 300, dt)
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 10
+    num_trials = 50
     args = (t, True, params, x0)
     with mp.Pool() as pool:
         hb_sols = pool.starmap(helpers.nd_hb_sols, [args for i in range(num_trials)])
