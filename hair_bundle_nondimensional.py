@@ -165,8 +165,8 @@ class HairBundleNonDimensional:
 
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
-                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float, x_c: float,
-                 eta_hb: float, eta_a: float, p_t_steady: bool):
+                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float,
+                 x_c: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool):
         # parameters
         self.tau_hb = tau_hb # finite time constant for hair bundle
         self.tau_m = tau_m # finite time constant for adaptation motor
@@ -185,7 +185,16 @@ class HairBundleNonDimensional:
         self.x_c = x_c # average equilibrium position of the adaptation motors
         self.eta_hb = eta_hb # hair bundle diffusion constant
         self.eta_a = eta_a # adaptation motor diffusion constant
+        self.omega = omega # frequency of stimulus force
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
+
+        def sin(t: float) -> float:
+            """
+            Sinusoidal stimulus force
+            :param t: time
+            :return: equation for a sinusoidal stimulus
+            """
+            return np.sin(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -204,12 +213,15 @@ class HairBundleNonDimensional:
 
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
-        def f(x: list, t: list) -> np.ndarray:
+        def f(x: list, t: float) -> np.ndarray:
+            x_sf = sin(t)
             if self.p_t_steady:
-                return np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3]))
-            return np.array(self.sde_sym_lambda_func(x[0], x[1], x[2], x[3], x[4]))
+                sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
+                return sde_sys
+            sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3], x[4]))
+            return sde_sys
 
-        def g(x: list, t: list) -> np.ndarray:
+        def g(x: list, t: float) -> np.ndarray:
             a_noise = self.a_noise0 - x[2] * (1 - self.s_min) * self.eta_a
             if self.p_t_steady:
                 return np.diag([self.hb_noise, a_noise, 0, 0])

@@ -14,16 +14,20 @@ if __name__ == '__main__':
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
     x0 = np.array([float(i) for i in rows[0]][:4]) # initial conditions
+    s_osc = 0 # spontaneous oscillation frequency for this hair bundle
     params = [float(i) for i in rows[1]]
 
     dt = 1e-3
-    t = np.arange(0, 300, dt)
+    t = np.arange(0, 2000, dt)
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 10
-    args = (t, True, params, x0)
+    num_trials = 100
+    args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
-        hb_sols = pool.starmap(helpers.nd_hb_sols, [args for i in range(num_trials)])
+        for i in range(2 * num_trials):
+            s_osc_curr = s_osc + (i - num_trials) * s_osc / num_trials
+            args_list[i] = (t, True, s_osc_curr, params, x0)
+        hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
 
     # write to files so we don't have to keep rerunning it
     '''
@@ -43,7 +47,7 @@ if __name__ == '__main__':
 
     hb_pos0 = hb_sols[0][:, 0]
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 200, t[-1])
+    plt.xlim(t[0] + 1950, t[-1])
     plt.ylim(np.min(hb_pos0[int(len(t) / 2):]) - 0.25, np.max(hb_pos0[int(len(t) / 2):]) + 0.25)
     plt.show()
 
