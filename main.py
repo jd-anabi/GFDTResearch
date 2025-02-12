@@ -6,7 +6,6 @@ import scipy as sp
 import multiprocessing as mp
 
 import helpers
-import fdt_helper_functions as fdt_hf
 
 if __name__ == '__main__':
     # read non-dimensional hair cell from csv file
@@ -14,18 +13,20 @@ if __name__ == '__main__':
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
     x0 = np.array([float(i) for i in rows[0]][:4]) # initial conditions
-    s_osc = 0 # spontaneous oscillation frequency for this hair bundle
+    s_osc = 0.07 # spontaneous oscillation frequency for this hair bundle
     params = [float(i) for i in rows[1]]
 
     dt = 1e-3
-    t = np.arange(0, 2000, dt)
+    t = np.arange(0, 1000, dt)
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 100
+    num_trials = 10
+    omegas = np.zeros(2 * num_trials)
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
         for i in range(2 * num_trials):
             s_osc_curr = s_osc + (i - num_trials) * s_osc / num_trials
+            omegas[i] = s_osc_curr
             args_list[i] = (t, True, s_osc_curr, params, x0)
         hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
 
@@ -45,9 +46,12 @@ if __name__ == '__main__':
     hb_pos1 = [float(i) for i in rows[0]]
     '''
 
-    hb_pos0 = hb_sols[0][:, 0]
+    hb_pos_trials = np.zeros(2 * num_trials, dtype=np.ndarray)
+    for i in range(2 * num_trials):
+        hb_pos_trials[i] = hb_sols[i][:, 0]
+    hb_pos0 = hb_pos_trials[0]
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 1950, t[-1])
+    plt.xlim(t[0] + 900, t[-1])
     plt.ylim(np.min(hb_pos0[int(len(t) / 2):]) - 0.25, np.max(hb_pos0[int(len(t) / 2):]) + 0.25)
     plt.show()
 
@@ -59,3 +63,11 @@ if __name__ == '__main__':
 
     spon_osc_freq = freq[np.where(np.abs(hb_pos1_freq) == np.max(np.abs(hb_pos1_freq)))[0][0]]
     print(f'Frequency of spontaneous oscillations: {spon_osc_freq}')
+
+    x_sfs = np.zeros(2 * num_trials, dtype=np.ndarray)
+    for i in range(len(x_sfs)):
+        x_sfs[i] = np.array([np.sin(omegas[i] * j) for j in t])
+    hb_pos_trials = list(hb_pos_trials)
+    x_sfs = list(x_sfs)
+    plt.plot(omegas, helpers.fdt_ratio(hb_pos_trials, x_sfs))
+    plt.show()
