@@ -2,7 +2,7 @@ import sdeint
 import numpy as np
 import scipy.fft as ffts
 import scipy.signal as signal
-from sympy import Symbol, symbols
+import scipy.constants as constants
 
 import hair_bundle_nondimensional as hb_nd
 
@@ -29,34 +29,47 @@ def auto_corr(hb_pos: list) -> np.ndarray:
     c = signal.correlate(hb_pos, hb_pos, mode='full', method='auto')
     return c[len(hb_pos) - 1:]
 
-def lin_resp_freq(hb_pos: list, x_sf: list) -> complex:
+def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> complex:
     """
-    Returns the linear response function of the hair bundle with a stimulating force applied
-    :param hb_pos: hair bundle position
+    Returns the linear response function, at a specific frequency, of the hair bundle (ran over multipl trials) with a stimulating force applied
+    :param omega: the frequency tin calculate the response function at
+    :param hb_trials: trials of hair bundle position
     :param x_sf: stimulating force
+    :param dt: time step, otherwise known as the sample spacing
     :return: the linear response function
     """
-    hb_pos_freq = ffts.fftshift(ffts.fft(hb_pos - np.mean(hb_pos))) # type: np.ndarray
-    x_sf_freq = ffts.fftshift(ffts.fft(x_sf - np.mean(x_sf))) # type: np.ndarray
-    hb_pos_freq_mean = np.mean(np.abs(hb_pos_freq))
-    x_sf_freq_max = np.max(np.abs(x_sf_freq))
-    return hb_pos_freq_mean / x_sf_freq_max
+    # transfer to the frequency domain
+    hb_trials_freq = ffts.fft(hb_trials - np.mean(hb_trials, axis=1, keepdims=True))
+    x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
+    # shift ffts
+    hb_trials_freq = ffts.fftshift(hb_trials_freq, axes=1)
+    x_sf_freq = ffts.fftshift(x_sf_freq) # type: np.ndarray
+    # generate frequency array and shift it
+    freqs = ffts.fftfreq(len(x_sf), d=dt)
+    freqs = ffts.fftshift(freqs)
+    # now for the fun (hard) part, extracting the values at a given frequency
+    hb_trials_freq_avg = np.mean(hb_trials_freq, axis=0) # average over all the trials
+    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
+    return hb_trials_freq_avg[index] / x_sf_freq[index]
 
-def fdt_ratio(hb_pos_trials: list, x_sfs: list) -> np.ndarray:
+def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray:
     """
-    Returns the fluctuation-response ratio given a set of hair-bundle positions (driven at different frequencies)
-    :param hb_pos_trials: set of hair-bundle positions at different frequencies
-    :param x_sfs: set of applied stimulus force to the hair bundle at different frequencies
+    Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
+    :param omega: the frequency to calculate the ratio at
+    :param hb_trials: set of an ensemble of hair-bundle positions at different frequencies
+    :param x_sf: applied stimulus force at a given frequency omega
+    :param dt: time step
     :return: the fluctuation-response ratio at different frequencies
     """
-    auto_corrs = np.zeros(len(hb_pos_trials), dtype=np.ndarray)
-    lin_resp_freqs = np.zeros(len(hb_pos_trials), dtype=complex)
-    for i in range(len(hb_pos_trials)):
-        auto_corrs[i] = auto_corr(hb_pos_trials[i])
-        lin_resp_freqs[i] = lin_resp_freq(hb_pos_trials[i], x_sfs[i])
-    auto_corrs_freqs = ffts.fftshift(ffts.fft(auto_corrs, axis=1), axes=1) # type: np.ndarray
-    theta = np.zeros(len(hb_pos_trials), dtype=float)
-    for i in range(len(hb_pos_trials)):
-        omega_index = np.where(np.abs(auto_corrs_freqs[i]) == np.max(np.abs(auto_corrs_freqs[i])))
-        theta[i] = auto_corrs_freqs[i][omega_index] / np.imag(lin_resp_freqs[i])
-    return theta
+    # generate auto-correlation function in frequency space
+    autocorr = auto_corr(np.mean(hb_trials, axis=1))
+    autocorr_freq = ffts.fft(autocorr)
+    autocorr_freq = ffts.fftshift(autocorr_freq) # type: np.ndarray
+    # generate frequency array and shift it
+    freqs = ffts.fftfreq(len(autocorr), d=dt)
+    freqs = ffts.fftshift(freqs)
+    # get auto-correlation function and linear response function at a specific frequency
+    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi)))  # calculate the index closest to the desired frequency
+    autocorr_omega = autocorr_freq[index]
+    lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
+    return np.imag(lin_resp_omega) / np.abs(autocorr_omega)

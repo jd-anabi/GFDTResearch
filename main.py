@@ -13,45 +13,29 @@ if __name__ == '__main__':
         params = csv.reader(csvfile, delimiter=',')
         rows = [row for row in params]
     x0 = np.array([float(i) for i in rows[0]][:4]) # initial conditions
-    s_osc = 0.07 # spontaneous oscillation frequency for this hair bundle
+    s_osc = 2 * sp.constants.pi * 0.07 # spontaneous oscillation frequency for this hair bundle
     params = [float(i) for i in rows[1]]
 
     dt = 1e-3
-    t = np.arange(0, 1000, dt)
+    t = np.arange(0, 500, dt)
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 10
-    omegas = np.zeros(2 * num_trials)
+    num_trials = 100
+    omegas = np.zeros(2 * num_trials, dtype=float)
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
         for i in range(2 * num_trials):
-            s_osc_curr = s_osc + (i - num_trials) * s_osc / num_trials
+            s_osc_curr = s_osc + (i - num_trials + 10) * s_osc / num_trials
             omegas[i] = s_osc_curr
             args_list[i] = (t, True, s_osc_curr, params, x0)
         hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
 
-    # write to files so we don't have to keep rerunning it
-    '''
-    n = 0
-    hb_file_names = ['hb_pos_nd0.csv', 'a_pos_nd0.csv', 'p_m_nd0.csv', 'p_gs_nd0.csv']
-    for file_name in hb_file_names:
-        with open(file_name, 'w+', newline='') as csvfile:
-            row = csv.writer(csvfile, delimiter=',')
-            row.writerows(hb_sols[:, :, n])
-        n += 1
-    hb_pos = hb_sols[:, :, 0]
-    with open('hb_pos_nd0.csv', newline='') as csvfile:
-        params = csv.reader(csvfile, delimiter=',')
-        rows = [row for row in params]
-    hb_pos1 = [float(i) for i in rows[0]]
-    '''
-
-    hb_pos_trials = np.zeros(2 * num_trials, dtype=np.ndarray)
+    hb_pos_omegas = np.zeros(2 * num_trials, dtype=np.ndarray)
     for i in range(2 * num_trials):
-        hb_pos_trials[i] = hb_sols[i][:, 0]
-    hb_pos0 = hb_pos_trials[0]
+        hb_pos_omegas[i] = hb_sols[i][:, 0]
+    hb_pos0 = hb_pos_omegas[num_trials - 10]
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 900, t[-1])
+    plt.xlim(t[0] + 400, t[-1])
     plt.ylim(np.min(hb_pos0[int(len(t) / 2):]) - 0.25, np.max(hb_pos0[int(len(t) / 2):]) + 0.25)
     plt.show()
 
@@ -67,7 +51,7 @@ if __name__ == '__main__':
     x_sfs = np.zeros(2 * num_trials, dtype=np.ndarray)
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas[i] * j) for j in t])
-    hb_pos_trials = list(hb_pos_trials)
-    x_sfs = list(x_sfs)
-    plt.plot(omegas, helpers.fdt_ratio(hb_pos_trials, x_sfs))
+    thetas = [helpers.fdt_ratio(float(omegas[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt) for i in range(2 * num_trials)]
+    plt.plot(omegas, thetas)
+    plt.scatter(omegas, thetas)
     plt.show()
