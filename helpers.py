@@ -73,3 +73,6 @@ def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) 
     autocorr_omega = autocorr_freq[index]
     lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
     return np.imag(lin_resp_omega) / np.abs(autocorr_omega)
+
+def log(x, a, b, c):
+    return a * np.log(b * x) + c

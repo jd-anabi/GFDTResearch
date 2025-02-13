@@ -17,10 +17,10 @@ if __name__ == '__main__':
     params = [float(i) for i in rows[1]]
 
     dt = 1e-3
-    t = np.arange(0, 500, dt)
+    t = np.arange(0, 1000, dt)
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 100
+    num_trials = 50
     omegas = np.zeros(2 * num_trials, dtype=float)
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
@@ -35,14 +35,18 @@ if __name__ == '__main__':
         hb_pos_omegas[i] = hb_sols[i][:, 0]
     hb_pos0 = hb_pos_omegas[num_trials - 10]
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 400, t[-1])
+    plt.xlim(t[0] + 950, t[-1])
     plt.ylim(np.min(hb_pos0[int(len(t) / 2):]) - 0.25, np.max(hb_pos0[int(len(t) / 2):]) + 0.25)
+    plt.xlabel('Time')
+    plt.ylabel('Hair-bundle position')
     plt.show()
 
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
     hb_pos1_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]
     plt.plot(freq, np.abs(hb_pos1_freq) / len(t))
     plt.xlim(0, 0.5)
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Intensity')
     plt.show()
 
     spon_osc_freq = freq[np.where(np.abs(hb_pos1_freq) == np.max(np.abs(hb_pos1_freq)))[0][0]]
@@ -52,6 +56,16 @@ if __name__ == '__main__':
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas[i] * j) for j in t])
     thetas = [helpers.fdt_ratio(float(omegas[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt) for i in range(2 * num_trials)]
-    plt.plot(omegas, thetas)
+    p_opt = sp.optimize.curve_fit(helpers.log, omegas, thetas)
+
+    plt.plot(omegas, helpers.log(omegas, *p_opt))
     plt.scatter(omegas, thetas)
+    plt.xlabel(r'$\omega$')
+    plt.ylabel(r'$\frac{1}{\theta}$')
+    plt.show()
+
+    plt.plot(omegas, [1 / helpers.log(omegas, *p_opt)[i] for i in range(len(omegas))])
+    plt.scatter(omegas, [1 / thetas[i] for i in range(len(thetas))])
+    plt.xlabel(r'$\omega$')
+    plt.ylabel(r'$\theta$')
     plt.show()
