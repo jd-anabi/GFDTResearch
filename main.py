@@ -56,7 +56,8 @@ if __name__ == '__main__':
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas[i] * j) for j in t])
     thetas = [helpers.fdt_ratio(float(omegas[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt) for i in range(2 * num_trials)]
-    p_opt = sp.optimize.curve_fit(helpers.log, omegas, thetas)
+    p_opt = sp.optimize.curve_fit(helpers.log, omegas, thetas)[0]
+    print(p_opt)
 
     plt.plot(omegas, helpers.log(omegas, *p_opt))
     plt.scatter(omegas, thetas)
