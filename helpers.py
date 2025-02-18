@@ -52,14 +52,15 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
     return hb_trials_freq_avg[index] / x_sf_freq[index]
 
-def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray:
+def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> np.ndarray:
     """
     Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
     :param omega: the frequency to calculate the ratio at
     :param hb_trials: set of an ensemble of hair-bundle positions at different frequencies
     :param x_sf: applied stimulus force at a given frequency omega
     :param dt: time step
-    :return: the fluctuation-response ratio at different frequencies
+    :param inc: whether to include the autocorrelation function and linear response in return statement
+    :return: the fluctuation-response ratio at different frequencies (and possibly the autocorrelation function and linear response); [ratio,
     """
     # generate auto-correlation function in frequency space
     autocorr = auto_corr(np.mean(hb_trials, axis=1))
@@ -72,7 +73,18 @@ def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) 
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi)))  # calculate the index closest to the desired frequency
     autocorr_omega = autocorr_freq[index]
     lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
-    return np.imag(lin_resp_omega) / np.abs(autocorr_omega)
+    theta = omega * np.abs(autocorr_omega) / np.imag(lin_resp_omega)
+    if inc:
+        return np.array([theta, autocorr_omega, lin_resp_omega])
+    return theta
 
 def log(x, a, b, c):
+    """
+    Natural logarithm of a * ln(b * x) + c; used for fitting function
+    :param x: input value
+    :param a: coefficient
+    :param b: coefficient
+    :param c: constant
+    :return: natural logarithm
+    """
     return a * np.log(b * x) + c

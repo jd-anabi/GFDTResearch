@@ -6,6 +6,7 @@ import scipy as sp
 import multiprocessing as mp
 
 import helpers
+import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
     # read non-dimensional hair cell from csv file
@@ -18,6 +19,7 @@ if __name__ == '__main__':
 
     dt = 1e-3
     t = np.arange(0, 1000, dt)
+    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
     num_trials = 50
@@ -34,14 +36,32 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         hb_pos_omegas[i] = hb_sols[i][:, 0]
     hb_pos0 = hb_pos_omegas[num_trials - 10]
+
+    # creating figure and subplots
+    num_vars = 5
+    fig, axes = plt.subplots(2 * num_trials, num_vars)
+    titles = [r'$x_{hb}(t)$', r'$x_a(t)$', r'$p_m(t)$', r'$p_{gs}(t)$', r'p_t^{(0)}(t)$']
+
+    # time domain
+    for i in range(2 * num_trials):
+        axes[i][0].set_ylabel(r'$\omega$ = {}'.format(omegas[i]))
+        for j in range(num_vars):
+            if j != 4:
+                axes[i][j].plot(t, hb_sols[i][:, j])
+            else:
+                axes[i][j].plot(t, hb_sols[i][:, 0])
+            if i == 0:
+                axes[i][j].set_title(titles[j])
+    '''
     plt.plot(t, hb_pos0)
     plt.xlim(t[0] + 950, t[-1])
     plt.ylim(np.min(hb_pos0[int(len(t) / 2):]) - 0.25, np.max(hb_pos0[int(len(t) / 2):]) + 0.25)
     plt.xlabel('Time')
     plt.ylabel('Hair-bundle position')
+    '''
+    fig.tight_layout()
     plt.show()
 
-    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
     hb_pos1_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]
     plt.plot(freq, np.abs(hb_pos1_freq) / len(t))
     plt.xlim(0, 0.5)
@@ -62,11 +82,11 @@ if __name__ == '__main__':
     plt.plot(omegas, helpers.log(omegas, *p_opt))
     plt.scatter(omegas, thetas)
     plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\frac{1}{\theta}$')
+    plt.ylabel(r'$\theta$')
     plt.show()
 
     plt.plot(omegas, [1 / helpers.log(omegas, *p_opt)[i] for i in range(len(omegas))])
     plt.scatter(omegas, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\theta$')
+    plt.ylabel(r'$\frac{1}{\theta}$')
     plt.show()
