@@ -22,12 +22,12 @@ if __name__ == '__main__':
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 50
+    num_trials = 5
     omegas = np.zeros(2 * num_trials, dtype=float)
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
         for i in range(2 * num_trials):
-            s_osc_curr = s_osc + (i - num_trials + 10) * s_osc / num_trials
+            s_osc_curr = s_osc + (i - num_trials + 1) * s_osc / num_trials
             omegas[i] = s_osc_curr
             args_list[i] = (t, True, s_osc_curr, params, x0)
         hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
@@ -35,12 +35,12 @@ if __name__ == '__main__':
     hb_pos_omegas = np.zeros(2 * num_trials, dtype=np.ndarray)
     for i in range(2 * num_trials):
         hb_pos_omegas[i] = hb_sols[i][:, 0]
-    hb_pos0 = hb_pos_omegas[num_trials - 10]
+    hb_pos0 = hb_pos_omegas[num_trials - 1]
 
     # creating figure and subplots
     num_vars = 5
     fig, axes = plt.subplots(2 * num_trials, num_vars)
-    titles = [r'$x_{hb}(t)$', r'$x_a(t)$', r'$p_m(t)$', r'$p_{gs}(t)$', r'p_t^{(0)}(t)$']
+    titles = [r'$x_{hb}(t)$', r'$x_a(t)$', r'$p_m(t)$', r'$p_{gs}(t)$', r'$p_t^{(0)}(t)$']
 
     # time domain
     for i in range(2 * num_trials):
@@ -59,7 +59,7 @@ if __name__ == '__main__':
     plt.xlabel('Time')
     plt.ylabel('Hair-bundle position')
     '''
-    fig.tight_layout()
+    #fig.tight_layout()
     plt.show()
 
     hb_pos1_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     x_sfs = np.zeros(2 * num_trials, dtype=np.ndarray)
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas[i] * j) for j in t])
-    thetas = [helpers.fdt_ratio(float(omegas[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt) for i in range(2 * num_trials)]
+    thetas = [helpers.fdt_ratio(float(omegas[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt, False) for i in range(2 * num_trials)]
     p_opt = sp.optimize.curve_fit(helpers.log, omegas, thetas)[0]
     print(p_opt)
 
