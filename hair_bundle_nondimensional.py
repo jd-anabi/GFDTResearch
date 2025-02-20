@@ -181,7 +181,7 @@ class HairBundleNonDimensional:
         self.delta_e = delta_e # intrinsic energy difference between the transduction channel's two states
         self.k_gs_min = k_gs_min # min gating spring stiffness
         self.chi_hb = chi_hb # hair bundle conversion factor
-        self.chi_a = chi_a # adaptation conversion factor
+        self.chi_a = chi_a # adaptation motor conversion factor
         self.x_c = x_c # average equilibrium position of the adaptation motors
         self.eta_hb = eta_hb # hair bundle diffusion constant
         self.eta_a = eta_a # adaptation motor diffusion constant

@@ -88,3 +88,32 @@ def log(x, a, b, c):
     :return: natural logarithm
     """
     return a * np.log(b * x) + c
+
+def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray,
+         u_gs_max: float, delta_e: float, k_gs_min: float,
+         chi_hb: float, chi_a: float, x_c: float) -> np.ndarray:
+    """
+    Steady-state solution for the open-channel probability
+    :param x_hb: hair bundle displacement
+    :param x_a: adaptation motor displacement
+    :param p_gs: calcium binding probability for gating spring
+    :param u_gs_max: max gating spring potential
+    :param delta_e: intrinsic energy difference between the transduction channel's two states
+    :param k_gs_min: min gating spring stiffness
+    :param chi_hb: hair bundle conversion factor
+    :param chi_a: adaptation motor conversion factor
+    :param x_c: average equilibrium position of the adaptation motors
+    :return: steady-state solution for the open-channel probability
+    """
+    k_gs = 1 - p_gs * (1 - k_gs_min)
+    x_gs = chi_hb * x_hb - chi_a * x_a + x_c
+    return 1 / (1 + np.exp(u_gs_max * (delta_e - k_gs * (x_gs - 0.5))))
+
+def k_gs(p_gs: np.ndarray, k_gs_min: float) -> np.ndarray:
+    """
+    Gating spring stiffness
+    :param p_gs: calcium binding probability for gating spring
+    :param k_gs_min: min gating spring stiffness
+    :return: gating spring stiffness
+    """
+    return 1 - p_gs * (1 - k_gs_min)
