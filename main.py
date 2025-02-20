@@ -23,21 +23,16 @@ if __name__ == '__main__':
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 5
+    num_trials = 50
     omegas = np.zeros(2 * num_trials, dtype=float)
-    domega = 1e-9
+    domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
         for i in range(2 * num_trials):
-            s_osc_curr = s_osc + (i - num_trials + domega) * s_osc / num_trials
+            s_osc_curr = s_osc + (2 * i - num_trials + domega) * s_osc / num_trials
             omegas[i] = s_osc_curr
             args_list[i] = (t, True, s_osc_curr, params, x0)
         hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
-
-    hb_pos_omegas = np.zeros(2 * num_trials, dtype=np.ndarray)
-    for i in range(2 * num_trials):
-        hb_pos_omegas[i] = hb_sols[i][:, 0]
-    hb_pos0 = hb_pos_omegas[0]
 
     # creating figure and subplots
     n = 6 # n <= 2 * num_trials
@@ -75,27 +70,31 @@ if __name__ == '__main__':
     fig_f.set_figheight(16)
     plt.show()
 
+    hb_pos0 = hb_sols[i][:, 0] # data with no driving force
+    hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray) # rest of the data
+    for i in range(2 * num_trials - 1):
+        hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
+
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]]
-    print(f'Frequency of spontaneous oscillations: {spon_osc_freq}')
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz')
 
     # fdt ratio
+    omegas_driven = omegas[1:]
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     for i in range(len(x_sfs)):
-        x_sfs[i] = np.array([np.sin(omegas[i + 1] * j) for j in t])
-    thetas = [helpers.fdt_ratio(float(omegas[i + 1]), np.array([hb_pos_omegas[i + 1]]), x_sfs[i], dt, False) for i in range(len(x_sfs))]
-    omegas = omegas[1:]
-    p_opt = sp.optimize.curve_fit(helpers.log, omegas, thetas)[0]
-    print(p_opt)
+        x_sfs[i] = np.array([np.sin(omegas_driven[i] * j) for j in t])
+    thetas = [helpers.fdt_ratio(float(omegas_driven[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt, False) for i in range(2 * num_trials - 1)]
+    p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
 
-    plt.plot(omegas, helpers.log(omegas, *p_opt))
-    plt.scatter(omegas, thetas)
+    plt.plot(omegas_driven, [1 / helpers.log(omegas_driven, *p_opt)[i] for i in range(len(omegas_driven))])
+    plt.scatter(omegas_driven, thetas)
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\theta$')
     plt.show()
 
-    plt.plot(omegas, [1 / helpers.log(omegas, *p_opt)[i] for i in range(len(omegas))])
-    plt.scatter(omegas, [1 / thetas[i] for i in range(len(thetas))])
+    plt.plot(omegas_driven, helpers.log(omegas_driven, *p_opt))
+    plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\frac{1}{\theta}$')
     plt.show()
