@@ -16,14 +16,14 @@ if __name__ == '__main__':
     x0 = np.array([float(i) for i in rows[0]][:4]) # initial conditions
     s_osc = 2 * sp.constants.pi * 0.07 # spontaneous oscillation frequency for this hair bundle
     params = [float(i) for i in rows[1]]
-    pt0_params = [10, 1, 1, 1, 1, 1e-9]
+    pt0_params = params[9:15]
 
     dt = 1e-3
     t = np.arange(0, 1000, dt)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 50
+    num_trials = 25
     omegas = np.zeros(2 * num_trials, dtype=float)
     domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
