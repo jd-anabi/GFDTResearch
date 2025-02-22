@@ -77,7 +77,7 @@ if __name__ == '__main__':
 
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]]
-    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz')
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq}')
 
     # fdt ratio
     omegas_driven = omegas[1:]
