@@ -52,7 +52,7 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
     return hb_trials_freq_avg[index] / x_sf_freq[index]
 
-def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> np.ndarray:
+def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> list:
     """
     Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
     :param omega: the frequency to calculate the ratio at
@@ -75,8 +75,8 @@ def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, 
     lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
     theta = omega * np.abs(autocorr_omega) / np.imag(lin_resp_omega)
     if inc:
-        return np.array([theta, autocorr_omega, lin_resp_omega])
-    return theta
+        return [theta, autocorr, lin_resp_omega]
+    return [theta]
 
 def log(x, a, b, c):
     """

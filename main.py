@@ -29,13 +29,14 @@ if __name__ == '__main__':
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     with mp.Pool() as pool:
         for i in range(2 * num_trials):
-            s_osc_curr = s_osc + (2 * i - num_trials + domega) * s_osc / num_trials
+            s_osc_curr = s_osc + (i - num_trials + domega) * s_osc / num_trials
             omegas[i] = s_osc_curr
             args_list[i] = (t, True, s_osc_curr, params, x0)
         hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
 
     # creating figure and subplots
-    n = 6 # n <= 2 * num_trials
+    omega_indices = [0, num_trials - 2, num_trials - 1, num_trials, num_trials + 1, num_trials + 2, 2 * num_trials - 1]
+    n = len(omega_indices) # n <= 2 * num_trials
     num_vars = 6
     fig, axes = plt.subplots(n, num_vars)
     fig_f, axes_f = plt.subplots(n, num_vars) # for frequency domain plots
@@ -44,8 +45,8 @@ if __name__ == '__main__':
 
     # plotting
     for i in range(n):
-        axes[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[i], 5)))
-        axes_f[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[i], 5)))
+        axes[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
+        axes_f[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
         for j in range(num_vars):
             axes[i][j].set_xlim([t[0] + 950, t[-1]])
             axes_f[i][j].set_xlim([0, 0.5])
@@ -65,12 +66,12 @@ if __name__ == '__main__':
             axes[i][j].plot(t, var)
             axes_f[i][j].plot(freq, np.abs(freq_ij_plot) / len(t))
     fig.set_figwidth(20)
-    fig.set_figheight(16)
+    fig.set_figheight(18)
     fig_f.set_figwidth(20)
-    fig_f.set_figheight(16)
+    fig_f.set_figheight(18)
     plt.show()
 
-    hb_pos0 = hb_sols[i][:, 0] # data with no driving force
+    hb_pos0 = hb_sols[0][:, 0] # data with no driving force
     hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray) # rest of the data
     for i in range(2 * num_trials - 1):
         hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
@@ -84,16 +85,36 @@ if __name__ == '__main__':
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas_driven[i] * j) for j in t])
-    thetas = [helpers.fdt_ratio(float(omegas_driven[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt, False) for i in range(2 * num_trials - 1)]
-    p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
+    fdt_vars = [helpers.fdt_ratio(float(omegas_driven[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True) for i in range(2 * num_trials - 1)]
+    thetas = fdt_vars[:,0]
+    autocorr = fdt_vars[:,1]
+    lin_resp_omegas = fdt_vars[:,2]
 
-    plt.plot(omegas_driven, [1 / helpers.log(omegas_driven, *p_opt)[i] for i in range(len(omegas_driven))])
+    p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
+    theta_fit = helpers.log(omegas_driven, *p_opt)
+
+    plt.scatter(t, autocorr[0])
+    plt.xlabel(r'$\omega$')
+    plt.ylabel(r'$C_0')
+    plt.show()
+
+    plt.scatter(omegas_driven, np.real(lin_resp_omegas))
+    plt.xlabel(r'$\omega$')
+    plt.ylabel(r'$\tilde{\chi}_R$')
+    plt.show()
+
+    plt.scatter(omegas_driven, np.imag(lin_resp_omegas))
+    plt.xlabel(r'$\omega$')
+    plt.ylabel(r'$\tilde{\chi}_I$')
+    plt.show()
+
+    plt.plot(omegas_driven, theta_fit)
     plt.scatter(omegas_driven, thetas)
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\theta$')
     plt.show()
 
-    plt.plot(omegas_driven, helpers.log(omegas_driven, *p_opt))
+    plt.plot(omegas_driven, [1 / theta_fit[i] for i in range(len(theta_fit))])
     plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\frac{1}{\theta}$')
