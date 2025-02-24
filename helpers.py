@@ -63,7 +63,7 @@ def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, 
     :return: the fluctuation-response ratio at different frequencies (and possibly the autocorrelation function and linear response); [ratio,
     """
     # generate auto-correlation function in frequency space
-    autocorr = auto_corr(np.mean(hb_trials, axis=1))
+    autocorr = auto_corr(np.mean(hb_trials, axis=0))
     autocorr_freq = ffts.fft(autocorr)
     autocorr_freq = ffts.fftshift(autocorr_freq) # type: np.ndarray
     # generate frequency array and shift it
