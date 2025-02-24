@@ -39,7 +39,8 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     :return: the linear response function
     """
     # transfer to the frequency domain
-    hb_trials_freq = ffts.fft(hb_trials - np.mean(hb_trials, axis=1, keepdims=True))
+    hb_trials = np.mean(hb_trials, axis=0)
+    hb_trials_freq = ffts.fft2(hb_trials - np.mean(hb_trials))
     x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
     # shift ffts
     hb_trials_freq = ffts.fftshift(hb_trials_freq, axes=1)
