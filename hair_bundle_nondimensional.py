@@ -90,17 +90,6 @@ class HairBundleNonDimensional:
         """
         return -1 * s_max * s_min * eta
 
-    @staticmethod
-    def __f_hb0(k_gs: float, tau_hb: float, x_c: float) -> float:
-        """
-        Time-independent external force on the hair bundle
-        :param k_gs: gating spring stiffness
-        :param tau_hb: finite time constant
-        :param x_c: average equilibrium position of the adaptation motors
-        :return: time-independent external force on the hair bundle
-        """
-        return -1 * k_gs * x_c / tau_hb
-
     # -------------------------------- ODEs --------------------------------
     @staticmethod
     def __x_hb_dot(tau_hb: float, f_gs: float, x_hb: float) -> float:
@@ -264,10 +253,6 @@ class HairBundleNonDimensional:
     @property
     def a_noise0(self) -> float:
         return sym.simplify(self.__a_noise0(self.eta_a, self.s_max, self.s_min))
-
-    @property
-    def f_hb0(self) -> float:
-        return sym.simplify(self.__f_hb0(self.k_gs, self.tau_hb, self.x_c))
     # -------------------------------- Varying parameters (end) ----------------------------------
 
     # -------------------------------- ODEs (begin) ----------------------------------

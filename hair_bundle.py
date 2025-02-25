@@ -1,6 +1,6 @@
+import numpy as np
 import sympy as sym
 import scipy.constants as constants
-from jedi.inference.gradual.typing import Callable
 
 class HairBundle:
     # -------------------------------- Helper functions (begin) --------------------------------
@@ -114,7 +114,26 @@ class HairBundle:
         i_t_ca = g_t_ca * (v_m - e_t_ca)
         return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_gs)
 
+    @staticmethod
+    def __hb_noise(epsilon: float, eta: float, temp: float, lam: float) -> float:
+        """
+        White noise for hair bundle
+        :param eta: noise control variable
+        :param tau: finite time constant
+        :return: equation for the hair bundle noise
+        """
+        return epsilon * np.sqrt(2 * constants.k * temp * lam) * eta
 
+    @staticmethod
+    def __a_noise(epsilon: float, eta: float, temp: float, lam: float) -> float:
+        """
+        Time-independent white noise for the adaptation motor
+        :param eta: noise control variable
+        :param s_max: max slipping rate
+        :param s_min: min slipping rate
+        :return: equation for the adaptation motor noise
+        """
+        return epsilon * np.sqrt(2 * constants.k * temp * lam) * eta
     # -------------------------------- ODEs --------------------------------
     @staticmethod
     def __x_hb_dot(gamma: float, n: float, f_gs: float, lambda_hb: float, k_sp: float, x_sp: float, x_hb: float) -> float:
@@ -187,8 +206,8 @@ class HairBundle:
                  delta_e: float, k_m_plus: float, k_m_minus: float, k_gs_plus: float, k_gs_minus: float,
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
-                 ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float):
+                 ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
+                 k_es: float, x_es: float, d: float, epsilon: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool):
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
@@ -216,11 +235,25 @@ class HairBundle:
         self.gamma = gamma # geometric conversion factor
         self.n = n # number of gating springs
         self.lambda_hb = lambda_hb # viscous drag coefficient
+        self.lambda_a = lambda_a # viscous drag coefficient for adaptation motor
         self.k_sp = k_sp # stereocilliary pivot stiffness
         self.x_sp = x_sp # stereocilliary pivot displacement
         self.k_es = k_es # extent spring stiffness
         self.x_es = x_es # extent spring displacement
         self.d = d # channel gate opening distance
+        self.epsilon = epsilon # noise scale
+        self.eta_hb = eta_hb  # hair bundle diffusion constant
+        self.eta_a = eta_a  # adaptation motor diffusion constant
+        self.omega = omega  # frequency of stimulus force
+        self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
+
+        def sin(t: float) -> float:
+            """
+            Sinusoidal stimulus force
+            :param t: time
+            :return: equation for a sinusoidal stimulus
+            """
+            return self.x_c * np.sin(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -228,18 +261,32 @@ class HairBundle:
         self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
         self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
         self.p_t = sym.symbols('p_t') # open channel probability
-        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs, self.p_t)
 
-        # ODEs
-        odes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot, self.p_t_dot)
+        hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs) # hb sympy symbols
+        sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot)  # SDEs
 
-        self.ode_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(odes)) # lambdify ode system
+        # check if we don't want to use the steady state solution for the open channel probability
+        if not self.p_t_steady:
+            hb_symbols = hb_symbols + sym.Tuple(self.p_t)
+            sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        def odes_for_solver(t: list, z: tuple) -> Callable:
-            x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var = z
-            return self.ode_sym_lambda_func(x_hb_var, x_a_var, p_m_var, p_gs_var, p_t_var)
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
-        self.odes_for_solver = odes_for_solver
+        def f(x: list, t: float) -> np.ndarray:
+            x_sf = sin(t)
+            if self.p_t_steady:
+                sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
+                return sde_sys
+            sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3], x[4]))
+            return sde_sys
+
+        def g(x: list, t: float) -> np.ndarray:
+            if self.p_t_steady:
+                return np.diag([self.hb_noise, self.a_noise, 0, 0])
+            return np.diag([self.hb_noise, self.a_noise, 0, 0, 0])
+
+        self.f = f
+        self.g = g
 
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property
@@ -248,6 +295,8 @@ class HairBundle:
 
     @property
     def f_gs(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.gamma, self.d))
         return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.gamma, self.d))
 
     @property
@@ -269,6 +318,14 @@ class HairBundle:
     @property
     def ca2_gs(self) -> float:
         return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
+
+    @property
+    def hb_noise(self) -> float:
+        return sym.simplify(self.__hb_noise(self.epsilon, self.eta_hb, self.temp, self.lambda_hb))
+
+    @property
+    def a_noise(self) -> float:
+        return sym.simplify(self.__a_noise(self.epsilon, self.eta_a, self.temp, self.lambda_a))
     # -------------------------------- Varying parameters (end) ----------------------------------
 
     # -------------------------------- ODEs (begin) ----------------------------------

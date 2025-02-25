@@ -90,8 +90,8 @@ if __name__ == '__main__':
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
     lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
 
-    p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
-    theta_fit = helpers.log(omegas_driven, *p_opt)
+    #p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
+    #theta_fit = helpers.log(omegas_driven, *p_opt)
     print(autocorr)
     print(autocorr[0])
 
@@ -110,13 +110,13 @@ if __name__ == '__main__':
     plt.ylabel(r'$\tilde{\chi}_I$')
     plt.show()
 
-    plt.plot(omegas_driven, theta_fit)
+    #plt.plot(omegas_driven, theta_fit)
     plt.scatter(omegas_driven, thetas)
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\theta$')
     plt.show()
 
-    plt.plot(omegas_driven, [1 / theta_fit[i] for i in range(len(theta_fit))])
+    #plt.plot(omegas_driven, [1 / theta_fit[i] for i in range(len(theta_fit))])
     plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\frac{1}{\theta}$')
