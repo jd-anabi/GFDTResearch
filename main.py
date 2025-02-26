@@ -85,7 +85,7 @@ if __name__ == '__main__':
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     for i in range(len(x_sfs)):
         x_sfs[i] = np.array([np.sin(omegas_driven[i] * j) for j in t])
-    fdt_vars = [helpers.fdt_ratio(float(omegas_driven[i]), np.array([[hb_pos_omegas[i]]]), x_sfs[i], dt, True) for i in range(2 * num_trials - 1)]
+    fdt_vars = [helpers.fdt_ratio(float(omegas_driven[i]), np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True) for i in range(2 * num_trials - 1)]
     thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
     lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
@@ -94,6 +94,13 @@ if __name__ == '__main__':
     #theta_fit = helpers.log(omegas_driven, *p_opt)
     print(autocorr)
     print(autocorr[0])
+    print(len(autocorr[0]))
+
+    print(lin_resp_omegas)
+    print(len(lin_resp_omegas))
+
+    print(thetas)
+    print(len(thetas))
 
     plt.scatter(t, autocorr[0])
     plt.xlabel(r'$t$')
