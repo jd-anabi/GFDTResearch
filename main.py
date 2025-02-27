@@ -23,7 +23,7 @@ if __name__ == '__main__':
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 25
+    num_trials = 50
     omegas = np.zeros(2 * num_trials, dtype=float)
     domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
@@ -48,7 +48,10 @@ if __name__ == '__main__':
         axes[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
         axes_f[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
         for j in range(num_vars):
-            axes[i][j].set_xlim([t[0] + 950, t[-1]])
+            if i == 0:
+                axes[i][j].set_xlim([t[0] + 950, t[-1]])
+            else:
+                axes[i][j].set_xlim([t[0] + 750, t[-1]])
             axes_f[i][j].set_xlim([0, 0.5])
             if i == 0:
                 axes[i][j].set_title(titles[j])
@@ -92,19 +95,10 @@ if __name__ == '__main__':
 
     #p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
     #theta_fit = helpers.log(omegas_driven, *p_opt)
-    print(autocorr)
-    print(autocorr[0])
-    print(len(autocorr[0]))
 
-    print(lin_resp_omegas)
-    print(len(lin_resp_omegas))
-
-    print(thetas)
-    print(len(thetas))
-
-    plt.scatter(t, autocorr[0])
+    plt.plot(t, autocorr[0])
     plt.xlabel(r'$t$')
-    plt.ylabel(r'$C_0')
+    plt.ylabel(r'$C_0$')
     plt.show()
 
     plt.scatter(omegas_driven, np.real(lin_resp_omegas))

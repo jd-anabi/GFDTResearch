@@ -183,7 +183,7 @@ class HairBundleNonDimensional:
             :param t: time
             :return: equation for a sinusoidal stimulus
             """
-            return np.sin(self.omega * t)
+            return -5 * np.sin(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement

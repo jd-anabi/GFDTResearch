@@ -1,8 +1,11 @@
+from typing import Any
+
 import sdeint
 import numpy as np
 import scipy.fft as ffts
 import scipy.signal as signal
 import scipy.constants as constants
+from numpy import ndarray, dtype
 
 import hair_bundle_nondimensional as hb_nd
 
@@ -29,9 +32,9 @@ def auto_corr(hb_pos: list) -> np.ndarray:
     c = signal.correlate(hb_pos, hb_pos, mode='full', method='auto')
     return c[len(hb_pos) - 1:]
 
-def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> complex:
+def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[complex]]:
     """
-    Returns the linear response function, at a specific frequency, of the hair bundle (ran over multipl trials) with a stimulating force applied
+    Returns the linear response function, at a specific frequency, of the hair bundle (ran over multiple trials) with a stimulating force applied
     :param omega: the frequency tin calculate the response function at
     :param hb_trials: trials of hair bundle position
     :param x_sf: stimulating force
@@ -39,19 +42,18 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     :return: the linear response function
     """
     # transfer to the frequency domain
-    hb_trials = np.mean(hb_trials, axis=0)
-    hb_trials_freq = ffts.fft(hb_trials - np.mean(hb_trials))
+    hb_avg_pos = np.mean(hb_trials, axis=0)
+    hb_freq = ffts.fft(hb_avg_pos - np.mean(hb_avg_pos))
     x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
     # shift ffts
-    hb_trials_freq = ffts.fftshift(hb_trials_freq, axes=1)
+    hb_freq = ffts.fftshift(hb_freq) # type: np.ndarray
     x_sf_freq = ffts.fftshift(x_sf_freq) # type: np.ndarray
     # generate frequency array and shift it
     freqs = ffts.fftfreq(len(x_sf), d=dt)
     freqs = ffts.fftshift(freqs)
     # now for the fun (hard) part, extracting the values at a given frequency
-    hb_trials_freq_avg = np.mean(hb_trials_freq, axis=0) # average over all the trials
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
-    return hb_trials_freq_avg[index] / x_sf_freq[index]
+    return hb_freq[index] / x_sf_freq[index]
 
 def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> list:
     """
@@ -83,9 +85,9 @@ def log(x, a, b, c):
     """
     Natural logarithm of a * ln(b * x) + c; used for fitting function
     :param x: input value
-    :param a: coefficient
-    :param b: coefficient
-    :param c: constant
+    :param a: multiplicative log coefficient
+    :param b: multiplicative log argument coefficient
+    :param c: additive constant
     :return: natural logarithm
     """
     return a * np.log(b * x) + c
@@ -106,9 +108,9 @@ def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray,
     :param x_c: average equilibrium position of the adaptation motors
     :return: steady-state solution for the open-channel probability
     """
-    k_gs = 1 - p_gs * (1 - k_gs_min)
+    k_gs_var = 1 - p_gs * (1 - k_gs_min)
     x_gs = chi_hb * x_hb - chi_a * x_a + x_c
-    return 1 / (1 + np.exp(u_gs_max * (delta_e - k_gs * (x_gs - 0.5))))
+    return 1 / (1 + np.exp(u_gs_max * (delta_e - k_gs_var * (x_gs - 0.5))))
 
 def k_gs(p_gs: np.ndarray, k_gs_min: float) -> np.ndarray:
     """
