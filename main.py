@@ -23,7 +23,7 @@ if __name__ == '__main__':
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = 50
+    num_trials = 5
     omegas = np.zeros(2 * num_trials, dtype=float)
     domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
@@ -52,7 +52,7 @@ if __name__ == '__main__':
                 axes[i][j].set_xlim([t[0] + 950, t[-1]])
             else:
                 axes[i][j].set_xlim([t[0] + 750, t[-1]])
-            axes_f[i][j].set_xlim([0, 0.5])
+                axes_f[i][j].set_xlim([0, 0.5])
             if i == 0:
                 axes[i][j].set_title(titles[j])
                 axes_f[i][j].set_title(titles_f[j])
@@ -65,6 +65,7 @@ if __name__ == '__main__':
                 var = helpers.p_t0(hb_sols[i][:, 0], hb_sols[i][:, 1], hb_sols[i][:, 3], *pt0_params)
             else:
                 var = helpers.k_gs(hb_sols[i][:, 3], pt0_params[2])
+
             freq_ij_plot = sp.fft.fftshift(sp.fft.fft(var - np.mean(var)))[len(t) // 2:]
             axes[i][j].plot(t, var)
             axes_f[i][j].plot(freq, np.abs(freq_ij_plot) / len(t))
@@ -95,6 +96,10 @@ if __name__ == '__main__':
 
     #p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
     #theta_fit = helpers.log(omegas_driven, *p_opt)
+
+    plt.plot(t, hb_pos0)
+    plt.xlim(t[0] + 975, t[-1])
+    plt.show()
 
     plt.plot(t, autocorr[0])
     plt.xlabel(r'$t$')
