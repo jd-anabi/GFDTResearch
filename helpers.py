@@ -7,9 +7,10 @@ import scipy.signal as signal
 import scipy.constants as constants
 from numpy import ndarray, dtype
 
+import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
-def nd_hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list) -> np.ndarray:
+def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
@@ -17,11 +18,15 @@ def nd_hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list,
     :param s_osc: spontaneous oscillation frequency
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param x0: the initial conditions of the hair bundle
+    :param nd: whether to use the non-dimensional model or not
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    nd_hb = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state)
-    hb_sols = sdeint.itoEuler(nd_hb.f, nd_hb.g, x0, t)
-    return hb_sols
+    if nd:
+        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state)
+    else:
+        hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state)
+    hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
+    return hb_sol
 
 def auto_corr(hb_pos: list) -> np.ndarray:
     """

@@ -165,7 +165,7 @@ class HairBundle:
         return -1 * c + s * (f_gs - k_es * (x_a + x_es))
 
     @staticmethod
-    def __p_m_dot(k_m_plus: float, k_m_minus: float, ca2_m: float, p_t: float, p_m: float) -> float:
+    def __p_m_dot(k_m_plus: float, k_m_minus: float, ca2_m: float, p_m: float) -> float:
         """
         Calcium binding probability for adaptation motors dynamics
         :param k_m_plus: association constant for adaptation motors
@@ -178,7 +178,7 @@ class HairBundle:
         return k_m_plus * ca2_m * (1 - p_m) - k_m_minus * p_m
 
     @staticmethod
-    def __p_gs_dot(k_gs_plus: float, k_gs_minus: float, ca2_gs: float, p_t: float, p_gs: float) -> float:
+    def __p_gs_dot(k_gs_plus: float, k_gs_minus: float, ca2_gs: float, p_gs: float) -> float:
         """
         Calcium binding probability for gating spring dynamics
         :param k_gs_plus: association constant for gating spring
@@ -253,7 +253,7 @@ class HairBundle:
             :param t: time
             :return: equation for a sinusoidal stimulus
             """
-            return self.x_c * np.sin(self.omega * t)
+            return -1 * self.x_c * np.sin(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -313,10 +313,14 @@ class HairBundle:
 
     @property
     def ca2_m(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_m, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t0))
         return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_m, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
 
     @property
     def ca2_gs(self) -> float:
+        if self.p_t_steady:
+            return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t0))
         return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
 
     @property
@@ -337,10 +341,10 @@ class HairBundle:
         return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
     @property
     def p_m_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_t, self.p_m))
+        return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
     @property
     def p_gs_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_t, self.p_gs))
+        return sym.simplify(self.__p_m_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
     @property
     def p_t_dot(self) -> float:
         return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))

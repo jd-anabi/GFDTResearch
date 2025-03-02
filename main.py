@@ -1,4 +1,5 @@
 import csv
+import re
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,17 +7,33 @@ import scipy as sp
 import multiprocessing as mp
 
 import helpers
-import hair_bundle_nondimensional as hb_nd
 
 if __name__ == '__main__':
-    # read non-dimensional hair cell from csv file
-    with open('nd_hair_cell_0.csv', newline='') as csvfile:
-        params = csv.reader(csvfile, delimiter=',')
-        rows = [row for row in params]
-    x0 = np.array([float(i) for i in rows[0]][:4]) # initial conditions
+    # read hair cell from txt file
+    line = 0
+    pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$') # use pattern matching to extract values
+
+    x0 = np.zeros(5, dtype=float)
+    nd = False # whether we want to use the non-dimensional model or not
+    if nd:
+        file = 'nd_hair_cell_0.txt'
+        params = np.zeros(17, dtype=float)
+    else:
+        file = 'hair_cell_0.txt'
+        params = np.zeros(35, dtype=float)
+    with open(file, mode='r') as txtfile:
+        for row in txtfile:
+            val = float(re.findall(pattern, row.strip())[0])
+            if line < 5:
+                x0[line] = val
+            else:
+                params[line - 5] = val
+            line = line + 1
     s_osc = 2 * sp.constants.pi * 0.07 # spontaneous oscillation frequency for this hair bundle
-    params = [float(i) for i in rows[1]]
     pt0_params = params[9:15]
+    pt_steady = True
+    if pt_steady:
+        x0 = x0[:4]
 
     dt = 1e-3
     t = np.arange(0, 1000, dt)
@@ -31,8 +48,8 @@ if __name__ == '__main__':
         for i in range(2 * num_trials):
             s_osc_curr = s_osc + (i - num_trials + domega) * s_osc / num_trials
             omegas[i] = s_osc_curr
-            args_list[i] = (t, True, s_osc_curr, params, x0)
-        hb_sols = pool.starmap(helpers.nd_hb_sols, args_list)
+            args_list[i] = (t, True, s_osc_curr, params, x0, nd)
+        hb_sols = pool.starmap(helpers.hb_sols, args_list)
 
     # creating figure and subplots
     omega_indices = [0, num_trials - 2, num_trials - 1, num_trials, num_trials + 1, num_trials + 2, 2 * num_trials - 1]
