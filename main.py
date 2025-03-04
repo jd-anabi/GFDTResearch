@@ -51,11 +51,11 @@ if __name__ == '__main__':
 
     # time and frequency arrays
     dt = 1e-3
-    t = np.arange(0, 1000, dt)
+    t = np.arange(0, 2000, dt)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
-    num_trials = int(input('Number of trials (in addition to non-driven trial): '))
+    num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
     domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
@@ -87,9 +87,9 @@ if __name__ == '__main__':
         axes_f[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
         for j in range(num_vars):
             if i == 0:
-                axes[i][j].set_xlim([t[0] + 900, t[-1]])
+                axes[i][j].set_xlim([t[0] + 1900, t[-1]])
             else:
-                axes[i][j].set_xlim([t[0] + 750, t[-1]])
+                axes[i][j].set_xlim([t[0] + 1750, t[-1]])
                 axes_f[i][j].set_xlim([0, 0.5])
             if i == 0:
                 axes[i][j].set_title(titles[j])
