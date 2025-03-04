@@ -136,7 +136,7 @@ if __name__ == '__main__':
     #theta_fit = helpers.log(omegas_driven, *p_opt)
 
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 975, t[-1])
+    plt.xlim(t[0] + 1975, t[-1])
     plt.show()
 
     plt.plot(t, autocorr[0])
