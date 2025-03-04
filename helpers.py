@@ -60,10 +60,11 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
     return hb_freq[index] / x_sf_freq[index]
 
-def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> list:
+def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, inc: bool) -> list:
     """
     Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
     :param omega: the frequency to calculate the ratio at
+    :param hb_pos_undriven: the undriven hair bundle position
     :param hb_trials: set of an ensemble of hair-bundle positions at different frequencies
     :param x_sf: applied stimulus force at a given frequency omega
     :param dt: time step
@@ -71,7 +72,7 @@ def fdt_ratio(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, 
     :return: the fluctuation-response ratio at different frequencies (and possibly the autocorrelation function and linear response); [ratio,
     """
     # generate auto-correlation function in frequency space
-    autocorr = auto_corr(np.mean(hb_trials, axis=0))
+    autocorr = auto_corr(hb_pos_undriven)
     autocorr_freq = ffts.fft(autocorr)
     autocorr_freq = ffts.fftshift(autocorr_freq) # type: np.ndarray
     # generate frequency array and shift it
