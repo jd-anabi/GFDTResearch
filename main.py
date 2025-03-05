@@ -10,20 +10,19 @@ import helpers
 
 if __name__ == '__main__':
     # whether to use the non-dimensional model or not
-    user_input = input("Would you like to use the non-dimensional model (y/n): ").lower()
+    user_input = input('Would you like to use the non-dimensional model (y/n): ').lower()
     if user_input in ['y', 'yes', 'true', 't', '1']:
         nd = True
     else:
         nd = False
     if nd:
-        file = 'nd_hair_cell_0.txt'
         params = np.zeros(17, dtype=float)
     else:
-        file = 'hair_cell_0.txt'
         params = np.zeros(35, dtype=float)
 
     # read hair cell from txt file
     line = 0
+    file = input('Hair cell file: ')
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
     x0 = np.zeros(5, dtype=float)
     with open(file, mode='r') as txtfile:
@@ -37,7 +36,7 @@ if __name__ == '__main__':
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
     osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
-    user_input = input("Want to use the steady-state solution for the open-channel probability (y/n): ").lower()
+    user_input = input('Want to use the steady-state solution for the open-channel probability (y/n): ').lower()
     pt0_params = []
     if user_input in ['y', 'yes', 'true', 't', '1']:
         x0 = x0[:4]
