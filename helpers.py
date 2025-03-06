@@ -28,7 +28,7 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
     return hb_sol
 
-def auto_corr(hb_pos: list) -> np.ndarray:
+def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
     Returns the auto-correlation function <X(t) X(0)> for the position of a hair bundle
     :param hb_pos: the position of a hair bundle
