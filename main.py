@@ -50,7 +50,8 @@ if __name__ == '__main__':
 
     # time and frequency arrays
     dt = 1e-3
-    t = np.arange(0, 2000, dt)
+    t = np.arange(0, 1000, dt)
+    lims = [t[-1]  - 100, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # solve sdes of the non-dimensional hair bundle
@@ -86,9 +87,9 @@ if __name__ == '__main__':
         axes_f[i][0].set_ylabel(r'$\omega$ = {}'.format(round(omegas[omega_indices[i]], 5)))
         for j in range(num_vars):
             if i == 0:
-                axes[i][j].set_xlim([t[0] + 1900, t[-1]])
+                axes[i][j].set_xlim(lims[0], lims[1])
             else:
-                axes[i][j].set_xlim([t[0] + 1750, t[-1]])
+                axes[i][j].set_xlim(lims[0], lims[1])
                 axes_f[i][j].set_xlim([0, 0.5])
             if i == 0:
                 axes[i][j].set_title(titles[j])
@@ -119,13 +120,13 @@ if __name__ == '__main__':
         hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:] # fft for non-driven data
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]] # frequency of spontaneous oscillations
-    print(rf'Frequency of spontaneous oscillations: {spon_osc_freq}; $\omega_0$ = {2 * np.pi * spon_osc_freq}')
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
 
     # fdt ratio
     omegas_driven = omegas[1:]
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     for i in range(len(x_sfs)):
-        x_sfs[i] = np.array([np.sin(omegas_driven[i] * j) for j in t])
+        x_sfs[i] = np.array([-1 * 5 * np.sin(omegas_driven[i] * j) + 0.2 * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
     fdt_vars = [helpers.fdt_ratio(float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True) for i in range(2 * num_trials - 1)]
     thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
@@ -135,7 +136,7 @@ if __name__ == '__main__':
     #theta_fit = helpers.log(omegas_driven, *p_opt)
 
     plt.plot(t, hb_pos0)
-    plt.xlim(t[0] + 1950, t[-1])
+    plt.xlim(lims[0], lims[1])
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
     plt.show()

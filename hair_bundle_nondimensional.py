@@ -177,13 +177,15 @@ class HairBundleNonDimensional:
         self.omega = omega # frequency of stimulus force
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
 
-        def sin(t: float) -> float:
+        def driving_force(t: float, amp: float, eta: float) -> float:
             """
             Sinusoidal stimulus force
             :param t: time
+            :param amp: amplitude
+            :param eta: amplitude for drag term
             :return: equation for a sinusoidal stimulus
             """
-            return -5 * np.sin(self.omega * t)
+            return -1 * amp * np.sin(self.omega * t) + eta * self.omega * np.cos(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -203,7 +205,7 @@ class HairBundleNonDimensional:
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
         def f(x: list, t: float) -> np.ndarray:
-            x_sf = sin(t)
+            x_sf = driving_force(t, 5, 0.2)
             if self.p_t_steady:
                 sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
                 return sde_sys
