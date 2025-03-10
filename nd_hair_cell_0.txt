@@ -1,8 +1,8 @@
-xhb_init = 0
-xa_init = 0
-pm_init = 0
-pgs_init = 0
-pt_init = 1
+xhb_init = -1
+xa_init = -1
+pm_init = 0.5
+pgs_init = 0.5
+pt_init = 0.5
 tau_hb = 1
 tau_m = 1.4627616407992918
 tau_gs = 1
