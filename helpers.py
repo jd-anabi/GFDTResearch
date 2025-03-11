@@ -82,7 +82,7 @@ def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, 
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi)))  # calculate the index closest to the desired frequency
     autocorr_omega = autocorr_freq[index]
     lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
-    theta = omega * np.abs(autocorr_omega) / np.imag(lin_resp_omega)
+    theta = omega * autocorr_omega / np.imag(lin_resp_omega)
     if inc:
         return [theta, autocorr, lin_resp_omega]
     return [theta]

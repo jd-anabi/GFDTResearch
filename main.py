@@ -124,10 +124,14 @@ if __name__ == '__main__':
 
     # fdt ratio
     omegas_driven = omegas[1:]
+    amp = 5
+    eta = 0.2
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
-    for i in range(len(x_sfs)):
-        x_sfs[i] = np.array([-1 * 5 * np.sin(omegas_driven[i] * j) + 0.2 * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
-    fdt_vars = [helpers.fdt_ratio(float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True) for i in range(2 * num_trials - 1)]
+    args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
+    for i in range(2 * num_trials - 1):
+        x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + eta * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
+        args_list[i] = (float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True)
+    fdt_vars = pool.starmap(helpers.fdt_ratio, args_list)
     thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
     lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
