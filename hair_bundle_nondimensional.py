@@ -205,7 +205,7 @@ class HairBundleNonDimensional:
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
         def f(x: list, t: float) -> np.ndarray:
-            x_sf = driving_force(t, 5, 0.2)
+            x_sf = driving_force(t, 5, 0)
             if self.p_t_steady:
                 sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
                 return sde_sys

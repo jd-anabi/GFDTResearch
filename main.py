@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import scipy as sp
 import multiprocessing as mp
 
+from sympy.abc import alpha
+
 import helpers
 
 if __name__ == '__main__':
@@ -59,11 +61,11 @@ if __name__ == '__main__':
     omegas = np.zeros(2 * num_trials, dtype=float)
     domega = 0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
+    for i in range(2 * num_trials):
+        s_osc_curr = osc_freq_center + (i - num_trials + domega) * osc_freq_center / num_trials
+        omegas[i] = s_osc_curr
+        args_list[i] = (t, True, s_osc_curr, params, x0, nd)
     with mp.Pool() as pool:
-        for i in range(2 * num_trials):
-            s_osc_curr = osc_freq_center + (i - num_trials + domega) * osc_freq_center / num_trials
-            omegas[i] = s_osc_curr
-            args_list[i] = (t, True, s_osc_curr, params, x0, nd)
         hb_sols = pool.starmap(helpers.hb_sols, args_list)
 
     # creating figure and subplots
@@ -113,11 +115,27 @@ if __name__ == '__main__':
     fig_f.set_figheight(18)
     plt.show()
 
+    # redimensionalize
+    hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
+    chi_hb = params[12]
+    gamma = 0.14
+    d = 7e-9
+    x_sp = 2.46e-7
+    tau_gs_hat = 1 / 35e3
+    tau_gs = params[2]
+    t_offset = 0
+    alpha = d / gamma * chi_hb
+    beta = x_sp / gamma
+    eta = tau_gs_hat / tau_gs
+    for i in range(len(hb_pos)):
+        hb_pos[i] = alpha * hb_sols[i][:, 0] + beta
+        t[i] = eta * t[i] - t_offset
+
     # separate driven and not driven data
-    hb_pos0 = hb_sols[0][:, 0] # data with no driving force
+    hb_pos0 = hb_pos[0] # data with no driving force
     hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray) # rest of the data
     for i in range(2 * num_trials - 1):
-        hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
+        hb_pos_omegas[i] = hb_pos[i + 1]
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:] # fft for non-driven data
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]] # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
@@ -125,19 +143,21 @@ if __name__ == '__main__':
     # fdt ratio
     omegas_driven = omegas[1:]
     amp = 5
-    eta = 0.2
+    eta = 0
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     for i in range(2 * num_trials - 1):
         x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + eta * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
         args_list[i] = (float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True)
-    fdt_vars = pool.starmap(helpers.fdt_ratio, args_list)
-    thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
+    with mp.Pool() as pool:
+        fdt_vars = pool.starmap(helpers.fdt_ratio, args_list)
+    thetas = [np.real(fdt_vars[i][0]) for i in range(2 * num_trials - 1)]
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
     lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
 
     #p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
     #theta_fit = helpers.log(omegas_driven, *p_opt)
+    lims = [t[-1] - 250, t[-1] - 50]
 
     plt.plot(t, hb_pos0)
     plt.xlim(lims[0], lims[1])
