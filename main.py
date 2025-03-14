@@ -59,7 +59,7 @@ if __name__ == '__main__':
     # solve sdes of the non-dimensional hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    domega = num_trials / 7.0
+    domega = 0
     amp = 5.0
     amp_vis = 0.0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
