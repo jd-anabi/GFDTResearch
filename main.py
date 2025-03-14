@@ -59,12 +59,14 @@ if __name__ == '__main__':
     # solve sdes of the non-dimensional hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    domega = 0
+    domega = num_trials / 7.0
+    amp = 5.0
+    amp_vis = 0.0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     for i in range(2 * num_trials):
         s_osc_curr = osc_freq_center + (i - num_trials + domega) * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
-        args_list[i] = (t, True, s_osc_curr, params, x0, nd)
+        args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
     with mp.Pool() as pool:
         hb_sols = pool.starmap(helpers.hb_sols, args_list)
 
@@ -123,13 +125,13 @@ if __name__ == '__main__':
     x_sp = 2.46e-7
     tau_gs_hat = 1 / 35e3
     tau_gs = params[2]
-    t_offset = 0
     alpha = d / gamma * chi_hb
     beta = x_sp / gamma
-    eta = tau_gs_hat / tau_gs
     for i in range(len(hb_pos)):
         hb_pos[i] = alpha * hb_sols[i][:, 0] + beta
-        t[i] = eta * t[i] - t_offset
+    a = tau_gs_hat / tau_gs
+    b = 0
+    t = a * t - b
 
     # separate driven and not driven data
     hb_pos0 = hb_pos[0] # data with no driving force
@@ -142,16 +144,14 @@ if __name__ == '__main__':
 
     # fdt ratio
     omegas_driven = omegas[1:]
-    amp = 5
-    eta = 0
     x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     for i in range(2 * num_trials - 1):
-        x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + eta * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
+        x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + amp_vis * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
         args_list[i] = (float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True)
     with mp.Pool() as pool:
         fdt_vars = pool.starmap(helpers.fdt_ratio, args_list)
-    thetas = [np.real(fdt_vars[i][0]) for i in range(2 * num_trials - 1)]
+    thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
     autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
     lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
 

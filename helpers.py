@@ -10,7 +10,7 @@ from numpy import ndarray, dtype
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
-def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool) -> np.ndarray:
+def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a = 5.0, b = 0.0) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
@@ -19,12 +19,14 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param x0: the initial conditions of the hair bundle
     :param nd: whether to use the non-dimensional model or not
+    :param a: the amplitude of the driving force
+    :param b: the amplitude of the viscous part of the driving force
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     if nd:
-        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state)
+        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
     else:
-        hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state)
+        hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
     hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
     return hb_sol
 

@@ -155,7 +155,8 @@ class HairBundleNonDimensional:
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float,
-                 x_c: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool):
+                 x_c: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool,
+                 amp: float, b: float):
         # parameters
         self.tau_hb = tau_hb # finite time constant for hair bundle
         self.tau_m = tau_m # finite time constant for adaptation motor
@@ -176,16 +177,16 @@ class HairBundleNonDimensional:
         self.eta_a = eta_a # adaptation motor diffusion constant
         self.omega = omega # frequency of stimulus force
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
+        self.amp = amp
+        self.b = b
 
-        def driving_force(t: float, amp: float, eta: float) -> float:
+        def driving_force(t: float) -> float:
             """
             Sinusoidal stimulus force
             :param t: time
-            :param amp: amplitude
-            :param eta: amplitude for drag term
             :return: equation for a sinusoidal stimulus
             """
-            return -1 * amp * np.sin(self.omega * t) + eta * self.omega * np.cos(self.omega * t)
+            return -1 * self.amp * np.sin(self.omega * t) + self.b * self.omega * np.cos(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -205,7 +206,7 @@ class HairBundleNonDimensional:
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
 
         def f(x: list, t: float) -> np.ndarray:
-            x_sf = driving_force(t, 5, 0)
+            x_sf = driving_force(t)
             if self.p_t_steady:
                 sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
                 return sde_sys
