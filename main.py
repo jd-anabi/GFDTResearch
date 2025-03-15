@@ -59,12 +59,11 @@ if __name__ == '__main__':
     # solve sdes of the non-dimensional hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    domega = 0
-    amp = 5.0
+    amp = 0.05
     amp_vis = 0.0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     for i in range(2 * num_trials):
-        s_osc_curr = osc_freq_center + (i - num_trials + domega) * osc_freq_center / num_trials
+        s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
         args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
     with mp.Pool() as pool:
@@ -159,8 +158,8 @@ if __name__ == '__main__':
     #theta_fit = helpers.log(omegas_driven, *p_opt)
     lims = [t[-1] - 250, t[-1] - 50]
 
+    plt.figure(figsize=(20, 18))
     plt.plot(t, hb_pos0)
-    plt.xlim(lims[0], lims[1])
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
     plt.show()

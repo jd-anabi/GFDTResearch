@@ -10,7 +10,7 @@ from numpy import ndarray, dtype
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
-def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a = 5.0, b = 0.0) -> np.ndarray:
+def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a, b) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
