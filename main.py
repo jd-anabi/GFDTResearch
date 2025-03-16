@@ -147,12 +147,12 @@ if __name__ == '__main__':
     args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     for i in range(2 * num_trials - 1):
         x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + amp_vis * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
-        args_list[i] = (float(omegas_driven[i]), hb_pos0, np.array([hb_pos_omegas[i]]), x_sfs[i], dt, True)
+        args_list[i] = (float(omegas_driven[i]), np.array(hb_pos0, ndmin=2), np.array(hb_pos_omegas[i], ndmin=2), x_sfs[i], dt)
     with mp.Pool() as pool:
-        fdt_vars = pool.starmap(helpers.fdt_ratio, args_list)
-    thetas = [fdt_vars[i][0] for i in range(2 * num_trials - 1)]
-    autocorr = [fdt_vars[i][1] for i in range(2 * num_trials - 1)]
-    lin_resp_omegas = [fdt_vars[i][2] for i in range(2 * num_trials - 1)]
+        fdt_ratio = pool.starmap(helpers.fdt_ratio, args_list)
+    thetas = [fdt_ratio[i] for i in range(2 * num_trials - 1)]
+    autocorr = helpers.auto_corr(hb_pos0)
+    lin_resp_omegas = np.array([helpers.lin_resp_freq(float(omegas_driven[i]), np.array(hb_pos_omegas[i], ndmin=2), x_sfs[i], dt) for i in range(2 * num_trials - 1)])
 
     #p_opt = sp.optimize.curve_fit(helpers.log, omegas_driven, thetas)[0]
     #theta_fit = helpers.log(omegas_driven, *p_opt)
@@ -164,7 +164,7 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{hb}$')
     plt.show()
 
-    plt.plot(t, autocorr[0])
+    plt.plot(t, autocorr)
     plt.xlabel(r'$t$')
     plt.ylabel(r'$C_0$')
     plt.show()
