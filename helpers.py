@@ -87,16 +87,33 @@ def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, 
     theta = omega * autocorr_omega / np.imag(lin_resp_omega)
     return theta
 
-def log(x, a, b, c):
-    """
-    Natural logarithm of a * ln(b * x) + c; used for fitting function
-    :param x: input value
-    :param a: multiplicative log coefficient
-    :param b: multiplicative log argument coefficient
-    :param c: additive constant
-    :return: natural logarithm
-    """
-    return a * np.log(b * x) + c
+def nd_fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, alpha: float, beta: float, gamma: float, a: float, temp: float) -> np.ndarray:
+    # generate auto-correlation function and undriven position in frequency space
+    hb_pos_0 = np.mean(hb_pos_undriven, axis=0)
+    hb_pos_0_freq = ffts.fft(hb_pos_0)
+    hb_pos_0_freq = ffts.fftshift(hb_pos_0_freq) # type: np.ndarray
+    autocorr = auto_corr(hb_pos_0)
+    autocorr_freq = ffts.fft(autocorr)
+    autocorr_freq = ffts.fftshift(autocorr_freq)  # type: np.ndarray
+    # transfer driven position data and force to the frequency domain
+    hb_avg_pos = np.mean(hb_trials, axis=0)
+    hb_freq = ffts.fft(hb_avg_pos - np.mean(hb_avg_pos))
+    x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
+    # shift ffts
+    hb_freq = ffts.fftshift(hb_freq)  # type: np.ndarray
+    x_sf_freq = ffts.fftshift(x_sf_freq)  # type: np.ndarray
+    # generate frequency array and shift it
+    freqs = ffts.fftfreq(len(autocorr), d=dt)
+    freqs = ffts.fftshift(freqs)
+    freqs = freqs / a
+    # now for the fun (hard) part, extracting the values at a given frequency
+    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi * a)))  # calculate the index closest to the desired frequency
+    # calculate nd fdt ratio
+    scale = gamma / (2 * np.abs(a) * constants.k * temp)
+    num = omega * (alpha * autocorr_freq[index] + beta * hb_pos_0_freq[index]) * np.abs(x_sf_freq[index])**2
+    denom = np.imag(hb_freq[index]) * np.real(x_sf_freq[index]) - np.real(hb_freq[index]) * np.imag(x_sf_freq[index])
+    theta = scale * num / denom
+    return theta
 
 def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray, params: list, nd: bool) -> np.ndarray:
     """
@@ -116,12 +133,3 @@ def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray, params: list, nd: 
         k_gs_var = params[2] - p_gs * (params[2] - params[1])
         x_gs = k_gs_var * params[5] / (constants.k * params[4]) * (x_hb - x_a + params[3] - params[5] / 2)
         return 1 / (1 + np.exp(params[0] / (constants.k * params[4]) - x_gs))
-
-def k_gs(p_gs: np.ndarray, k_gs_min: float) -> np.ndarray:
-    """
-    Gating spring stiffness
-    :param p_gs: calcium binding probability for gating spring
-    :param k_gs_min: min gating spring stiffness
-    :return: gating spring stiffness
-    """
-    return 1 - p_gs * (1 - k_gs_min)

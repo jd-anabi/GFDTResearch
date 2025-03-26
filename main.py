@@ -59,7 +59,7 @@ if __name__ == '__main__':
     # solve sdes of the non-dimensional hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    amp = 0.05
+    amp = 0.1
     amp_vis = 0.0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     for i in range(2 * num_trials):
@@ -116,21 +116,40 @@ if __name__ == '__main__':
     fig_f.set_figheight(18)
     plt.show()
 
-    # redimensionalize
-    hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
+    # parameters for redimensionalization
     chi_hb = params[12]
     gamma = 0.14
     d = 7e-9
     x_sp = 2.46e-7
     tau_gs_hat = 1 / 35e3
     tau_gs = params[2]
+    temp = 295
     alpha = d / gamma * chi_hb
     beta = x_sp / gamma
+    a = tau_gs_hat / tau_gs
+
+    # nd fdt ratio
+    nd_omegas_driven = omegas[1:] / a
+    nd_x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
+    args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
+    # separate driven and not driven data
+    nd_hb_pos0 = hb_sols[0][:, 0]  # data with no driving force
+    nd_hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)  # rest of the data
+    for i in range(2 * num_trials - 1):
+        nd_hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
+    for i in range(2 * num_trials - 1):
+        nd_x_sfs[i] = np.array([-1 * amp * np.sin(nd_omegas_driven[i] * j) + amp_vis * nd_omegas_driven[i] * np.cos(nd_omegas_driven[i] * j) for j in t])
+        args_list[i] = (float(nd_omegas_driven[i]), np.array(nd_hb_pos0, ndmin=2), np.array(nd_hb_pos_omegas[i], ndmin=2), nd_x_sfs[i], dt, alpha, beta, gamma, a, temp)
+    with mp.Pool() as pool:
+        nd_fdt_ratio = pool.starmap(helpers.nd_fdt_ratio, args_list)
+    nd_thetas = [nd_fdt_ratio[i] for i in range(2 * num_trials - 1)]
+
+    # redimensionalize
+    hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
+    t_0 = 0
     for i in range(len(hb_pos)):
         hb_pos[i] = alpha * hb_sols[i][:, 0] + beta
-    a = tau_gs_hat / tau_gs
-    b = 0
-    t = a * t - b
+    t = a * t + t_0
 
     # separate driven and not driven data
     hb_pos0 = hb_pos[0] # data with no driving force
@@ -139,7 +158,7 @@ if __name__ == '__main__':
         hb_pos_omegas[i] = hb_pos[i + 1]
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:] # fft for non-driven data
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]] # frequency of spontaneous oscillations
-    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s. Dimensionless angular frequency: {2 * np.pi * spon_osc_freq / a}')
 
     # fdt ratio
     omegas_driven = omegas[1:]
@@ -189,4 +208,14 @@ if __name__ == '__main__':
     plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\frac{1}{\theta}$')
+    plt.show()
+
+    plt.scatter(nd_omegas_driven, nd_thetas)
+    plt.xlabel(r'$\frac{\omega}{a}$')
+    plt.ylabel(r'$\tilde{\theta}$')
+    plt.show()
+
+    plt.scatter(nd_omegas_driven, [1 / nd_thetas[i] for i in range(len(nd_thetas))])
+    plt.xlabel(r'$\frac{\omega}{a}$')
+    plt.ylabel(r'$\frac{1}{\tilde{\theta}}$')
     plt.show()
