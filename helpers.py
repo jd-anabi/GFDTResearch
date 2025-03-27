@@ -36,8 +36,9 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     :param hb_pos: the position of a hair bundle
     :return: the auto-correlation function
     """
-    c = signal.correlate(hb_pos, hb_pos, mode='full', method='auto')
-    return c[len(hb_pos) - 1:]
+    c = signal.correlate(hb_pos, hb_pos, mode='full')
+    c = c[len(hb_pos) - 1:]
+    return c / c[0]
 
 def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[Any]]:
     """

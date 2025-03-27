@@ -59,7 +59,7 @@ if __name__ == '__main__':
     # solve sdes of the non-dimensional hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    amp = 0.1
+    amp = 0.05
     amp_vis = 0.0
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     for i in range(2 * num_trials):
@@ -181,6 +181,7 @@ if __name__ == '__main__':
     plt.plot(t, hb_pos0)
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
+    plt.xlim((0.005, 0.015))
     plt.show()
 
     plt.plot(t, autocorr)
