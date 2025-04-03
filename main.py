@@ -52,7 +52,7 @@ if __name__ == '__main__':
 
     # time and frequency arrays
     dt = 1e-3
-    t = np.arange(0, 1000, dt)
+    t = np.arange(0, 500, dt)
     lims = [t[-1]  - 100, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -66,8 +66,12 @@ if __name__ == '__main__':
         s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
         args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
-    with mp.Pool() as pool:
-        hb_sols = pool.starmap(helpers.hb_sols, args_list)
+    num_rep_trials = 5
+    hb_sols_trials = [None] * num_rep_trials
+    for i in range(num_rep_trials):
+        with mp.Pool() as pool:
+            hb_sols_trials[i] = pool.starmap(helpers.hb_sols, args_list)
+    hb_sols = [[np.mean([hb_sols_trials[i][j][:, k] for i in range(num_rep_trials)], axis=0) for j in range(2 * num_trials)] for k in range(len(x0))]
 
     # creating figure and subplots
     if num_trials < 3:
@@ -99,14 +103,14 @@ if __name__ == '__main__':
                 axes_f[i][j].set_title(titles_f[j])
             if pt_steady:
                 if j != 4:
-                    freq_ij_plot = sp.fft.fftshift(sp.fft.fft(hb_sols[i][:, j] - np.mean(hb_sols[i][:, j])))[len(t) // 2:]
-                    axes[i][j].plot(t, hb_sols[i][:, j])
+                    freq_ij_plot = sp.fft.fftshift(sp.fft.fft(hb_sols[j][i] - np.mean(hb_sols[j][i])))[len(t) // 2:]
+                    axes[i][j].plot(t, hb_sols[j][i])
                     axes_f[i][j].plot(freq, np.abs(freq_ij_plot) / len(t))
                     continue
                 else:
-                    var = helpers.p_t0(hb_sols[i][:, 0], hb_sols[i][:, 1], hb_sols[i][:, 3], pt0_params, nd)
+                    var = helpers.p_t0(hb_sols[0][i], hb_sols[1][i], hb_sols[3][i], pt0_params, nd)
             else:
-                var = hb_sols[i][:, j]
+                var = hb_sols[j][i]
             freq_ij_plot = sp.fft.fftshift(sp.fft.fft(var - np.mean(var)))[len(t) // 2:]
             axes[i][j].plot(t, var)
             axes_f[i][j].plot(freq, np.abs(freq_ij_plot) / len(t))
@@ -133,10 +137,10 @@ if __name__ == '__main__':
     nd_x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
     args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     # separate driven and not driven data
-    nd_hb_pos0 = hb_sols[0][:, 0]  # data with no driving force
+    nd_hb_pos0 = hb_sols[0][0]  # data with no driving force
     nd_hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)  # rest of the data
     for i in range(2 * num_trials - 1):
-        nd_hb_pos_omegas[i] = hb_sols[i + 1][:, 0]
+        nd_hb_pos_omegas[i] = hb_sols[0][i + 1]
     for i in range(2 * num_trials - 1):
         nd_x_sfs[i] = np.array([-1 * amp * np.sin(nd_omegas_driven[i] * j) + amp_vis * nd_omegas_driven[i] * np.cos(nd_omegas_driven[i] * j) for j in t])
         args_list[i] = (float(nd_omegas_driven[i]), np.array(nd_hb_pos0, ndmin=2), np.array(nd_hb_pos_omegas[i], ndmin=2), nd_x_sfs[i], dt, alpha, beta, gamma, a, temp)
@@ -148,7 +152,7 @@ if __name__ == '__main__':
     hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
     t_0 = 0
     for i in range(len(hb_pos)):
-        hb_pos[i] = alpha * hb_sols[i][:, 0] + beta
+        hb_pos[i] = alpha * hb_sols[0][i] + beta
     t = a * t + t_0
 
     # separate driven and not driven data

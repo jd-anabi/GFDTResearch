@@ -40,7 +40,7 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     c = c[len(hb_pos) - 1:]
     return c / c[0]
 
-def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[Any]]:
+def lin_resp_freq(omega: float, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[Any]]:
     """
     Returns the linear response function, at a specific frequency, of the hair bundle (ran over multiple trials) with a stimulating force applied
     :param omega: the frequency tin calculate the response function at
@@ -50,8 +50,7 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     :return: the linear response function
     """
     # transfer to the frequency domain
-    hb_avg_pos = np.mean(hb_trials, axis=0)
-    hb_freq = ffts.fft(hb_avg_pos - np.mean(hb_avg_pos))
+    hb_freq = ffts.fft(hb_driven - np.mean(hb_driven))
     x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
     # shift ffts
     hb_freq = ffts.fftshift(hb_freq) # type: np.ndarray
@@ -63,19 +62,18 @@ def lin_resp_freq(omega: float, hb_trials: np.ndarray, x_sf: np.ndarray, dt: flo
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
     return hb_freq[index] / x_sf_freq[index]
 
-def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray:
+def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray:
     """
     Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
     :param omega: the frequency to calculate the ratio at
     :param hb_pos_undriven: the undriven hair bundle position
-    :param hb_trials: set of an ensemble of hair-bundle positions at different frequencies
+    :param hb_driven: set of an ensemble of hair-bundle positions at different frequencies
     :param x_sf: applied stimulus force at a given frequency omega
     :param dt: time stept
     :return: the fluctuation-response ratio at a specific frequencies
     """
     # generate auto-correlation function in frequency space
-    hb_pos_0 = np.mean(hb_pos_undriven, axis=0)
-    autocorr = auto_corr(hb_pos_0)
+    autocorr = auto_corr(hb_pos_undriven)
     autocorr_freq = ffts.fft(autocorr)
     autocorr_freq = ffts.fftshift(autocorr_freq) # type: np.ndarray
     # generate frequency array and shift it
@@ -84,21 +82,19 @@ def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, 
     # get auto-correlation function and linear response function at a specific frequency
     index = np.argmin(np.abs(freqs - omega / (2 * constants.pi)))  # calculate the index closest to the desired frequency
     autocorr_omega = autocorr_freq[index]
-    lin_resp_omega = lin_resp_freq(omega, hb_trials, x_sf, dt)
+    lin_resp_omega = lin_resp_freq(omega, hb_driven, x_sf, dt)
     theta = omega * autocorr_omega / np.imag(lin_resp_omega)
     return theta
 
-def nd_fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_trials: np.ndarray, x_sf: np.ndarray, dt: float, alpha: float, beta: float, gamma: float, a: float, temp: float) -> np.ndarray:
+def nd_fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float, alpha: float, beta: float, gamma: float, a: float, temp: float) -> np.ndarray:
     # generate auto-correlation function and undriven position in frequency space
-    hb_pos_0 = np.mean(hb_pos_undriven, axis=0)
-    hb_pos_0_freq = ffts.fft(hb_pos_0)
+    hb_pos_0_freq = ffts.fft(hb_pos_undriven)
     hb_pos_0_freq = ffts.fftshift(hb_pos_0_freq) # type: np.ndarray
-    autocorr = auto_corr(hb_pos_0)
+    autocorr = auto_corr(hb_pos_undriven)
     autocorr_freq = ffts.fft(autocorr)
     autocorr_freq = ffts.fftshift(autocorr_freq)  # type: np.ndarray
     # transfer driven position data and force to the frequency domain
-    hb_avg_pos = np.mean(hb_trials, axis=0)
-    hb_freq = ffts.fft(hb_avg_pos - np.mean(hb_avg_pos))
+    hb_freq = ffts.fft(hb_driven - np.mean(hb_driven))
     x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
     # shift ffts
     hb_freq = ffts.fftshift(hb_freq)  # type: np.ndarray
