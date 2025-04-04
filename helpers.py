@@ -3,7 +3,6 @@ from typing import Any
 import sdeint
 import numpy as np
 import scipy.fft as ffts
-import scipy.signal as signal
 import scipy.constants as constants
 from numpy import ndarray, dtype
 
@@ -36,9 +35,10 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     :param hb_pos: the position of a hair bundle
     :return: the auto-correlation function
     """
-    c = signal.correlate(hb_pos, hb_pos, mode='full')
+    hb_pos = hb_pos - np.mean(hb_pos)
+    c = np.correlate(hb_pos, hb_pos, mode='full')
     c = c[len(hb_pos) - 1:]
-    return c / c[0]
+    return c / (len(hb_pos) * c[0])
 
 def lin_resp_freq(omega: float, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[Any]]:
     """

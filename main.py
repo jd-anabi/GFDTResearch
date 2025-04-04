@@ -66,7 +66,7 @@ if __name__ == '__main__':
         s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
         args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
-    num_rep_trials = 5
+    num_rep_trials = int(input('Number of trials for each frequency: '))
     hb_sols_trials = [None] * num_rep_trials
     for i in range(num_rep_trials):
         with mp.Pool() as pool:
@@ -143,10 +143,10 @@ if __name__ == '__main__':
         nd_hb_pos_omegas[i] = hb_sols[0][i + 1]
     for i in range(2 * num_trials - 1):
         nd_x_sfs[i] = np.array([-1 * amp * np.sin(nd_omegas_driven[i] * j) + amp_vis * nd_omegas_driven[i] * np.cos(nd_omegas_driven[i] * j) for j in t])
-        args_list[i] = (float(nd_omegas_driven[i]), np.array(nd_hb_pos0, ndmin=2), np.array(nd_hb_pos_omegas[i], ndmin=2), nd_x_sfs[i], dt, alpha, beta, gamma, a, temp)
-    with mp.Pool() as pool:
-        nd_fdt_ratio = pool.starmap(helpers.nd_fdt_ratio, args_list)
-    nd_thetas = [nd_fdt_ratio[i] for i in range(2 * num_trials - 1)]
+        args_list[i] = (float(nd_omegas_driven[i]), nd_hb_pos0, nd_hb_pos_omegas[i], nd_x_sfs[i], dt, alpha, beta, gamma, a, temp)
+    nd_thetas = np.zeros(2 * num_trials - 1, dtype=float)
+    for i in range(len(nd_thetas)):
+        nd_thetas[i] = helpers.nd_fdt_ratio(*args_list[i])
 
     # redimensionalize
     hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
@@ -170,10 +170,10 @@ if __name__ == '__main__':
     args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     for i in range(2 * num_trials - 1):
         x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + amp_vis * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
-        args_list[i] = (float(omegas_driven[i]), np.array(hb_pos0, ndmin=2), np.array(hb_pos_omegas[i], ndmin=2), x_sfs[i], dt)
-    with mp.Pool() as pool:
-        fdt_ratio = pool.starmap(helpers.fdt_ratio, args_list)
-    thetas = [fdt_ratio[i] for i in range(2 * num_trials - 1)]
+        args_list[i] = (float(omegas_driven[i]), hb_pos0, hb_pos_omegas[i], x_sfs[i], dt)
+    thetas = np.zeros(2 * num_trials - 1, dtype=float)
+    for i in range(len(thetas)):
+        thetas[i] = helpers.fdt_ratio(*args_list[i])
     autocorr = helpers.auto_corr(hb_pos0)
     lin_resp_omegas = np.array([helpers.lin_resp_freq(float(omegas_driven[i]), np.array(hb_pos_omegas[i], ndmin=2), x_sfs[i], dt) for i in range(2 * num_trials - 1)])
 
