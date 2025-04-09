@@ -6,8 +6,6 @@ import matplotlib.pyplot as plt
 import scipy as sp
 import multiprocessing as mp
 
-from sympy.abc import alpha
-
 import helpers
 
 if __name__ == '__main__':
