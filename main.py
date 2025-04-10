@@ -49,12 +49,12 @@ if __name__ == '__main__':
         pt_steady = False
 
     # time and frequency arrays
-    dt = 1e-3
-    t = np.arange(0, 500, dt)
+    dt = 1e-4
+    t = np.arange(0, 100, dt)
     lims = [t[-1]  - 100, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
-    # solve sdes of the non-dimensional hair bundle
+    # solve sdes of the hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
     amp = 0.05
@@ -64,12 +64,9 @@ if __name__ == '__main__':
         s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
         args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
-    num_rep_trials = int(input('Number of trials for each frequency: '))
-    hb_sols_trials = [None] * num_rep_trials
-    for i in range(num_rep_trials):
-        with mp.Pool() as pool:
-            hb_sols_trials[i] = pool.starmap(helpers.hb_sols, args_list)
-    hb_sols = [[np.mean([hb_sols_trials[i][j][:, k] for i in range(num_rep_trials)], axis=0) for j in range(2 * num_trials)] for k in range(len(x0))]
+    with mp.Pool(processes=mp.cpu_count()) as pool:
+        hb_sols_trials = pool.starmap(helpers.hb_sols, args_list)
+    hb_sols = [[hb_sols_trials[j][:, k] for j in range(2 * num_trials)] for k in range(len(x0))]
 
     # creating figure and subplots
     if num_trials < 3:
@@ -118,49 +115,17 @@ if __name__ == '__main__':
     fig_f.set_figheight(18)
     plt.show()
 
-    # parameters for redimensionalization
-    chi_hb = params[12]
-    gamma = 0.14
-    d = 7e-9
-    x_sp = 2.46e-7
-    tau_gs_hat = 1 / 35e3
-    tau_gs = params[2]
-    temp = 295
-    alpha = d / gamma * chi_hb
-    beta = x_sp / gamma
-    a = tau_gs_hat / tau_gs
-
-    # nd fdt ratio
-    nd_omegas_driven = omegas[1:] / a
-    nd_x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
-    args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
     # separate driven and not driven data
-    nd_hb_pos0 = hb_sols[0][0]  # data with no driving force
-    nd_hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)  # rest of the data
-    for i in range(2 * num_trials - 1):
-        nd_hb_pos_omegas[i] = hb_sols[0][i + 1]
-    for i in range(2 * num_trials - 1):
-        nd_x_sfs[i] = np.array([-1 * amp * np.sin(nd_omegas_driven[i] * j) + amp_vis * nd_omegas_driven[i] * np.cos(nd_omegas_driven[i] * j) for j in t])
-        args_list[i] = (float(nd_omegas_driven[i]), nd_hb_pos0, nd_hb_pos_omegas[i], nd_x_sfs[i], dt, alpha, beta, gamma, a, temp)
-    nd_thetas = np.zeros(2 * num_trials - 1, dtype=float)
-    for i in range(len(nd_thetas)):
-        nd_thetas[i] = helpers.nd_fdt_ratio(*args_list[i])
-
-    # redimensionalize
     hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
-    t_0 = 0
     for i in range(len(hb_pos)):
-        hb_pos[i] = alpha * hb_sols[0][i] + beta
-    t = a * t + t_0
-
-    # separate driven and not driven data
+        hb_pos[i] = hb_sols[0][i]
     hb_pos0 = hb_pos[0] # data with no driving force
     hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray) # rest of the data
     for i in range(2 * num_trials - 1):
         hb_pos_omegas[i] = hb_pos[i + 1]
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:] # fft for non-driven data
     spon_osc_freq = freq[np.where(np.abs(hb_pos0_freq) == np.max(np.abs(hb_pos0_freq)))[0][0]] # frequency of spontaneous oscillations
-    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s. Dimensionless angular frequency: {2 * np.pi * spon_osc_freq / a}')
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s. Dimensionless angular frequency: {2 * np.pi * spon_osc_freq / 1}')
 
     # fdt ratio
     omegas_driven = omegas[1:]
@@ -201,24 +166,12 @@ if __name__ == '__main__':
     plt.ylabel(r'$\Im\{\tilde{\chi}\}$')
     plt.show()
 
-    #plt.plot(omegas_driven, theta_fit)
     plt.scatter(omegas_driven, thetas)
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\theta$')
     plt.show()
 
-    #plt.plot(omegas_driven, [1 / theta_fit[i] for i in range(len(theta_fit))])
     plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
     plt.xlabel(r'$\omega$')
     plt.ylabel(r'$\frac{1}{\theta}$')
-    plt.show()
-
-    plt.scatter(nd_omegas_driven, nd_thetas)
-    plt.xlabel(r'$\frac{\omega}{a}$')
-    plt.ylabel(r'$\tilde{\theta}$')
-    plt.show()
-
-    plt.scatter(nd_omegas_driven, [1 / nd_thetas[i] for i in range(len(nd_thetas))])
-    plt.xlabel(r'$\frac{\omega}{a}$')
-    plt.ylabel(r'$\frac{1}{\tilde{\theta}}$')
     plt.show()

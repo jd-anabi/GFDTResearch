@@ -27,6 +27,7 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     else:
         hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
     hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
+    print("Solved")
     return hb_sol
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
