@@ -8,6 +8,7 @@ import multiprocessing as mp
 from sympy.benchmarks.bench_meijerint import alpha
 
 import helpers
+from helpers import hb_sols
 
 if __name__ == '__main__':
     # whether to use the non-dimensional model or not
@@ -63,7 +64,7 @@ if __name__ == '__main__':
         pt_steady = False
 
     # time and frequency arrays
-    dt = 1e-7
+    dt = 1e-3
     t = np.arange(0, 1500, dt)
     lims = [t[-1]  - 100, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
@@ -77,9 +78,20 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
-        args_list[i] = (t, True, s_osc_curr, params, x0, nd, amp, amp_vis)
-    with mp.Pool(processes=3) as pool:
-        hb_sols_trials = pool.starmap(helpers.hb_sols, args_list)
+        args_list[i] = (t, pt_steady, s_osc_curr, params, x0, nd, amp, amp_vis, i)
+    # multiprocessing
+    pool = mp.Pool()
+    results = []
+    result_log = lambda result: results.append(result)
+    for i in range(2 * num_trials):
+        pool.apply(helpers.hb_sols, args=(args_list[i],), callback=result_log)
+    pool.close()
+    pool.join()
+    results = np.array(results)
+    print(results)
+    hb_sols_trials = np.array(results[:,0])
+    hb_sols_trials = hb_sols_trials[np.argsort(results[:,1])]
+    #hb_sols_trials = pool.starmap(helpers.hb_sols, args_list)
     hb_sols = [[hb_sols_trials[j][:, k] for j in range(2 * num_trials)] for k in range(len(x0))]
 
     # separate driven and not driven data
