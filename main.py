@@ -84,10 +84,12 @@ if __name__ == '__main__':
     results = []
     result_log = lambda result: results.append(result)
     for i in range(2 * num_trials):
-        pool.apply(helpers.hb_sols, args=(args_list[i],), callback=result_log)
+        pool.apply_async(helpers.hb_sols, args=(args_list[i],), callback=result_log)
     pool.close()
     pool.join()
     results = np.array(results)
+    while len(results) < 2 * num_trials:
+        pass
     print(results)
     hb_sols_trials = np.array(results[:,0])
     hb_sols_trials = hb_sols_trials[np.argsort(results[:,1])]
