@@ -5,10 +5,7 @@ import matplotlib.pyplot as plt
 import scipy as sp
 import multiprocessing as mp
 
-from sympy.benchmarks.bench_meijerint import alpha
-
 import helpers
-from helpers import hb_sols
 
 if __name__ == '__main__':
     # whether to use the non-dimensional model or not
@@ -37,13 +34,14 @@ if __name__ == '__main__':
             line = line + 1
 
     # parameters for redimensionalization
-    chi_hb = params[12]
-    gamma = 0.14
-    d = 7e-9
-    x_sp = 2.46e-7
-    tau_gs_hat = 1 / 35e3
     tau_gs = params[2]
+    chi_hb = params[12]
+    tau_gs_hat = 1 / 35e3
+    d = 7e-9
+    gamma = 0.14
+    x_sp = 2.46e-7
     temp = 295
+    # redimensionalize scaling parameters
     alpha = d / gamma * chi_hb
     beta = x_sp / gamma
     a = tau_gs_hat / tau_gs
@@ -54,7 +52,7 @@ if __name__ == '__main__':
     user_input = input('Want to use the steady-state solution for the open-channel probability (y/n): ').lower()
     pt0_params = []
     if user_input in ['y', 'yes', 'true', 't', '1']:
-        x0 = x0[:4]
+        x0 = x0[:4] # slice out p_t variable
         pt_steady = True
         if nd:
             pt0_params = params[9:15]
