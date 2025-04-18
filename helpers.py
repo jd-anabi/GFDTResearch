@@ -25,7 +25,9 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     if nd:
         hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
     else:
+        print("here")
         hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
+        print("here1")
     hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
     return hb_sol, index
 

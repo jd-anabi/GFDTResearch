@@ -148,6 +148,7 @@ class HairBundle:
         :param x_hb: hair bundle displacement`
         :return: time derivative of hair bundle displacement
         """
+        print("killme")
         return -1 * (gamma * n * f_gs + k_sp * (x_hb - x_sp)) / lambda_hb
 
     @staticmethod
@@ -208,7 +209,7 @@ class HairBundle:
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
                  k_es: float, x_es: float, d: float, epsilon: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool,
-                 a: float, b:float):
+                 a: float, b: float):
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
@@ -249,6 +250,7 @@ class HairBundle:
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
         self.a = a
         self.b = b
+        print("hello")
 
         def driving_force(t: float, amp: float, eta: float) -> float:
             """
@@ -266,16 +268,22 @@ class HairBundle:
         self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
         self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
         self.p_t = sym.symbols('p_t') # open channel probability
+        print("helloooooo")
 
         hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs) # hb sympy symbols
+        print("helloooooaoda")
+        print(self.x_hb_dot)
         sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot)  # SDEs
+        print("hello1")
 
         # check if we don't want to use the steady state solution for the open channel probability
         if not self.p_t_steady:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes))  # lambdify ode system
+        print("hi")
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), cse=True)  # lambdify ode system
+        print("hi1")
 
         def f(x: list, t: float) -> np.ndarray:
             x_sf = driving_force(t)
@@ -296,13 +304,20 @@ class HairBundle:
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property
     def k_gs(self) -> float:
+        print(self.__k_gs(self.p_gs, self.k_gs_min, self.k_gs_max).__class__)
         return sym.simplify(self.__k_gs(self.p_gs, self.k_gs_min, self.k_gs_max))
 
     @property
     def f_gs(self) -> float:
         if self.p_t_steady:
-            return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.gamma, self.d))
-        return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.gamma, self.d))
+            a = self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.d, self.gamma)
+            print(a)
+            print(a.free_symbols)
+            print(a.__class__)
+            b = sym.simplify(a)
+            print(b)
+            return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
+        return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
 
     @property
     def s(self) -> float:
