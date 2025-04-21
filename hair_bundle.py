@@ -115,25 +115,26 @@ class HairBundle:
         return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_gs)
 
     @staticmethod
-    def __hb_noise(epsilon: float, eta: float, temp: float, lam: float) -> float:
+    def __hb_noise(epsilon: float, temp: float, lam: float) -> float:
         """
         White noise for hair bundle
-        :param eta: noise control variable
-        :param tau: finite time constant
+        :param epsilon: noise control variable
+        :param temp: temperature
+        :param lam: drag coefficient
         :return: equation for the hair bundle noise
         """
-        return epsilon * np.sqrt(2 * constants.k * temp * lam) * eta
+        return epsilon * np.sqrt(2 * constants.k * temp * lam)
 
     @staticmethod
-    def __a_noise(epsilon: float, eta: float, temp: float, lam: float) -> float:
+    def __a_noise(epsilon: float, temp: float, lam: float) -> float:
         """
         Time-independent white noise for the adaptation motor
-        :param eta: noise control variable
-        :param s_max: max slipping rate
-        :param s_min: min slipping rate
+        :param epsilon: noise control variable
+        :param temp: temperature
+        :param lam: drag coefficient
         :return: equation for the adaptation motor noise
         """
-        return epsilon * np.sqrt(2 * constants.k * temp * lam) * eta
+        return epsilon * np.sqrt(2 * constants.k * temp * lam)
     # -------------------------------- ODEs --------------------------------
     @staticmethod
     def __x_hb_dot(gamma: float, n: float, f_gs: float, lambda_hb: float, k_sp: float, x_sp: float, x_hb: float) -> float:
@@ -148,7 +149,6 @@ class HairBundle:
         :param x_hb: hair bundle displacement`
         :return: time derivative of hair bundle displacement
         """
-        print("killme")
         return -1 * (gamma * n * f_gs + k_sp * (x_hb - x_sp)) / lambda_hb
 
     @staticmethod
@@ -208,8 +208,7 @@ class HairBundle:
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float, epsilon: float, eta_hb: float, eta_a: float, omega: float, p_t_steady: bool,
-                 a: float, b: float):
+                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, p_t_steady: bool, a: float, b: float):
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
@@ -244,20 +243,15 @@ class HairBundle:
         self.x_es = x_es # extent spring displacement
         self.d = d # channel gate opening distance
         self.epsilon = epsilon # noise scale
-        self.eta_hb = eta_hb  # hair bundle diffusion constant
-        self.eta_a = eta_a  # adaptation motor diffusion constant
         self.omega = omega  # frequency of stimulus force
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
         self.a = a
         self.b = b
-        print("hello")
 
-        def driving_force(t: float, amp: float, eta: float) -> float:
+        def driving_force(t: float) -> float:
             """
             Sinusoidal stimulus force
             :param t: time
-            :param amp: amplitude
-            :param eta: amplitude for drag term
             :return: equation for a sinusoidal stimulus
             """
             return -1 * self.a * np.sin(self.omega * t) + self.b * self.omega * np.cos(self.omega * t)
@@ -268,22 +262,16 @@ class HairBundle:
         self.p_m = sym.symbols('p_m') # calcium binding probability for adaptation motor
         self.p_gs = sym.symbols('p_gs') # calcium binding probability for gating spring
         self.p_t = sym.symbols('p_t') # open channel probability
-        print("helloooooo")
 
         hb_symbols = sym.Tuple(self.x_hb, self.x_a, self.p_m, self.p_gs) # hb sympy symbols
-        print("helloooooaoda")
-        print(self.x_hb_dot)
         sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot)  # SDEs
-        print("hello1")
 
         # check if we don't want to use the steady state solution for the open channel probability
         if not self.p_t_steady:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        print("hi")
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), cse=True)  # lambdify ode system
-        print("hi1")
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["numpy"], cse=True)  # lambdify ode system
 
         def f(x: list, t: float) -> np.ndarray:
             x_sf = driving_force(t)
@@ -304,18 +292,11 @@ class HairBundle:
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property
     def k_gs(self) -> float:
-        print(self.__k_gs(self.p_gs, self.k_gs_min, self.k_gs_max).__class__)
         return sym.simplify(self.__k_gs(self.p_gs, self.k_gs_min, self.k_gs_max))
 
     @property
     def f_gs(self) -> float:
         if self.p_t_steady:
-            a = self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.d, self.gamma)
-            print(a)
-            print(a.free_symbols)
-            print(a.__class__)
-            b = sym.simplify(a)
-            print(b)
             return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
         return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
 
@@ -345,11 +326,11 @@ class HairBundle:
 
     @property
     def hb_noise(self) -> float:
-        return sym.simplify(self.__hb_noise(self.epsilon, self.eta_hb, self.temp, self.lambda_hb))
+        return sym.simplify(self.__hb_noise(self.epsilon, self.temp, self.lambda_hb))
 
     @property
     def a_noise(self) -> float:
-        return sym.simplify(self.__a_noise(self.epsilon, self.eta_a, self.temp, self.lambda_a))
+        return sym.simplify(self.__a_noise(self.epsilon, self.temp, self.lambda_a))
     # -------------------------------- Varying parameters (end) ----------------------------------
 
     # -------------------------------- ODEs (begin) ----------------------------------

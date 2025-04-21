@@ -9,7 +9,7 @@ from numpy import ndarray, dtype
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
 
-def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a: float, b: float, index: int) -> tuple:
+def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a: float, b: float) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
@@ -25,11 +25,9 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     if nd:
         hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
     else:
-        print("here")
         hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
-        print("here1")
     hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
-    return hb_sol, index
+    return hb_sol
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """

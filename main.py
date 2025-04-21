@@ -8,6 +8,12 @@ import multiprocessing as mp
 import helpers
 
 if __name__ == '__main__':
+    # time and frequency arrays
+    dt = 1e-8
+    t = np.arange(0, 2, dt)
+    lims = [t[-1] - 1.5, t[-1] - 0.5]
+    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
+
     # whether to use the non-dimensional model or not
     user_input = input('Would you like to use the non-dimensional model (y/n): ').lower()
     if user_input in ['y', 'yes', 'true', 't', '1']:
@@ -17,7 +23,7 @@ if __name__ == '__main__':
     if nd:
         params = np.zeros(17, dtype=float)
     else:
-        params = np.zeros(35, dtype=float)
+        params = np.zeros(33, dtype=float)
 
     # read hair cell from txt file
     line = 0
@@ -64,12 +70,6 @@ if __name__ == '__main__':
     else:
         pt_steady = False
 
-    # time and frequency arrays
-    dt = 1e-5
-    t = np.arange(0, 2, dt)
-    lims = [t[-1]  - 100, t[-1] - 50]
-    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
-
     # solve sdes of the hair bundle
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
@@ -79,19 +79,12 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         s_osc_curr = i * osc_freq_center / num_trials
         omegas[i] = s_osc_curr
-        args_list[i] = (t, pt_steady, s_osc_curr, params, x0, nd, amp, amp_vis, i)
+        args_list[i] = (t, pt_steady, s_osc_curr, params, x0, nd, amp, amp_vis)
     # multiprocessing
-    #with mp.Pool(mp.cpu_count()) as pool:
-    #    results = pool.starmap(helpers.hb_sols, args_list)
-    results = [helpers.hb_sols(*args_list[0])]
+    with mp.Pool(mp.cpu_count()) as pool:
+        results = pool.starmap(helpers.hb_sols, args_list)
     print(results)
-    assert False
-    results = np.array(results)
-    print(results)
-    hb_sols_trials = np.array(results[:,0])
-    #hb_sols_trials = hb_sols_trials[np.argsort(results[:,1])]
-    #hb_sols_trials = pool.starmap(helpers.hb_sols, args_list)
-    hb_sols = [[hb_sols_trials[j][:, k] for j in range(2 * num_trials)] for k in range(len(x0))]
+    hb_sols = [[results[j][:, k] for j in range(2 * num_trials)] for k in range(len(x0))]
 
     # separate driven and not driven data
     hb_pos = np.zeros(2 * num_trials, dtype=np.ndarray)
