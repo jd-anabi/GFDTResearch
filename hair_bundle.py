@@ -192,7 +192,7 @@ class HairBundle:
         return k_gs_plus * ca2_gs * (1 - p_gs) - k_gs_minus * p_gs
 
     @staticmethod
-    def __p_t(tau_t: float, p_t0: float, p_t: float) -> float:
+    def __p_t_dot(tau_t: float, p_t0: float, p_t: float) -> float:
         """
         Open channel probability dynamics
         :param tau_t: finite time constant for open channel
@@ -272,7 +272,6 @@ class HairBundle:
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["numpy"], cse=True)  # lambdify ode system
-
         def f(x: list, t: float) -> np.ndarray:
             x_sf = driving_force(t)
             if self.p_t_steady:
@@ -345,8 +344,8 @@ class HairBundle:
         return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
     @property
     def p_gs_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
+        return sym.simplify(self.__p_gs_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
     @property
     def p_t_dot(self) -> float:
-        return sym.simplify(self.__p_t(self.tau_t, self.p_t0, self.p_t))
+        return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
     # -------------------------------- ODEs (end) ----------------------------------
