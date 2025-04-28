@@ -1,7 +1,7 @@
 xhb_init = 1e-9
 xa_init = 1e-9
 pm_init = 1
-pgs_init = 1e-9
+pgs_init = 1
 pt_init = 1e-9
 tau_t = 1e-9
 c_min (m / s) = 0

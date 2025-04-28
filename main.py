@@ -9,9 +9,9 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-4
+    dt = 1e-6
     t = np.arange(0, 2, dt)
-    lims = [t[-1] - 150, t[-1] - 50]
+    lims = [t[-1] - 1.5, t[-1] - 0.5]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # whether to use the non-dimensional model or not
