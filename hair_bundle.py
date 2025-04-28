@@ -2,6 +2,9 @@ import numpy as np
 import sympy as sym
 import scipy.constants as constants
 
+SCALE: float = 10**30 # ng nm^2 s^-2 MK^-1
+K_B: float = SCALE * constants.k
+
 class HairBundle:
     # -------------------------------- Helper functions (begin) --------------------------------
     @staticmethod
@@ -65,7 +68,7 @@ class HairBundle:
         :param x_c: average equilibrium position of adaptation motor
         :return: equation fot the open channel probability at equilibrium
         """
-        return 1 / (1 + sym.exp(delta_e / (constants.k * temp) - k_gs * d / (constants.k * temp) * (x_hb - x_a + x_c - d / 2)))
+        return 1 / (1 + sym.exp(delta_e / (K_B * temp) - k_gs * d / (K_B * temp) * (x_hb - x_a + x_c - d / 2)))
 
     @staticmethod
     def __ca2_m(z_ca: float, d_ca: float, r_m: float, v_m: float, e_t_ca: float, p_t_ca: float, temp: float,
@@ -84,8 +87,8 @@ class HairBundle:
         :param p_t: open channel probability
         :return: equation for the calcium ion concentration near adaptation motor
         """
-        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (constants.k * temp))
-        g_t_ca_max = p_t_ca * z_ca**2 * constants.elementary_charge**2 / (constants.k * temp) * (ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
+        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (K_B * temp))
+        g_t_ca_max = p_t_ca * z_ca**2 * constants.elementary_charge**2 / (K_B * temp) * (ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (v_m - e_t_ca)
         return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_m)
@@ -107,8 +110,8 @@ class HairBundle:
         :param p_t: open channel probability
         :return: equation for the calcium ion concentration near gating spring
         """
-        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (constants.k * temp))
-        g_t_ca_max = p_t_ca * z_ca ** 2 * constants.elementary_charge ** 2 / (constants.k * temp) * (
+        exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (K_B * temp))
+        g_t_ca_max = p_t_ca * z_ca ** 2 * constants.elementary_charge ** 2 / (K_B * temp) * (
                     ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (v_m - e_t_ca)
@@ -123,7 +126,7 @@ class HairBundle:
         :param lam: drag coefficient
         :return: equation for the hair bundle noise
         """
-        return epsilon * np.sqrt(2 * constants.k * temp * lam)
+        return epsilon * np.sqrt(2 * K_B * temp * lam)
 
     @staticmethod
     def __a_noise(epsilon: float, temp: float, lam: float) -> float:
@@ -134,7 +137,7 @@ class HairBundle:
         :param lam: drag coefficient
         :return: equation for the adaptation motor noise
         """
-        return epsilon * np.sqrt(2 * constants.k * temp * lam)
+        return epsilon * np.sqrt(2 * K_B * temp * lam)
     # -------------------------------- ODEs --------------------------------
     @staticmethod
     def __x_hb_dot(gamma: float, n: float, f_gs: float, lambda_hb: float, k_sp: float, x_sp: float, x_hb: float) -> float:
