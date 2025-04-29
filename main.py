@@ -9,8 +9,8 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-4
-    t = np.arange(0, 2000, dt)
+    dt = 1e-5
+    t = np.arange(0, 500, dt)
     lims = [t[-1] - 150, t[-1] - 50]
 
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
