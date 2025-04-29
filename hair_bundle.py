@@ -274,7 +274,7 @@ class HairBundle:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["numpy"], cse=True)  # lambdify ode system
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
         def f(x: list, t: float) -> np.ndarray:
             x_sf = driving_force(t)
             if self.p_t_steady:
