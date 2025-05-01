@@ -9,7 +9,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-5
+    dt = 1e-4
     t = np.arange(0, 500, dt)
     lims = [t[-1] - 150, t[-1] - 50]
 

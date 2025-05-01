@@ -275,21 +275,35 @@ class HairBundle:
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
-        def f(x: list, t: float) -> np.ndarray:
-            x_sf = driving_force(t)
-            if self.p_t_steady:
-                sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
-                return sde_sys
-            sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3], x[4]))
-            return sde_sys
 
-        def g(x: list, t: float) -> np.ndarray:
-            if self.p_t_steady:
-                return np.diag([self.hb_noise, self.a_noise, 0, 0])
-            return np.diag([self.hb_noise, self.a_noise, 0, 0, 0])
+        def f(x_hb: float, x_a: float, p_m: float, p_gs: float, p_t: float, t: float) -> tuple:
+            x_sf = driving_force(t)
+            #if self.p_t_steady:
+                #sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x0, x1, x2, x3))
+            return self.sde_sym_lambda_func(x_sf + x_hb, x_a, p_m, p_gs, p_t)
+                #return sde_sys
+            #return self.sde_sym_lambda_func(x_sf + x0, x1, x2, x3)
+            #sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3], x[4]))
+            #return tuple(sde_sys)
+
+        def f_steady(x_hb: float, x_a: float, p_m: float, p_gs: float, t: float) -> tuple:
+            x_sf = driving_force(t)
+            return self.sde_sym_lambda_func(x_sf + x_hb, x_a, p_m, p_gs)
+
+        def g(x_hb: float, x_a: float, p_m: float, p_gs: float, p_t: float, t: float) -> tuple:
+            #if self.p_t_steady:
+                #return self.hb_noise, self.a_noise, 0, 0
+                #return np.diag([self.hb_noise, self.a_noise, 0, 0])
+            #return np.diag([self.hb_noise, self.a_noise, 0, 0, 0])
+            return self.hb_noise, self.a_noise, 0, 0, 0
+
+        def g_steady(x_hb: float, x_a: float, p_m: float, p_gs: float, t: float) -> tuple:
+            return self.hb_noise, self.a_noise, 0, 0
 
         self.f = f
+        self.f_steady = f_steady
         self.g = g
+        self.g_steady = g_steady
 
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property

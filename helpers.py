@@ -1,6 +1,7 @@
 from typing import Any
 
 import sdeint
+import brainpy as bp
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
@@ -22,12 +23,21 @@ def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0
     :param b: the amplitude of the viscous part of the driving force
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    if nd:
-        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
-    else:
+    if not nd:
         hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
-    hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
-    return hb_sol
+    else:
+        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
+    #hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
+    if pt_steady_state:
+        hb_sol = bp.sdeint(hb_mod.f_steady, hb_mod.g_steady, intg_type=bp.integrators.ITO_SDE, wiener_type=bp.integrators.SCALAR_WIENER)
+        runner = bp.IntegratorRunner(hb_sol, inits=list(x0), monitors=['x_hb', 'x_a', 'p_m', 'p_gs'], dt=1e-4)
+        runner.run(duration=float(t[-1]))
+        return np.array([runner.mon.x_hb[:, 0], runner.mon.x_a[:, 1], runner.mon.p_m[:, 2], runner.mon.p_gs[:, 3]])
+    else:
+        hb_sol = bp.sdeint(hb_mod.f, hb_mod.g)
+        runner = bp.IntegratorRunner(hb_sol, inits=list(x0), monitors=['x_hb', 'x_a', 'p_m', 'p_gs', 'p_t'], dt=1e-4)
+        runner.run(duration=float(t[-1]))
+        return np.array([runner.mon.x_hb[:, 0], runner.mon.x_a[:, 1], runner.mon.p_m[:, 2], runner.mon.p_gs[:, 3], runner.mon.p_t[:, 4]])
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """

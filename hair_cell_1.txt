@@ -35,4 +35,4 @@ x_sp (nm) = 246e1
 k_es (ng / ms^2) = 140
 x_es (nm) = 0
 d (nm) = 7e2
-epsilon = 0
+epsilon = 0.01
