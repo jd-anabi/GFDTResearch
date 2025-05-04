@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Callable
 
 import sdeint
 import brainpy as bp
@@ -9,25 +9,20 @@ from numpy import ndarray, dtype
 
 import hair_bundle as hb
 import hair_bundle_nondimensional as hb_nd
+import hair_bundle_sde as hb_sde
 
-def hb_sols(t: np.ndarray, pt_steady_state: bool, s_osc: float, params: list, x0: list, nd: bool, a: float, b: float) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady_state: bool) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
-    :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
-    :param s_osc: spontaneous oscillation frequency
-    :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param x0: the initial conditions of the hair bundle
-    :param nd: whether to use the non-dimensional model or not
-    :param a: the amplitude of the driving force
-    :param b: the amplitude of the viscous part of the driving force
+    :param params: the parameters to use in the for the non-dimensional hair bundle constructor
+    :param force_params: the parameters to use in the stimulus force
+    :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    if not nd:
-        hb_mod = hb.HairBundle(*params, s_osc, pt_steady_state, a, b)
-    else:
-        hb_mod = hb_nd.HairBundleNonDimensional(*params, s_osc, pt_steady_state, a, b)
-    hb_sol = sdeint.itoEuler(hb_mod.f, hb_mod.g, x0, t)
+    hb_sde_mod = hb_sde.HairBundleSDE(params, force_params, pt_steady_state)
+    hb_sol = itoEuler(hb_sde_mod.f, hb_sde_mod.g(x0, t), x0, t)
     return hb_sol
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
@@ -87,32 +82,6 @@ def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, 
     theta = omega * autocorr_omega / np.imag(lin_resp_omega)
     return theta
 
-def nd_fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float, alpha: float, beta: float, gamma: float, a: float, temp: float) -> np.ndarray:
-    # generate auto-correlation function and undriven position in frequency space
-    hb_pos_0_freq = ffts.fft(hb_pos_undriven)
-    hb_pos_0_freq = ffts.fftshift(hb_pos_0_freq) # type: np.ndarray
-    autocorr = auto_corr(hb_pos_undriven)
-    autocorr_freq = ffts.fft(autocorr)
-    autocorr_freq = ffts.fftshift(autocorr_freq)  # type: np.ndarray
-    # transfer driven position data and force to the frequency domain
-    hb_freq = ffts.fft(hb_driven - np.mean(hb_driven))
-    x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
-    # shift ffts
-    hb_freq = ffts.fftshift(hb_freq)  # type: np.ndarray
-    x_sf_freq = ffts.fftshift(x_sf_freq)  # type: np.ndarray
-    # generate frequency array and shift it
-    freqs = ffts.fftfreq(len(autocorr), d=dt)
-    freqs = ffts.fftshift(freqs)
-    freqs = freqs / a
-    # now for the fun (hard) part, extracting the values at a given frequency
-    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi * a)))  # calculate the index closest to the desired frequency
-    # calculate nd fdt ratio
-    scale = gamma / (2 * np.abs(a) * constants.k * temp)
-    num = omega * (alpha * autocorr_freq[index] + beta * hb_pos_0_freq[index]) * np.abs(x_sf_freq[index])**2
-    denom = np.imag(hb_freq[index]) * np.real(x_sf_freq[index]) - np.real(hb_freq[index]) * np.imag(x_sf_freq[index])
-    theta = scale * num / denom
-    return theta
-
 def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray, params: list, nd: bool) -> np.ndarray:
     """
     Steady-state solution for the open-channel probability
@@ -131,3 +100,24 @@ def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray, params: list, nd: 
         k_gs_var = params[2] - p_gs * (params[2] - params[1])
         x_gs = k_gs_var * params[5] / (constants.k * params[4]) * (x_hb - x_a + params[3] - params[5] / 2)
         return 1 / (1 + np.exp(params[0] / (constants.k * params[4]) - x_gs))
+
+def itoEuler(f: Callable[[float, ndarray], ndarray], G: ndarray, y0: ndarray, t: ndarray, generator=None, nan_index: float = 10):
+    if generator is None:
+        generator = np.random.default_rng()
+    t_size = t.size
+    y_count = y0.shape[0]
+    dt = (t[t_size - 1] - t[0]) / (t_size - 1)
+    y = np.zeros((t_size, y_count), dtype=y0.dtype)
+    eta = G * generator.normal(0, np.sqrt(dt), (t_size, y_count))
+    y[0] = y0
+    yn = y0
+    for n in range(nan_index):
+        yn = yn + f(yn, t[n]) * dt + eta[n, :]
+        y[n + 1, :] = yn
+    if np.any(np.isnan(y[:nan_index, :])):
+        y[nan_index:, :] = np.nan
+        return y
+    for n in range(nan_index, t_size - 1):
+        yn = yn + f(yn, t[n]) * dt + eta[n, :]
+        y[n + 1, :] = yn
+    return y.T

@@ -211,7 +211,7 @@ class HairBundle:
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, p_t_steady: bool, a: float, b: float):
+                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, amp: float, vis_amp: float, p_t_steady: bool):
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
@@ -247,17 +247,9 @@ class HairBundle:
         self.d = d # channel gate opening distance
         self.epsilon = epsilon # noise scale
         self.omega = omega  # frequency of stimulus force
+        self.amp = amp # amplitude of stimulus force
+        self.vis_amp = vis_amp # amplitude of the viscous portion of the stimulus force
         self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
-        self.a = a
-        self.b = b
-
-        def driving_force(t: float) -> float:
-            """
-            Sinusoidal stimulus force
-            :param t: time
-            :return: equation for a sinusoidal stimulus
-            """
-            return -1 * self.a * np.sin(self.omega * t) + self.b * self.omega * np.cos(self.omega * t)
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -276,21 +268,15 @@ class HairBundle:
 
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
 
-        def f(x: list, t: float) -> np.ndarray:
-            x_sf = driving_force(t)
-            if self.p_t_steady:
-                sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3]))
-                return sde_sys
-            sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], x[1], x[2], x[3], x[4]))
-            return sde_sys
+        def driving_force(t: float) -> float:
+            """
+            Sinusoidal stimulus force
+            :param t: time
+            :return: equation for a sinusoidal stimulus
+            """
+            return -1 * self.amp * np.sin(self.omega * t) + self.vis_amp * self.omega * np.cos(self.omega * t)
 
-        def g(x: list, t: float) -> np.ndarray:
-            if self.p_t_steady:
-                return np.diag([self.hb_noise, self.a_noise, 0, 0])
-            return np.diag([self.hb_noise, self.a_noise, 0, 0, 0])
-
-        self.f = f
-        self.g = g
+        self.driving_force = driving_force
 
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property
