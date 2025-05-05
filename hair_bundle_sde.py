@@ -13,7 +13,7 @@ class HairBundleSDE(HairBundle):
             :param t: the time to evaluate the coupled SDEs at
             :return: an array of length n representing the system of the coupled SDEs at time t
             """
-            x_sf = self.driving_force(t)
+            x_sf = self.sin_driving_force(t)
             sde_sys = np.array(self.sde_sym_lambda_func(x_sf + x[0], *x[1:]))
             return sde_sys
 

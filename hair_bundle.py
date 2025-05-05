@@ -268,7 +268,7 @@ class HairBundle:
 
         self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
 
-        def driving_force(t: float) -> float:
+        def sin_driving_force(t: float) -> float:
             """
             Sinusoidal stimulus force
             :param t: time
@@ -276,7 +276,7 @@ class HairBundle:
             """
             return -1 * self.amp * np.sin(self.omega * t) + self.vis_amp * self.omega * np.cos(self.omega * t)
 
-        self.driving_force = driving_force
+        self.sin_driving_force = sin_driving_force
 
     # -------------------------------- Varying parameters (begin) ----------------------------------
     @property

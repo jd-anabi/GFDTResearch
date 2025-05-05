@@ -1,7 +1,6 @@
 from typing import Any, Callable
 
 import sdeint
-import brainpy as bp
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
