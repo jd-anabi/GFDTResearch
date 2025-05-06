@@ -8,7 +8,7 @@ from numpy import ndarray, dtype
 
 import hair_bundle_sde as hb_sde
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady_state: bool) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady_state: bool, dt: float) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to solve sdes at
@@ -18,9 +18,14 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady
     :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    p = params + force_params + [pt_steady_state]
+    p = []
+    p.append(params)
+    p.append(force_params)
+    p.append([pt_steady_state])
     hb_sde_mod = hb_sde.HairBundleSDE(params, force_params, pt_steady_state)
-    hb_sol = de.solve(de.jit(de.SDEProblem(hb_sde_mod.f, hb_sde_mod.g, x0, t, p)))
+    t_span = (t[0], t[-1])
+    hb_prob = de.jit(de.SDEProblem(hb_sde_mod.f, hb_sde_mod.g, x0, t_span, p))
+    hb_sol = de.solve(hb_prob, dt=dt)
     return hb_sol
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:

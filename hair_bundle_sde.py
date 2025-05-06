@@ -13,8 +13,12 @@ class HairBundleSDE(HairBundle):
             :param t: the time to evaluate the coupled SDEs at
             :return: an array of length n representing the system of the coupled SDEs at time t
             """
-            x_sf = self.sin_driving_force(t)
-            dxdt = np.array(self.sde_sym_lambda_func(x_sf + x[0], *x[1:]))
+            #x_sf = self.sin_driving_force(t)
+            u = self.sde_sym_lambda_func(x[0], *x[1:])
+            dxdt[0] = u[0]
+            dxdt[1] = u[1]
+            dxdt[2] = u[2]
+            dxdt[3] = u[3]
 
         def g(sigma: list, x: list, p: list, t: float) -> None:
             """
@@ -23,7 +27,11 @@ class HairBundleSDE(HairBundle):
             :param t: the time to evaluate the noise at; not needed because the noise for the hair bundle is time-independent
             :return: list of length n representing the noise associated with each variable
             """
-            sigma = [self.hb_noise, self.a_noise, 0, 0, 0]
+            du = [self.hb_noise, self.a_noise, 0, 0, 0]
+            sigma[0] = du[0]
+            sigma[1] = du[1]
+            sigma[2] = du[2]
+            sigma[3] = du[3]
 
         self.f = f
         self.g = g

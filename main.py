@@ -57,7 +57,7 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         curr_osc = i * osc_freq_center / num_trials
         omegas[i] = curr_osc
-        args_list[i] = (t, x0, params, [curr_osc, amp, vis_amp], pt_steady)
+        args_list[i] = (t, x0, list(params), [curr_osc, amp, vis_amp], pt_steady, dt)
 
     # multiprocessing and solve sdes
     with mp.Pool(mp.cpu_count()) as pool:
