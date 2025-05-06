@@ -1,13 +1,11 @@
 from typing import Any, Callable
 
-import sdeint
+from diffeqpy import de
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
 from numpy import ndarray, dtype
 
-import hair_bundle as hb
-import hair_bundle_nondimensional as hb_nd
 import hair_bundle_sde as hb_sde
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady_state: bool) -> np.ndarray:
@@ -20,8 +18,9 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady
     :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
+    p = params + force_params + [pt_steady_state]
     hb_sde_mod = hb_sde.HairBundleSDE(params, force_params, pt_steady_state)
-    hb_sol = itoEuler(hb_sde_mod.f, hb_sde_mod.g(x0, t), x0, t)
+    hb_sol = de.solve(de.jit(de.SDEProblem(hb_sde_mod.f, hb_sde_mod.g, x0, t, p)))
     return hb_sol
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:

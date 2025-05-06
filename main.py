@@ -10,7 +10,7 @@ import helpers
 if __name__ == '__main__':
     # time and frequency arrays
     dt = 1e-4
-    t = np.arange(0, 5, dt)
+    t = np.arange(0, 2, dt)
     lims = [t[-1] - 150, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -42,17 +42,24 @@ if __name__ == '__main__':
     else:
         pt_steady = False
 
-    # solve sdes of the hair bundle
+    # set up forcing params
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    amp = 0.0
-    vis_amp = 0.0
+    file = 'sin_force_params.txt'
+    forcing_amps = []
+    with open(file, mode='r') as txtfile:
+        for row in txtfile:
+            val = float(re.findall(pattern, row.strip())[0])
+            forcing_amps.append(val)
+    amp = forcing_amps[0]
+    vis_amp = forcing_amps[1]
     args_list = np.zeros(2 * num_trials, dtype=tuple)
     for i in range(2 * num_trials):
-        s_osc_curr = i * osc_freq_center / num_trials
-        omegas[i] = s_osc_curr
-        args_list[i] = (t, x0, params, [s_osc_curr, amp, vis_amp], pt_steady)
-    # multiprocessing
+        curr_osc = i * osc_freq_center / num_trials
+        omegas[i] = curr_osc
+        args_list[i] = (t, x0, params, [curr_osc, amp, vis_amp], pt_steady)
+
+    # multiprocessing and solve sdes
     with mp.Pool(mp.cpu_count()) as pool:
         results = pool.starmap(helpers.hb_sols, args_list)
     hb_sols = [[results[j][k] for j in range(2 * num_trials)] for k in range(len(x0))]
