@@ -3,14 +3,14 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
-import multiprocessing as mp
+import torch.multiprocessing as mp
 
 import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-4
-    t = np.arange(0, 2, dt)
+    dt = 1e-2
+    t = np.arange(0, 250, dt)
     lims = [t[-1] - 150, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -57,12 +57,14 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         curr_osc = i * osc_freq_center / num_trials
         omegas[i] = curr_osc
-        args_list[i] = (t, x0, list(params), [curr_osc, amp, vis_amp], pt_steady, dt)
+        args_list[i] = ((t[0], t[-1]), dt, x0, list(params), [curr_osc, amp, vis_amp], pt_steady)
 
     # multiprocessing and solve sdes
-    with mp.Pool(mp.cpu_count()) as pool:
-        results = pool.starmap(helpers.hb_sols, args_list)
-    hb_sols = [[results[j][k] for j in range(2 * num_trials)] for k in range(len(x0))]
+    #mp.set_start_method('spawn')
+    #with mp.Pool(processes=mp.cpu_count()) as pool:
+    #    results = pool.starmap(helpers.hb_sols, args_list)
+    results = [helpers.hb_sols(*args_list[0])]
+    hb_sols = [[results[j][k] for j in range(1)] for k in range(len(x0))]
     print(hb_sols)
 
     # separate driven and not driven data

@@ -266,7 +266,7 @@ class HairBundle:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["math"], cse=True)  # lambdify ode system
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
 
         def sin_driving_force(t: float) -> float:
             """

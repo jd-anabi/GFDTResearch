@@ -1,6 +1,7 @@
 from typing import Any, Callable
 
-from diffeqpy import de
+import torch
+import torchsde
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
@@ -8,25 +9,30 @@ from numpy import ndarray, dtype
 
 import hair_bundle_sde as hb_sde
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, pt_steady_state: bool, dt: float) -> np.ndarray:
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DTYPE = torch.float64
+
+def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list, pt_steady_state: bool) -> list:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
-    :param t: time to solve sdes at
+    :param t_span: time span to solve sdes for
+    :param dt: time step
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
     :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    p = []
-    p.append(params)
-    p.append(force_params)
-    p.append([pt_steady_state])
-    hb_sde_mod = hb_sde.HairBundleSDE(params, force_params, pt_steady_state)
-    t_span = (t[0], t[-1])
-    hb_prob = de.jit(de.SDEProblem(hb_sde_mod.f, hb_sde_mod.g, x0, t_span, p))
-    hb_sol = de.solve(hb_prob, dt=dt)
-    return hb_sol
+    num_time_steps = int((t_span[1] - t_span[0]) / dt)
+    init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
+    t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
+    sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state).to(DEVICE)
+    with torch.no_grad():
+        hb_sols = torchsde.sdeint(sde, init_conditions, t, dt=dt)
+    hb_sols_to_np = []
+    for i in range(len(x0)):
+        hb_sols_to_np.append(hb_sols[:, 0, i].cpu().numpy())
+    return hb_sols_to_np
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
