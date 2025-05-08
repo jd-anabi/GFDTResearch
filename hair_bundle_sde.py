@@ -1,15 +1,14 @@
 import torch
+import torchsde
 
 from hair_bundle import HairBundle
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
-class HairBundleSDE(torch.nn.Module):
-    noise_type = 'diagonal'
-    sde_type = 'ito'
+class HairBundleSDE(torchsde.SDEIto):
     def __init__(self, params: list, force_params: list, p_t_steady_state: bool):
-        super().__init__()
+        super().__init__(noise_type='diagonal')
         self.hb = HairBundle(*params, *force_params, p_t_steady_state)
 
     def f(self, t, x) -> torch.Tensor:

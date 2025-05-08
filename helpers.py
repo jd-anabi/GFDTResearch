@@ -33,11 +33,11 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state).to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
-        hb_sols = torchsde.sdeint(sde, init_conditions, t, dt=dt)
+        hb_sol = torchsde.sdeint(sde, init_conditions, t, dt=dt, method='euler')
     print("SDE solved")
     hb_sols_to_np = []
     for i in range(len(x0)):
-        hb_sols_to_np.append(hb_sols[:, 0, i].cpu().numpy())
+        hb_sols_to_np.append(hb_sol[:, 0, i].cpu().numpy())
     return hb_sols_to_np
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
