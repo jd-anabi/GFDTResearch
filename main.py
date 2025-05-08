@@ -21,12 +21,12 @@ if __name__ == '__main__':
     line = 0
     file = input('Hair cell file: ')
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
-    x0 = np.zeros(5, dtype=float)
+    x0 = []
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
             if line < 5:
-                x0[line] = val
+                x0.append(val)
             else:
                 params[line - 5] = val
             line = line + 1
@@ -63,6 +63,7 @@ if __name__ == '__main__':
     #mp.set_start_method('spawn')
     #with mp.Pool(processes=mp.cpu_count()) as pool:
     #    results = pool.starmap(helpers.hb_sols, args_list)
+    print("Accessing helpers")
     results = [helpers.hb_sols(*args_list[0])]
     hb_sols = [[results[j][k] for j in range(1)] for k in range(len(x0))]
     print(hb_sols)

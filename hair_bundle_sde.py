@@ -17,15 +17,19 @@ class HairBundleSDE(torch.nn.Module):
         sys_vars = []
         for var in torch.split(x, 1, dim=-1):
             sys_vars.append(var.item())
-        dx_sys = self.hb.sde_sym_lambda_func(tuple(sys_vars))
+        print(sys_vars)
+        dx_sys = self.hb.sde_sym_lambda_func(*sys_vars)
         dx_sys[0] = dx_sys[0] + force
         torch_vars = []
         for dx in dx_sys:
             torch_vars.append(torch.tensor(dx, dtype=DTYPE, device=DEVICE))
-        return torch.cat(torch_vars, dim=-1)
+        print(torch_vars)
+        print(torch.stack(torch_vars, dim=-1))
+        return torch.stack(torch_vars, dim=-1)
 
     def g(self, t, x) -> torch.Tensor:
         dsigma = [self.hb.hb_noise, self.hb.a_noise, 0, 0, 0]
         if self.hb.p_t_steady:
             dsigma = dsigma[0:4]
+        print(torch.diag(torch.tensor(dsigma, dtype=DTYPE, device=DEVICE)))
         return torch.diag(torch.tensor(dsigma, dtype=DTYPE, device=DEVICE))

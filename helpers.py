@@ -23,12 +23,18 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
+    if torch.cuda.is_available():
+        print("Using GPU")
+    else:
+        print("Using CPU")
     num_time_steps = int((t_span[1] - t_span[0]) / dt)
-    init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
+    init_conditions = torch.tensor([x0], dtype=DTYPE, device=DEVICE)
     t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
     sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state).to(DEVICE)
+    print("SDE set up")
     with torch.no_grad():
         hb_sols = torchsde.sdeint(sde, init_conditions, t, dt=dt)
+    print("SDE solved")
     hb_sols_to_np = []
     for i in range(len(x0)):
         hb_sols_to_np.append(hb_sols[:, 0, i].cpu().numpy())
