@@ -11,7 +11,7 @@ import hair_bundle_sde as hb_sde
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
-BATCH_SIZE = 1
+BATCH_SIZE = 3
 
 def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list, pt_steady_state: bool) -> list:
     """
@@ -35,7 +35,7 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state, 'diagonal', 'ito').to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
-        hb_sol = torchsde.sdeint(sde, init_conditions, t, dt=dt, method='srk', options={'trapezoidal_approx': False}, dt_min=dt/100.0)
+        hb_sol = torchsde.sdeint(sde, init_conditions, t, dt=dt, method='euler', dt_min=dt/100.0)
     print(hb_sol)
     print("SDE solved")
     hb_sols_to_np = []
