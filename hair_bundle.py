@@ -2,7 +2,7 @@ import numpy as np
 import sympy as sym
 import scipy.constants as constants
 
-SCALE: float = 10**30 # ng nm^2 s^-2 MK^-1
+SCALE: float = 1e24 # ng um^2 s^-2 MK^-1
 K_B: float = SCALE * constants.k
 
 class HairBundle:
@@ -266,7 +266,7 @@ class HairBundle:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["math"], cse=True)  # lambdify ode system
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
 
         def sin_driving_force(t: float) -> float:
             """

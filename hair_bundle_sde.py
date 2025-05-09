@@ -23,6 +23,8 @@ class HairBundleSDE(torch.nn.Module):
                 sys_vars[i][var_index] = var.item()
                 var_index = var_index + 1
             dx.append(self.hb.sde_sym_lambda_func(*(sys_vars[i])))
+            for j in range(x.shape[-1]):
+                dx[i][j] = float(dx[i][j])
             dx[i][0] = dx[i][0] + force
         return torch.tensor(dx, dtype=DTYPE, device=DEVICE)
 
