@@ -11,6 +11,7 @@ import hair_bundle_sde as hb_sde
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+BATCH_SIZE = 3
 
 def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list, pt_steady_state: bool) -> list:
     """
@@ -28,12 +29,14 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     else:
         print("Using CPU")
     num_time_steps = int((t_span[1] - t_span[0]) / dt)
-    init_conditions = torch.tensor([x0], dtype=DTYPE, device=DEVICE)
+    #init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE).reshape(BATCH_SIZE, len(x0))
+    init_conditions = torch.rand(BATCH_SIZE, len(x0))
     t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
-    sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state).to(DEVICE)
+    sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state, 'diagonal', 'ito').to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
-        hb_sol = torchsde.sdeint(sde, init_conditions, t, dt=dt, method='euler')
+        hb_sol = torchsde.sdeint(sde, init_conditions, t, dt=dt, method='srk')
+    print(hb_sol)
     print("SDE solved")
     hb_sols_to_np = []
     for i in range(len(x0)):

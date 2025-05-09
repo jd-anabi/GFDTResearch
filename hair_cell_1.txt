@@ -1,5 +1,5 @@
-xhb_init = 0.05
-xa_init = 0
+xhb_init = 0.5
+xa_init = 0.5
 pm_init = 0.5
 pgs_init = 0.5
 pt_init = 0.5
@@ -35,4 +35,4 @@ x_sp (nm) = 246e1
 k_es (ng / ms^2) = 140
 x_es (nm) = 0
 d (nm) = 7e3
-epsilon = 0
+epsilon = 0.03

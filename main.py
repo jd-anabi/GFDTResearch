@@ -9,7 +9,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-2
+    dt = 1e-6
     t = np.arange(0, 250, dt)
     lims = [t[-1] - 150, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
@@ -63,7 +63,6 @@ if __name__ == '__main__':
     #mp.set_start_method('spawn')
     #with mp.Pool(processes=mp.cpu_count()) as pool:
     #    results = pool.starmap(helpers.hb_sols, args_list)
-    print("Accessing helpers")
     results = [helpers.hb_sols(*args_list[0])]
     hb_sols = [[results[j][k] for j in range(1)] for k in range(len(x0))]
     print(hb_sols)
