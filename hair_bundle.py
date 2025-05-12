@@ -1,9 +1,12 @@
+import math
+
 import numpy as np
 import sympy as sym
 import scipy.constants as constants
+from fractions import Fraction
 
-SCALE: float = 1e24 # ng um^2 s^-2 MK^-1
-K_B: float = SCALE * constants.k
+SCALE: float = 1e24 # ng um^2 ms^-2 MK^-1
+K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
 
 class HairBundle:
     # -------------------------------- Helper functions (begin) --------------------------------
@@ -31,7 +34,7 @@ class HairBundle:
         :param gamma: geometric conversion factor
         :return: equation for the gating spring force
         """
-        return -1 * k_gs * (gamma * x_hb - x_a + x_c - p_t * d)
+        return k_gs * (gamma * x_hb - x_a + x_c - p_t * d)
 
     @staticmethod
     def __s(s_min: float, s_max: float, p_m: float) -> float:
@@ -56,19 +59,22 @@ class HairBundle:
         return c_max - p_m * (c_max - c_min)
 
     @staticmethod
-    def __p_t0(delta_e: float, temp: float, k_gs: float, d: float, x_hb: float, x_a: float, x_c: float) -> float:
+    def __p_t0(delta_e: float, temp: float, k_gs: float, d: float, gamma: float, x_hb: float, x_a: float, x_c: float) -> float:
         """
         Open channel probability at equilibrium
         :param delta_e: intrinsic energy difference between the transduction channel's two states
         :param temp: temperature
         :param k_gs: gating spring stiffness
         :param d: channel gate opening distance
+        :param gamma: geometric conversion factor
         :param x_hb: hair bundle displacement
         :param x_a: adaptation motor displacement
         :param x_c: average equilibrium position of adaptation motor
         :return: equation fot the open channel probability at equilibrium
         """
-        return 1 / (1 + sym.exp(delta_e / (K_B * temp) - k_gs * d / (K_B * temp) * (x_hb - x_a + x_c - d / 2)))
+        a = sym.exp(delta_e / (K_B * temp))
+        b = sym.exp(-1 * k_gs * d / (K_B * temp) * (gamma * x_hb - x_a + x_c - d / 2))
+        return 1 / (1 + a * b)
 
     @staticmethod
     def __ca2_m(z_ca: float, d_ca: float, r_m: float, v_m: float, e_t_ca: float, p_t_ca: float, temp: float,
@@ -211,7 +217,7 @@ class HairBundle:
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, amp: float, vis_amp: float, p_t_steady: bool):
+                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, amp: float, vis_amp: float):
         # parameters
         self.tau_t = tau_t # finite time constant
         self.c_min = c_min # min climbing rate
@@ -249,7 +255,6 @@ class HairBundle:
         self.omega = omega  # frequency of stimulus force
         self.amp = amp # amplitude of stimulus force
         self.vis_amp = vis_amp # amplitude of the viscous portion of the stimulus force
-        self.p_t_steady = p_t_steady # binary variable dictating whether p_t should be equal to the steady-state solution
 
         # hair bundle variables
         self.x_hb = sym.symbols('x_hb') # hair bundle displacement
@@ -262,11 +267,11 @@ class HairBundle:
         sdes = sym.Tuple(self.x_hb_dot, self.x_a_dot, self.p_m_dot, self.p_gs_dot)  # SDEs
 
         # check if we don't want to use the steady state solution for the open channel probability
-        if not self.p_t_steady:
+        if self.tau_t != 0.0:
             hb_symbols = hb_symbols + sym.Tuple(self.p_t)
             sdes = sdes + sym.Tuple(self.p_t_dot)
 
-        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=["mpmath"], cse=True)  # lambdify ode system
+        self.sde_sym_lambda_func = sym.lambdify(tuple(hb_symbols), list(sdes), modules=['jax'], cse=True)  # lambdify ode system
 
         def sin_driving_force(t: float) -> float:
             """
@@ -285,7 +290,7 @@ class HairBundle:
 
     @property
     def f_gs(self) -> float:
-        if self.p_t_steady:
+        if self.tau_t == 0.0:
             return sym.simplify(self.__f_gs(self.k_gs, self.p_t0, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
         return sym.simplify(self.__f_gs(self.k_gs, self.p_t, self.x_hb, self.x_a, self.x_c, self.d, self.gamma))
 
@@ -299,17 +304,17 @@ class HairBundle:
 
     @property
     def p_t0(self) -> float:
-        return sym.simplify(self.__p_t0(self.delta_e, self.temp, self.k_gs, self.d, self.x_hb, self.x_a, self.x_c))
+        return sym.simplify(self.__p_t0(self.delta_e, self.temp, self.k_gs, self.d, self.gamma, self.x_hb, self.x_a, self.x_c))
 
     @property
     def ca2_m(self) -> float:
-        if self.p_t_steady:
+        if self.tau_t == 0.0:
             return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_m, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t0))
         return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_m, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
 
     @property
     def ca2_gs(self) -> float:
-        if self.p_t_steady:
+        if self.tau_t == 0.0:
             return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t0))
         return sym.simplify(self.__ca2_m(self.z_ca, self.d_ca, self.r_gs, self.v_m, self.e_t_ca, self.p_t_ca, self.temp, self.ca2_hb_in, self.ca2_hb_ext, self.p_t))
 
@@ -325,17 +330,32 @@ class HairBundle:
     # -------------------------------- ODEs (begin) ----------------------------------
     @property
     def x_hb_dot(self) -> float:
-        return sym.simplify(self.__x_hb_dot(self.gamma, self.n, self.f_gs, self.lambda_hb, self.k_sp, self.x_sp, self.x_hb))
+        try:
+            return sym.simplify(self.__x_hb_dot(self.gamma, self.n, self.f_gs, self.lambda_hb, self.k_sp, self.x_sp, self.x_hb))
+        except MemoryError:
+            return 0
     @property
     def x_a_dot(self) -> float:
-        return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
+        try:
+            return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
+        except MemoryError:
+            return 0
     @property
     def p_m_dot(self) -> float:
-        return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
+        try:
+            return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
+        except MemoryError:
+            return 0
     @property
     def p_gs_dot(self) -> float:
-        return sym.simplify(self.__p_gs_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
+        try:
+            return sym.simplify(self.__p_gs_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
+        except MemoryError:
+            return 0
     @property
     def p_t_dot(self) -> float:
-        return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
+        try:
+            return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
+        except MemoryError:
+            return 0
     # -------------------------------- ODEs (end) ----------------------------------

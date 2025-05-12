@@ -7,11 +7,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 class HairBundleSDE(torch.nn.Module):
-    def __init__(self, params: list, force_params: list, p_t_steady_state: bool, noise_type: str, sde_type: str):
+    def __init__(self, params: list, force_params: list, noise_type: str, sde_type: str):
         super().__init__()
         self.noise_type = noise_type
         self.sde_type = sde_type
-        self.hb = HairBundle(*params, *force_params, p_t_steady_state)
+        self.hb = HairBundle(*params, *force_params)
 
     def f(self, t, x) -> torch.Tensor:
         force = self.hb.sin_driving_force(t.item())

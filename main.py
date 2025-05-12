@@ -1,3 +1,4 @@
+import math
 import re
 
 import numpy as np
@@ -9,8 +10,8 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-4
-    t = np.arange(0, 100, dt)
+    dt = 1e-6
+    t = np.arange(0, 250, dt)
     lims = [t[-1] - 150, t[-1] - 50]
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -33,14 +34,11 @@ if __name__ == '__main__':
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
     osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
-    user_input = input('Want to use the steady-state solution for the open-channel probability (y/n): ').lower()
     pt0_params = []
-    if user_input in ['y', 'yes', 'true', 't', '1']:
+    # check if we want to use the steady-state solution
+    if params[0] == 0:
         x0 = x0[:4] # slice out p_t variable
-        pt_steady = True
         pt0_params = [params[5], *params[10:14], params[31]]
-    else:
-        pt_steady = False
 
     # set up forcing params
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
@@ -57,7 +55,7 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         curr_osc = i * osc_freq_center / num_trials
         omegas[i] = curr_osc
-        args_list[i] = ((t[0], t[-1]), dt, x0, list(params), [curr_osc, amp, vis_amp], pt_steady)
+        args_list[i] = ((t[0], t[-1]), dt, x0, list(params), [curr_osc, amp, vis_amp])
 
     # multiprocessing and solve sdes
     #mp.set_start_method('spawn')

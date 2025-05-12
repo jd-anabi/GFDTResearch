@@ -13,7 +13,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 BATCH_SIZE = 3
 
-def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list, pt_steady_state: bool) -> list:
+def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list) -> list:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t_span: time span to solve sdes for
@@ -21,7 +21,6 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
-    :param pt_steady_state: determines whether to use the steady state solution for the open channel probability
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     if torch.cuda.is_available():
@@ -29,10 +28,11 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     else:
         print("Using CPU")
     num_time_steps = int((t_span[1] - t_span[0]) / dt)
-    #init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE).reshape(BATCH_SIZE, len(x0))
+    #init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
+    #init_conditions = torch.tile(init_conditions, (BATCH_SIZE, 1))
     init_conditions = torch.rand(BATCH_SIZE, len(x0), dtype=DTYPE, device=DEVICE)
     t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
-    sde = hb_sde.HairBundleSDE(params, force_params, pt_steady_state, 'diagonal', 'ito').to(DEVICE)
+    sde = hb_sde.HairBundleSDE(params, force_params, 'diagonal', 'ito').to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
         hb_sol = torchsde.sdeint(sde, init_conditions, t, method='srk', dt=dt, adaptive=True)
