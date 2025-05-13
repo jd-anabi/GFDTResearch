@@ -35,7 +35,7 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     sde = hb_sde.HairBundleSDE(params, force_params, 'diagonal', 'ito').to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
-        hb_sol = torchsde.sdeint(sde, init_conditions, t, method='srk', dt=dt, adaptive=True)
+        hb_sol = torchsde.sdeint(sde, init_conditions, t, method='euler', dt=dt, adaptive=True)
     print(hb_sol)
     print("SDE solved")
     hb_sols_to_np = []
