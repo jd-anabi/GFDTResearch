@@ -117,8 +117,7 @@ class HairBundle:
         :return: equation for the calcium ion concentration near gating spring
         """
         exp = sym.exp(-1 * z_ca * constants.elementary_charge * v_m / (K_B * temp))
-        g_t_ca_max = p_t_ca * z_ca ** 2 * constants.elementary_charge ** 2 / (K_B * temp) * (
-                    ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
+        g_t_ca_max = p_t_ca * z_ca ** 2 * constants.elementary_charge ** 2 / (K_B * temp) * (ca2_hb_in - ca2_hb_ext * exp) / (1 - exp)
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (v_m - e_t_ca)
         return -1 * i_t_ca / (2 * constants.pi * z_ca * constants.elementary_charge * d_ca * r_gs)
@@ -330,32 +329,17 @@ class HairBundle:
     # -------------------------------- ODEs (begin) ----------------------------------
     @property
     def x_hb_dot(self) -> float:
-        try:
-            return sym.simplify(self.__x_hb_dot(self.gamma, self.n, self.f_gs, self.lambda_hb, self.k_sp, self.x_sp, self.x_hb))
-        except MemoryError:
-            return 0
+        return sym.simplify(self.__x_hb_dot(self.gamma, self.n, self.f_gs, self.lambda_hb, self.k_sp, self.x_sp, self.x_hb))
     @property
     def x_a_dot(self) -> float:
-        try:
-            return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
-        except MemoryError:
-            return 0
+        return sym.simplify(self.__x_a_dot(self.s, self.c, self.f_gs, self.k_es, self.x_es, self.x_a))
     @property
     def p_m_dot(self) -> float:
-        try:
-            return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
-        except MemoryError:
-            return 0
+        return sym.simplify(self.__p_m_dot(self.k_m_plus, self.k_m_minus, self.ca2_m, self.p_m))
     @property
     def p_gs_dot(self) -> float:
-        try:
-            return sym.simplify(self.__p_gs_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
-        except MemoryError:
-            return 0
+        return sym.simplify(self.__p_gs_dot(self.k_gs_plus, self.k_gs_minus, self.ca2_gs, self.p_gs))
     @property
     def p_t_dot(self) -> float:
-        try:
-            return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
-        except MemoryError:
-            return 0
+        return sym.simplify(self.__p_t_dot(self.tau_t, self.p_t0, self.p_t))
     # -------------------------------- ODEs (end) ----------------------------------

@@ -1,20 +1,71 @@
 import numpy as np
 import torch
 
+from scipy import constants
+from sympy.physics.quantum.sho1d import omega
+
 from hair_bundle import HairBundle
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
+SCALE: float = 1e30 # ng um^2 ms^-2 K^-1
+K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
+
 class HairBundleSDE(torch.nn.Module):
-    def __init__(self, params: list, force_params: list, noise_type: str, sde_type: str):
+    def __init__(self, tau_t: float, c_min: float, c_max: float, s_min: float, s_max: float,
+                 delta_e: float, k_m_plus: float, k_m_minus: float, k_gs_plus: float, k_gs_minus: float,
+                 k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
+                 r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
+                 ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
+                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, amp: float, vis_amp: float,
+                 noise_type: str, sde_type: str):
         super().__init__()
+        # parameters
+        self.tau_t = tau_t  # finite time constant
+        self.c_min = c_min  # min climbing rate
+        self.c_max = c_max  # max climbing rate
+        self.s_min = s_min  # min slipping rate
+        self.s_max = s_max  # max slipping rate
+        self.delta_e = delta_e  # intrinsic energy difference between the transduction channel's two states
+        self.k_m_plus = k_m_plus  # association constant for adaptation motors
+        self.k_m_minus = k_m_minus  # dissociation constant for adaptation motors
+        self.k_gs_plus = k_gs_plus  # association constant for gating springs
+        self.k_gs_minus = k_gs_minus  # dissociation constant for gating springs
+        self.k_gs_min = k_gs_min  # min gating spring stiffness
+        self.k_gs_max = k_gs_max  # max gating spring stiffness
+        self.x_c = x_c  # average equilibrium position of the adaptation motors
+        self.temp = temp  # temperature
+        self.z_ca = z_ca  # valence number
+        self.d_ca = d_ca  # diffusion constant
+        self.r_m = r_m  # distance of adaptation motor
+        self.r_gs = r_gs  # distance of gating spring
+        self.v_m = v_m  # membrane voltage
+        self.e_t_ca = e_t_ca  # reversal voltage
+        self.p_t_ca = p_t_ca  # transduction-channel permeability fo calcium
+        self.ca2_hb_in = ca2_hb_in  # intracellular concentration
+        self.ca2_hb_ext = ca2_hb_ext  # extracellular concentration
+        self.gamma = gamma  # geometric conversion factor
+        self.n = n  # number of gating springs
+        self.lambda_hb = lambda_hb  # viscous drag coefficient
+        self.lambda_a = lambda_a  # viscous drag coefficient for adaptation motor
+        self.k_sp = k_sp  # stereocilliary pivot stiffness
+        self.x_sp = x_sp  # stereocilliary pivot displacement
+        self.k_es = k_es  # extent spring stiffness
+        self.x_es = x_es  # extent spring displacement
+        self.d = d  # channel gate opening distance
+        self.epsilon = epsilon  # noise scale
+        self.omega = omega  # frequency of stimulus force
+
+        # force parameters
+        self.amp = amp  # amplitude of stimulus force
+        self.vis_amp = vis_amp  # amplitude of the viscous portion of the stimulus force
+
         self.noise_type = noise_type
         self.sde_type = sde_type
-        self.hb = HairBundle(*params, *force_params)
 
     def f(self, t, x) -> torch.Tensor:
-        force = self.hb.sin_driving_force(t.item())
+        force = self.sin_force(t.item())
         sys_vars = np.zeros(x.shape, dtype=float)
         dx = []
         for i in range(x.shape[0]):
@@ -22,13 +73,66 @@ class HairBundleSDE(torch.nn.Module):
             for var in torch.split(x[i], 1, dim=-1):
                 sys_vars[i][var_index] = var.item()
                 var_index = var_index + 1
-            dx.append(self.hb.sde_sym_lambda_func(*(sys_vars[i])))
+            dx_hb = self.__x_hb_dot(sys_vars[i][0], sys_vars[i][1], sys_vars[i][3], sys_vars[i][4])
+            dx_a = self.__x_a_dot(sys_vars[i][0], sys_vars[i][1], sys_vars[i][2], sys_vars[i][3], sys_vars[i][4])
+            dp_m = self.__p_m_dot(sys_vars[i][2], sys_vars[i][4])
+            dp_gs = self.__p_gs_dot(sys_vars[i][3], sys_vars[i][4])
+            dp_t = self.__p_t_dot(sys_vars[i][0], sys_vars[i][1], sys_vars[i][3], sys_vars[i][4])
+            dx.append([dx_hb, dx_a, dp_m, dp_gs, dp_t])
             for j in range(x.shape[-1]):
                 dx[i][j] = float(dx[i][j])
             dx[i][0] = dx[i][0] + force
         return torch.tensor(dx, dtype=DTYPE, device=DEVICE)
 
     def g(self, t, x) -> torch.Tensor:
-        dsigma = [self.hb.hb_noise, self.hb.a_noise, 0, 0, 0]
+        dsigma = [self.__hb_noise(), self.__a_noise(), 0, 0, 0]
         dsigma = dsigma[0:x.shape[-1]]
         return torch.tile(torch.tensor(dsigma, dtype=DTYPE, device=DEVICE), (x.shape[0], 1))
+
+    # stimulus force
+    def sin_force(self, t):
+        return -1 * self.amp * np.sin(self.omega * t) + self.vis_amp * omega * np.cos(self.omega * t)
+
+    # -------------------------------- PDEs (begin) ----------------------------------
+    def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> float:
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
+        f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
+        return -1 * (self.gamma * self.n * f_gs + self.k_sp * (x_hb - self.x_sp)) / self.lambda_hb
+
+    def __x_a_dot(self, x_hb, x_a, p_m, p_gs, p_t) -> float:
+        c = self.c_max - p_m * (self.c_max - self.c_min)
+        s = self.s_min + p_m * (self.s_max - self.s_min)
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
+        f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
+        return -1 * c + s * (f_gs - self.k_es * (x_a + self.x_es))
+
+    def __p_m_dot(self, p_m, p_t) -> float:
+        exp = np.exp(-1 * self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp))
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge ** 2 / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext * exp) / (1 - exp)
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
+        ca2_m = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_m)
+        return self.k_m_plus * ca2_m * (1 - p_m) - self.k_m_minus * p_m
+
+    def __p_gs_dot(self, p_gs, p_t) -> float:
+        exp = np.exp(-1 * self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp))
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge ** 2 / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext * exp) / (1 - exp)
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
+        ca2_m = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_m)
+        return self.k_gs_plus * ca2_m * (1 - p_gs) - self.k_gs_minus * p_gs
+
+    def __p_t_dot(self, x_hb, x_a, p_gs, p_t) -> float:
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
+        a = np.exp(self.delta_e / (K_B * self.temp))
+        b = np.exp(-1 * k_gs * self.d / (K_B * self.temp) * (self.gamma * x_hb - x_a + self.x_c - self.d / 2))
+        p_t0 = 1 / (1 + a * b)
+        return (p_t0 - p_t) / self.tau_t
+    # -------------------------------- PDEs (end) ----------------------------------
+
+    # noise
+    def __hb_noise(self) -> float:
+        return self.epsilon * np.sqrt(2 * K_B * self.temp * self.lambda_hb)
+
+    def __a_noise(self) -> float:
+        return self.epsilon * np.sqrt(2 * K_B * self.temp * self.lambda_a)

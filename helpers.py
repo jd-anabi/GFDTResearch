@@ -32,7 +32,7 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
     #init_conditions = torch.tile(init_conditions, (BATCH_SIZE, 1))
     init_conditions = torch.rand(BATCH_SIZE, len(x0), dtype=DTYPE, device=DEVICE)
     t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
-    sde = hb_sde.HairBundleSDE(params, force_params, 'diagonal', 'ito').to(DEVICE)
+    sde = hb_sde.HairBundleSDE(*params, *force_params, 'diagonal', 'ito').to(DEVICE)
     print("SDE set up")
     with torch.no_grad():
         hb_sol = torchsde.sdeint(sde, init_conditions, t, method='euler', dt=dt, adaptive=True)
