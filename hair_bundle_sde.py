@@ -6,7 +6,7 @@ from scipy import constants
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
-SCALE: float = 1e30 # ng um^2 ms^-2 K^-1
+SCALE: float = 1e18 # ng um^2 ms^-2 K^-1
 K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
 
 class HairBundleSDE(torch.nn.Module):
@@ -80,8 +80,9 @@ class HairBundleSDE(torch.nn.Module):
         return dx
 
     def g(self, t, x) -> torch.Tensor:
-        zero_noise = torch.zeros(self.batch_size, dtype=DEVICE, device=DEVICE)
+        zero_noise = torch.zeros(self.batch_size, dtype=DTYPE, device=DEVICE)
         dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1).to(DEVICE)
+        return dsigma
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
@@ -94,19 +95,27 @@ class HairBundleSDE(torch.nn.Module):
         s = self.s_min + p_m * (self.s_max - self.s_min)
         k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
         f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
-        return -1 * c + s * (f_gs - self.k_es * (x_a + self.x_es))
+        return -1 * c + s * ((f_gs + f_gs.abs()) / 2 - self.k_es * (x_a - self.x_es))
 
     def __p_m_dot(self, p_m, p_t) -> torch.Tensor:
-        exp = torch.exp(self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
-        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / (1 - exp)
+        arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
+        arg = torch.clamp(arg, max=100).to(DEVICE)
+        exp = torch.exp(arg).to(DEVICE)
+        denom = 1 - exp
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom).to(DEVICE)
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
         ca2_m = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_m)
         return self.k_m_plus * ca2_m * (1 - p_m) - self.k_m_minus * p_m
 
     def __p_gs_dot(self, p_gs, p_t) -> torch.Tensor:
-        exp = torch.exp(self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
-        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / (1 - exp)
+        arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
+        arg = torch.clamp(arg, max=100).to(DEVICE)
+        exp = torch.exp(arg).to(DEVICE)
+        denom = 1 - exp
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom).to(DEVICE)
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
         ca2_m = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_m)
@@ -127,7 +136,7 @@ class HairBundleSDE(torch.nn.Module):
 
     # noise
     def __hb_noise(self) -> torch.Tensor:
-        return self.epsilon * torch.sqrt(2 * K_B * self.temp * self.lambda_hb * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
+        return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_hb * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
 
     def __a_noise(self) -> torch.Tensor:
-        return self.epsilon * torch.sqrt(2 * K_B * self.temp * self.lambda_a * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
+        return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_a * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
