@@ -10,9 +10,8 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-6
-    t = np.arange(0, 100, dt)
-    lims = [t[-1] - 150, t[-1] - 50]
+    t = np.linspace(0, 250, int(1e6))
+    dt = float(t[1] - t[0])
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # parameters
@@ -55,21 +54,20 @@ if __name__ == '__main__':
     for i in range(2 * num_trials):
         curr_osc = i * osc_freq_center / num_trials
         omegas[i] = curr_osc
-        args_list[i] = ((t[0], t[-1]), dt, x0, list(params), [curr_osc, amp, vis_amp])
+        args_list[i] = (t, x0, list(params), [curr_osc, amp, vis_amp])
 
     # multiprocessing and solve sdes
     #mp.set_start_method('spawn')
     #with mp.Pool(processes=mp.cpu_count()) as pool:
     #    results = pool.starmap(helpers.hb_sols, args_list)
-    results = [helpers.hb_sols(*args_list[0])]
-    hb_sols = [[results[j][k] for j in range(1)] for k in range(len(x0))]
-    print(hb_sols)
+    results = helpers.hb_sols(*args_list[0]) # shape: (T, BATCH_SIZE, d)
+    print(results)
 
     # separate driven and not driven data
-    hb_pos0 = hb_sols[0][0]  # data with no driving force
-    hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)  # rest of the data
-    for i in range(2 * num_trials - 1):
-        hb_pos_omegas[i] = hb_sols[0][i + 1]
+    hb_pos0 = results[:, 0, 0]  # data of the hair bundle position from the first batch
+    #hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
+    #for i in range(2 * num_trials - 1):
+    #    hb_pos_omegas[i] = hb_sols[0][i + 1]
 
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
@@ -87,42 +85,4 @@ if __name__ == '__main__':
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\hat{x}_{hb}$')
     plt.xlim((0.005, 0.015))
-    plt.show()
-
-    # fdt ratio
-    omegas_driven = omegas[1:]
-    x_sfs = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
-    args_list = np.zeros(2 * num_trials - 1, dtype=tuple)
-    for i in range(2 * num_trials - 1):
-        x_sfs[i] = np.array([-1 * amp * np.sin(omegas_driven[i] * j) + vis_amp * omegas_driven[i] * np.cos(omegas_driven[i] * j) for j in t])
-        args_list[i] = (float(omegas_driven[i]), hb_pos0, hb_pos_omegas[i], x_sfs[i], dt)
-    thetas = np.zeros(2 * num_trials - 1, dtype=float)
-    for i in range(len(thetas)):
-        thetas[i] = helpers.fdt_ratio(*args_list[i])
-    autocorr = helpers.auto_corr(hb_pos0)
-    lin_resp_omegas = np.array([helpers.lin_resp_freq(float(omegas_driven[i]), np.array(hb_pos_omegas[i], ndmin=2), x_sfs[i], dt) for i in range(2 * num_trials - 1)])
-
-    plt.plot(t, autocorr)
-    plt.xlabel(r'$t$')
-    plt.ylabel(r'$C_0$')
-    plt.show()
-
-    plt.scatter(omegas_driven, np.real(lin_resp_omegas))
-    plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\Re\{\tilde{\chi}\}$')
-    plt.show()
-
-    plt.scatter(omegas_driven, np.imag(lin_resp_omegas))
-    plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\Im\{\tilde{\chi}\}$')
-    plt.show()
-
-    plt.scatter(omegas_driven, thetas)
-    plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\theta$')
-    plt.show()
-
-    plt.scatter(omegas_driven, [1 / thetas[i] for i in range(len(thetas))])
-    plt.xlabel(r'$\omega$')
-    plt.ylabel(r'$\frac{1}{\theta}$')
     plt.show()

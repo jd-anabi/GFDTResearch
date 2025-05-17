@@ -1,3 +1,4 @@
+import sys
 from typing import Any, Callable
 
 import torch
@@ -6,18 +7,19 @@ import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
 from numpy import ndarray, dtype
+from tqdm import tqdm
 
 import hair_bundle_sde as hb_sde
+import steady_state_hair_bundle_sde as hb_sde0
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 BATCH_SIZE = 3
 
-def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list) -> list:
+def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
-    :param t_span: time span to solve sdes for
-    :param dt: time step
+    :param t: time to evaluate the solution over
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
@@ -27,22 +29,33 @@ def hb_sols(t_span: tuple, dt: float, x0: list, params: list, force_params: list
         print("Using GPU")
     else:
         print("Using CPU")
-    num_time_steps = int((t_span[1] - t_span[0]) / dt)
-    #init_conditions = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
-    #init_conditions = torch.tile(init_conditions, (BATCH_SIZE, 1))
-    init_conditions = torch.rand(BATCH_SIZE, len(x0), dtype=DTYPE, device=DEVICE)
-    print(init_conditions)
-    t = torch.linspace(t_span[0], t_span[1], num_time_steps, dtype=DTYPE, device=DEVICE)
-    sde = hb_sde.HairBundleSDE(*params, *force_params).to(DEVICE)
+    # check if we are using the steady-state solution
+    if params[0] == 0:
+        sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params)
+        x0 = x0[:4]
+        print("Using the steady-state solution for the open-channel probability")
+    else:
+        sde = hb_sde.HairBundleSDE(*params, *force_params).to(DEVICE)
     print("SDE set up")
+    # setting up initial conditions
+    x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
+    x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
+    #init_conditions = torch.rand(BATCH_SIZE, len(x0), dtype=DTYPE, device=DEVICE)
+    print(x0s)
+    # setting up the time array
+    t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
+    dt = t[1] - t[0]
+    # solving a system of SDEs and implementing a progress bar (this is cool fyi)
+    hb_sol = [x0s]
     with torch.no_grad():
-        hb_sol = torchsde.sdeint(sde, init_conditions, t, method='srk', dt=dt, adaptive=True)
+        for i in tqdm(range(1, len(t)), desc="Solving SDEs"):
+            t_interval = torch.tensor([t[i - 1], t[i]], dtype=DTYPE, device=DEVICE)
+            x0s = torchsde.sdeint(sde, x0s, t_interval, method='srk', dt=dt, adaptive=True)[-1] # only use the last state for the next time step
+            hb_sol.append(x0s)
+    hb_sol = torch.stack(hb_sol)
     print(hb_sol)
     print("SDE solved")
-    hb_sols_to_np = []
-    for i in range(len(x0)):
-        hb_sols_to_np.append(hb_sol[:, 0, i].cpu().numpy())
-    return hb_sols_to_np
+    return hb_sol.cpu().numpy()
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
