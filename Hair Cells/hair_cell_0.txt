@@ -35,4 +35,4 @@ x_sp (um) = 246e-2
 k_es (ng / ms^2) = 140
 x_es (um) = 0
 d (um) = 7
-epsilon = 1
+epsilon = 0.03

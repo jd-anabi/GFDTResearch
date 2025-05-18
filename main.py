@@ -1,4 +1,3 @@
-import math
 import re
 
 import numpy as np
@@ -10,7 +9,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    t = np.linspace(0, 250, int(1e6))
+    t = np.linspace(0, 250, int(1e4))
     dt = float(t[1] - t[0])
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -19,7 +18,7 @@ if __name__ == '__main__':
 
     # read hair cell from txt file
     line = 0
-    file = input('Hair cell file: ')
+    file = 'Hair Cells/hair_cell_' + input('Hair cell file number: ') + '.txt'
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
     x0 = []
     with open(file, mode='r') as txtfile:
@@ -36,7 +35,6 @@ if __name__ == '__main__':
     pt0_params = []
     # check if we want to use the steady-state solution
     if params[0] == 0:
-        x0 = x0[:4] # slice out p_t variable
         pt0_params = [params[5], *params[10:14], params[31]]
 
     # set up forcing params
@@ -78,11 +76,5 @@ if __name__ == '__main__':
     plt.plot(t, hb_pos0)
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
-    plt.xlim((0.005, 0.015))
-    plt.show()
-
-    plt.plot(freq, hb_pos0_freq)
-    plt.xlabel(r'Frequency (Hz)')
-    plt.ylabel(r'$\hat{x}_{hb}$')
-    plt.xlim((0.005, 0.015))
+    plt.xlim((50, 200))
     plt.show()
