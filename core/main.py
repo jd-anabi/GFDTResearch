@@ -1,9 +1,10 @@
+import os
 import re
+import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
-import torch.multiprocessing as mp
 
 import helpers
 
@@ -16,9 +17,15 @@ if __name__ == '__main__':
     # parameters
     params = np.zeros(33, dtype=float)
 
-    # read hair cell from txt file
+    # read hair cell and force info from txt files
     line = 0
-    file = 'Hair Cells/hair_cell_' + input('Hair cell file number: ') + '.txt'
+    if sys.platform == 'win32':
+        hair_cell_file_path = '\\Hair Cells\\hair_cell_'
+        force_file_path = '\\Force Info\\sin_force_params.txt'
+    else:
+        hair_cell_file_path = '/Hair Cells/hair_cell_'
+        force_file_path = '/Force Info/sin_force_params.txt'
+    file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
     x0 = []
     with open(file, mode='r') as txtfile:
@@ -40,7 +47,7 @@ if __name__ == '__main__':
     # set up forcing params
     num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
     omegas = np.zeros(2 * num_trials, dtype=float)
-    file = 'sin_force_params.txt'
+    file = os.getcwd() + force_file_path
     forcing_amps = []
     with open(file, mode='r') as txtfile:
         for row in txtfile:

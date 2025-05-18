@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from hair_bundle import HairBundle
+from core.hair_bundle import HairBundle
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64

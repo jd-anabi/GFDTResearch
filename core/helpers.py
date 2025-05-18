@@ -37,7 +37,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
         print("Using the steady-state solution for the open-channel probability")
     else:
         sde = hb_sde.HairBundleSDE(*params, *force_params, batch_size=BATCH_SIZE).to(DEVICE)
-    print("SDE set up")
+    print("Hair bundle model has been set up")
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
@@ -45,11 +45,10 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
     # setting up the time array
     t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
     dt = t[1] - t[0]
-    print("Number of time steps: ", len(t))
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     hb_sol = [x0s]
     with torch.no_grad():
-        for i in tqdm(range(1, len(t)), desc="Solving SDEs"):
+        for i in tqdm(range(1, len(t)), desc=f"Simulating {BATCH_SIZE} batches of hair bundles"):
             t_interval = torch.tensor([t[i - 1], t[i]], dtype=DTYPE, device=DEVICE)
             curr_sol = x0s
             try:
@@ -60,7 +59,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
                 x0s = curr_sol / 2
             hb_sol.append(x0s)
     hb_sol = torch.stack(hb_sol)
-    print("SDE solved")
+    print("SDEs have been solved")
     return hb_sol.cpu().numpy()
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
