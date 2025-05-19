@@ -10,7 +10,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    t = np.linspace(0, 2, int(1e4))
+    t = np.linspace(0, 1, int(1e4))
     dt = float(t[1] - t[0])
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -55,17 +55,10 @@ if __name__ == '__main__':
             forcing_amps.append(val)
     amp = forcing_amps[0]
     vis_amp = forcing_amps[1]
-    args_list = np.zeros(2 * num_trials, dtype=tuple)
-    for i in range(2 * num_trials):
-        curr_osc = i * osc_freq_center / num_trials
-        omegas[i] = curr_osc
-        args_list[i] = (t, x0, list(params), [curr_osc, amp, vis_amp])
+    args_list = (t, x0, list(params), [0, amp, vis_amp])
 
     # multiprocessing and solve sdes
-    #mp.set_start_method('spawn')
-    #with mp.Pool(processes=mp.cpu_count()) as pool:
-    #    results = pool.starmap(helpers.hb_sols, args_list)
-    results = helpers.hb_sols(*args_list[0]) # shape: (T, BATCH_SIZE, d)
+    results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
     print(results)
 
     # separate driven and not driven data

@@ -6,7 +6,7 @@ from scipy import constants
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
-SCALE: float = 1e3 # g m^2 s^-2 K^-1
+SCALE: float = 1e21 # g nm^2 s^-2 K^-1
 K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
 
 class HairBundleSDE(torch.nn.Module):
@@ -15,7 +15,7 @@ class HairBundleSDE(torch.nn.Module):
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float, epsilon: float, omega: float, amp: float, vis_amp: float,
+                 k_es: float, x_es: float, d: float, epsilon: float, omega_0: float, amp: float, vis_amp: float,
                  noise_type: str = 'diagonal', sde_type: str = 'ito', batch_size: int = 3):
         super().__init__()
         # parameters
@@ -52,7 +52,7 @@ class HairBundleSDE(torch.nn.Module):
         self.x_es = x_es  # extent spring displacement
         self.d = d  # channel gate opening distance
         self.epsilon = epsilon  # noise scale
-        self.omega = omega  # frequency of stimulus force
+        self.omega_0 = omega_0  # frequency of spontaneous oscillations
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
@@ -64,18 +64,18 @@ class HairBundleSDE(torch.nn.Module):
         self.batch_size = batch_size
 
     def f(self, t, x) -> torch.Tensor:
-        dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4]).to(DEVICE)
-        dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4]).to(DEVICE)
-        dp_m = self.__p_m_dot(x[:, 2], x[:, 4]).to(DEVICE)
-        dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4]).to(DEVICE)
-        dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4]).to(DEVICE)
-        dx_hb = dx_hb.to(DEVICE) + self.__sin_force(t).to(DEVICE)
-        dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1).to(DEVICE)
+        dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
+        dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4])
+        dp_m = self.__p_m_dot(x[:, 2], x[:, 4])
+        dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4])
+        dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
+        dx_hb = dx_hb + self.__sin_force(t)
+        dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1)
         return dx
 
     def g(self, t, x) -> torch.Tensor:
         zero_noise = torch.zeros(self.batch_size, dtype=DTYPE, device=DEVICE)
-        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1).to(DEVICE)
+        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1)
         return dsigma
 
     # -------------------------------- PDEs (begin) ----------------------------------
@@ -93,10 +93,10 @@ class HairBundleSDE(torch.nn.Module):
 
     def __p_m_dot(self, p_m, p_t) -> torch.Tensor:
         arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
-        arg = torch.clamp(arg, max=100).to(DEVICE)
-        exp = torch.exp(arg).to(DEVICE)
+        arg = torch.clamp(arg, max=100)
+        exp = torch.exp(arg)
         denom = 1 - exp
-        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom).to(DEVICE)
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom)
         g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
@@ -105,10 +105,10 @@ class HairBundleSDE(torch.nn.Module):
 
     def __p_gs_dot(self, p_gs, p_t) -> torch.Tensor:
         arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
-        arg = torch.clamp(arg, max=100).to(DEVICE)
-        exp = torch.exp(arg).to(DEVICE)
+        arg = torch.clamp(arg, max=100)
+        exp = torch.exp(arg)
         denom = 1 - exp
-        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom).to(DEVICE)
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom)
         g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
         g_t_ca = p_t * g_t_ca_max
         i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
@@ -126,8 +126,10 @@ class HairBundleSDE(torch.nn.Module):
 
     # stimulus force
     def __sin_force(self, t):
-        return -1 * self.amp * torch.sin(self.omega * t * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)) + self.vis_amp * self.omega * torch.cos(self.omega * t * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
-
+        omega = self.omega_0 * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
+        for i in range(len(omega)):
+            omega[i] = i * omega[i] / round(self.batch_size / 2)
+        return -1 * self.amp * torch.sin(omega * t) + self.vis_amp * omega * torch.cos(omega * t)
     # noise
     def __hb_noise(self) -> torch.Tensor:
         return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_hb * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
