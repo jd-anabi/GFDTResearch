@@ -57,6 +57,9 @@ class HairBundleSDE(torch.nn.Module):
         # force parameters
         self.amp = amp  # amplitude of stimulus force
         self.vis_amp = vis_amp  # amplitude of the viscous portion of the stimulus force
+        self.omega = self.omega_0 * torch.ones(batch_size, dtype=DTYPE, device=DEVICE)
+        for i in range(len(self.omega)):
+            self.omega[i] = i * self.omega[i] / round(batch_size / 2)
 
         # sde model parameters
         self.noise_type = noise_type
@@ -126,10 +129,7 @@ class HairBundleSDE(torch.nn.Module):
 
     # stimulus force
     def __sin_force(self, t):
-        omega = self.omega_0 * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
-        for i in range(len(omega)):
-            omega[i] = i * omega[i] / round(self.batch_size / 2)
-        return -1 * self.amp * torch.sin(omega * t) + self.vis_amp * omega * torch.cos(omega * t)
+        return -1 * self.amp * torch.sin(self.omega * t) + self.vis_amp * self.omega * torch.cos(self.omega * t)
     # noise
     def __hb_noise(self) -> torch.Tensor:
         return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_hb * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
