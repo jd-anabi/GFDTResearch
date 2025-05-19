@@ -81,14 +81,16 @@ class HairBundleSDE(torch.nn.Module):
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
         k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
         f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
-        return -1 * (self.gamma * self.n * f_gs + self.k_sp * (x_hb - self.x_sp)) / self.lambda_hb
+        x_sp = self.n * self.gamma * k_gs * (self.x_c - p_t * self.d) / self.k_sp
+        return -1 * (self.gamma * self.n * f_gs + self.k_sp * (x_hb - x_sp)) / self.lambda_hb
 
     def __x_a_dot(self, x_hb, x_a, p_m, p_gs, p_t) -> torch.Tensor:
         c = self.c_max - p_m * (self.c_max - self.c_min)
         s = self.s_min + p_m * (self.s_max - self.s_min)
         k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
         f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
-        return -1 * c + s * ((f_gs + f_gs.abs()) / 2 - self.k_es * (x_a - self.x_es))
+        x_es = (c / s - k_gs * (self.x_c - p_t * self.d + torch.abs(self.x_c - p_t * self.d)) / 2) / self.k_es
+        return -1 * c + s * ((f_gs + f_gs.abs()) / 2 - self.k_es * (x_a - x_es))
 
     def __p_m_dot(self, p_m, p_t) -> torch.Tensor:
         arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)

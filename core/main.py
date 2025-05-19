@@ -10,7 +10,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    t = np.linspace(0, 250, int(1e4))
+    t = np.linspace(0, 2, int(1e4))
     dt = float(t[1] - t[0])
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
