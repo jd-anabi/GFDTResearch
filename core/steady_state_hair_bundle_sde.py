@@ -6,7 +6,7 @@ from scipy import constants
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
-SCALE: float = 1e9 # ug um^2 us^-2 K^-1
+SCALE: float = 1e3 # g m^2 s^-2 K^-1
 K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
 
 class HairBundleSDE(torch.nn.Module):
