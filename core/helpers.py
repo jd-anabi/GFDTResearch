@@ -13,9 +13,16 @@ import hair_bundle_sde as hb_sde
 import steady_state_hair_bundle_sde as hb_sde0
 
 warnings.filterwarnings('error')
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float64
-BATCH_SIZE = 256
+
+if torch.cuda.is_available():
+    DEVICE = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device('cpu')
+else:
+    DEVICE = torch.device('cpu')
+
+DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
+BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 16
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
@@ -27,18 +34,18 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
     :param force_params: the parameters to use in the stimulus force
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() or torch.backends.mps.is_available():
         print("Using GPU")
     else:
         print("Using CPU")
 
     # check if we are using the steady-state solution
     if params[0] == 0:
-        sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE)
+        sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         x0 = x0[:4]
         print("Using the steady-state solution for the open-channel probability")
     else:
-        sde = hb_sde.HairBundleSDE(*params, *force_params, batch_size=BATCH_SIZE).to(DEVICE)
+        sde = hb_sde.HairBundleSDE(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
     print("Hair bundle model has been set up")
 
     # setting up initial conditions
@@ -48,6 +55,9 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
     # setting up the time array
     t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
     dt = t[1] - t[0]
+
+    print(sde.g_t_ca_max)
+    print(sde.E_exp)
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     hb_sol = [x0s]

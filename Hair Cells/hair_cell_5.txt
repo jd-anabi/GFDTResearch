@@ -35,4 +35,4 @@ x_sp (nm) = 246e1
 k_es (g s^-2) = 140e-6
 x_es (nm) = 0
 d (nm) = 7
-epsilon = 0.01
+epsilon = 0
