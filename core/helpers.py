@@ -16,6 +16,7 @@ warnings.filterwarnings('error')
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 BATCH_SIZE = 256
+SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
@@ -30,33 +31,35 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
         print("Using GPU")
     else:
         print("Using CPU")
+
     # check if we are using the steady-state solution
     if params[0] == 0:
-        sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params, batch_size=BATCH_SIZE)
+        sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE)
         x0 = x0[:4]
         print("Using the steady-state solution for the open-channel probability")
     else:
         sde = hb_sde.HairBundleSDE(*params, *force_params, batch_size=BATCH_SIZE).to(DEVICE)
     print("Hair bundle model has been set up")
+
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
-    #init_conditions = torch.rand(BATCH_SIZE, len(x0), dtype=DTYPE, device=DEVICE)
+
     # setting up the time array
     t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
     dt = t[1] - t[0]
+
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     hb_sol = [x0s]
     with torch.no_grad():
         for i in tqdm(range(1, len(t)), desc=f"Simulating {BATCH_SIZE} batches of hair bundles"):
             t_interval = torch.tensor([t[i - 1], t[i]], dtype=DTYPE, device=DEVICE)
-            curr_sol = x0s
             try:
-                curr_sol = torchsde.sdeint(sde, x0s, t_interval, method='srk', dt=dt, adaptive=False)[-1] # only use the last state for the next time step
+                curr_sol = torchsde.sdeint(sde, x0s, t_interval, method='euler', dt=dt, adaptive=False)[-1] # only use the last state for the next time step
                 x0s = curr_sol
             except (Warning, Exception) as e:
                 tqdm.write(str(e))
-                x0s = curr_sol / 2
+                break
             hb_sol.append(x0s)
     hb_sol = torch.stack(hb_sol)
     print("SDEs have been solved")

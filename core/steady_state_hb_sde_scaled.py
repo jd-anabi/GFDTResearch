@@ -8,11 +8,9 @@ DTYPE = torch.float64
 
 SCALE: float = 1e21 # g nm^2 s^-2 K^-1
 K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
-F_SCALE: float = 1e-3 # C mmol^-1
-F: float = F_SCALE * constants.physical_constants["Faraday constant"][0] # C mol^-1
 
 class HairBundleSDE(torch.nn.Module):
-    def __init__(self, tau_t: float, c_min: float, c_max: float, s_min: float, s_max: float,
+    def __init__(self, c_min: float, c_max: float, s_min: float, s_max: float,
                  delta_e: float, k_m_plus: float, k_m_minus: float, k_gs_plus: float, k_gs_minus: float,
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
@@ -21,7 +19,6 @@ class HairBundleSDE(torch.nn.Module):
                  noise_type: str = 'diagonal', sde_type: str = 'ito', batch_size: int = 3):
         super().__init__()
         # parameters
-        self.tau_t = tau_t  # finite time constant
         self.c_min = c_min  # min climbing rate
         self.c_max = c_max  # max climbing rate
         self.s_min = s_min  # min slipping rate
@@ -68,71 +65,76 @@ class HairBundleSDE(torch.nn.Module):
         self.sde_type = sde_type
         self.batch_size = batch_size
 
-        # subsuming parameters
-        self.delta_kgs = self.k_gs_max - self.k_gs_min
-        self.delta_c = self.c_max - self.c_min
-        self.delta_s = self.s_max - self.s_min
-
-        arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
-        self.g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge * F / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / (1 - torch.exp(arg))
-
-        self.delta_v = self.v_m - self.e_t_ca
-        self.ca2_denom = 2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca
-        self.E_exp = torch.exp(self.delta_e / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
-
     def f(self, t, x) -> torch.Tensor:
         x[:, 2] = torch.clamp(x[:, 2], 0, 1)
         x[:, 3] = torch.clamp(x[:, 3], 0, 1)
-        x[:, 4] = torch.clamp(x[:, 4], 0, 1)
-        dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
-        dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4])
-        dp_m = self.__p_m_dot(x[:, 2], x[:, 4])
-        dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4])
-        dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
-        dx_hb = dx_hb + self.__sin_force(t) / self.lambda_hb
-        dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1)
+        p_t0 = self.__p_t0(x[:, 0], x[:, 1], x[:, 3])
+        p_t0 = torch.clamp(p_t0, 0, 1)
+        dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], p_t0)
+        dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], p_t0)
+        dp_m = self.__p_m_dot(x[:, 2], p_t0)
+        dp_gs = self.__p_gs_dot(x[:, 3], p_t0)
+        dx_hb = dx_hb + self.__sin_force(t)
+        dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs), dim=1)
         return dx
 
     def g(self, t, x) -> torch.Tensor:
         zero_noise = torch.zeros(self.batch_size, dtype=DTYPE, device=DEVICE)
-        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1)
+        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise), dim=1)
         return dsigma
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
-        k_gs = self.k_gs_max - p_gs * self.delta_kgs
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
         f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
-        return -1 * (self.gamma * self.n * f_gs + self.k_sp * (x_hb - self.x_sp)) / self.lambda_hb
+        x_sp = self.n * self.gamma * k_gs * (self.x_c - p_t * self.d) / self.k_sp
+        return -1 * (self.gamma * self.n * f_gs + self.k_sp * (x_hb - x_sp)) / self.lambda_hb
 
     def __x_a_dot(self, x_hb, x_a, p_m, p_gs, p_t) -> torch.Tensor:
-        c = self.c_max - p_m * self.delta_c
-        s = self.s_min + p_m * self.delta_s
-        k_gs = self.k_gs_max - p_gs * self.delta_kgs
+        c = self.c_max - p_m * (self.c_max - self.c_min)
+        s = self.s_min + p_m * (self.s_max - self.s_min)
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
         f_gs = k_gs * (self.gamma * x_hb - x_a + self.x_c - p_t * self.d)
-        return -1 * c + s * ((f_gs + f_gs.abs()) / 2 - self.k_es * (x_a - self.x_es))
+        x_es = (c / s - k_gs * (self.x_c - p_t * self.d + torch.abs(self.x_c - p_t * self.d)) / 2) / self.k_es
+        return -1 * c + s * (f_gs - self.k_es * (x_a - x_es))
 
     def __p_m_dot(self, p_m, p_t) -> torch.Tensor:
-        g_t_ca = p_t * self.g_t_ca_max
-        i_t_ca = g_t_ca * self.delta_v
-        ca2_m = -1 * i_t_ca / (self.ca2_denom * self.r_m)
+        arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
+        arg = torch.clamp(arg, max=100)
+        exp = torch.exp(arg)
+        denom = 1 - exp
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom)
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
+        ca2_m = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_m)
         return self.k_m_plus * ca2_m * (1 - p_m) - self.k_m_minus * p_m
 
     def __p_gs_dot(self, p_gs, p_t) -> torch.Tensor:
-        g_t_ca = p_t * self.g_t_ca_max
-        i_t_ca = g_t_ca * self.delta_v
-        ca2_gs = -1 * i_t_ca / (self.ca2_denom * self.r_gs)
+        arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE)
+        arg = torch.clamp(arg, max=100)
+        exp = torch.exp(arg)
+        denom = 1 - exp
+        denom = torch.where(denom.abs() < 1e-6, torch.tensor([1e-6] * self.batch_size, device=DEVICE, dtype=DTYPE), denom)
+        g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / denom
+        g_t_ca = p_t * g_t_ca_max
+        i_t_ca = g_t_ca * (self.v_m - self.e_t_ca)
+        ca2_gs = -1 * i_t_ca / (2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca * self.r_gs)
         return self.k_gs_plus * ca2_gs * (1 - p_gs) - self.k_gs_minus * p_gs
-
-    def __p_t_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
-        k_gs = self.k_gs_max - p_gs * self.delta_kgs
-        arg = -1 * k_gs * self.d / (K_B * self.temp) * (self.gamma * x_hb - x_a + self.x_c - self.d / 2)
-        p_t0 = 1 / (1 + self.E_exp * torch.exp(arg))
-        return (p_t0 - p_t) / self.tau_t
     # -------------------------------- PDEs (end) ----------------------------------
+
+    # steady-state open channel probability
+    def __p_t0(self, x_hb, x_a, p_gs) -> torch.Tensor:
+        k_gs = self.k_gs_max - p_gs * (self.k_gs_max - self.k_gs_min)
+        a = torch.exp(self.delta_e / (K_B * self.temp) * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))
+        arg = -1 * k_gs * self.d / (K_B * self.temp) * (self.gamma * x_hb - x_a + self.x_c - self.d / 2)
+        b = torch.exp(arg)
+        return 1 / (1 + a * b)
 
     # stimulus force
     def __sin_force(self, t):
         return -1 * self.amp * torch.sin(self.omega * t) + self.vis_amp * self.omega * torch.cos(self.omega * t)
+
     # noise
     def __hb_noise(self) -> torch.Tensor:
         return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_hb * torch.ones(self.batch_size, dtype=DTYPE, device=DEVICE))

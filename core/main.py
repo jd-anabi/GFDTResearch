@@ -10,7 +10,7 @@ import helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    t = np.linspace(0, 1, int(1e3))
+    t = np.linspace(0, 0.1, int(1e4))
     dt = float(t[1] - t[0])
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
@@ -45,8 +45,6 @@ if __name__ == '__main__':
         pt0_params = [params[5], *params[10:14], params[31]]
 
     # set up forcing params
-    num_trials = int(input('Number of trials less than or equal to frequency center (total number of trials is twice this values): '))
-    omegas = np.zeros(2 * num_trials, dtype=float)
     file = os.getcwd() + force_file_path
     forcing_amps = []
     with open(file, mode='r') as txtfile:
@@ -63,9 +61,8 @@ if __name__ == '__main__':
 
     # separate driven and not driven data
     hb_pos0 = results[:, 0, 0]  # data of the hair bundle position from the first batch
-    #hb_pos_omegas = np.zeros(2 * num_trials - 1, dtype=np.ndarray)
-    #for i in range(2 * num_trials - 1):
-    #    hb_pos_omegas[i] = hb_sols[0][i + 1]
+    print(hb_pos0)
+    print(np.argwhere(np.isnan(hb_pos0)))
 
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
@@ -76,5 +73,9 @@ if __name__ == '__main__':
     plt.plot(t, hb_pos0)
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
-    plt.xlim((50, 200))
+    plt.show()
+
+    plt.plot(hb_pos0)
+    plt.xlabel(r'Time')
+    plt.ylabel(r'$x_{hb}$')
     plt.show()
