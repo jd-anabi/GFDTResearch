@@ -35,4 +35,4 @@ x_sp (nm) = 50
 k_es (g s^-2) = 1e-3
 x_es (nm) = 0
 d (nm) = 7
-epsilon = 10
+epsilon = 0

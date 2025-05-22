@@ -6,12 +6,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
 
-import helpers
+import core.helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    t = np.linspace(0, 1, int(1e4))
-    dt = float(t[1] - t[0])
+    dt = 1e-4
+    t = np.arange(0, 1, dt)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # parameters
@@ -40,6 +40,7 @@ if __name__ == '__main__':
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
     osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
     pt0_params = []
+
     # check if we want to use the steady-state solution
     if params[0] == 0:
         pt0_params = [params[5], *params[10:14], params[31]]
@@ -53,7 +54,7 @@ if __name__ == '__main__':
             forcing_amps.append(val)
     amp = forcing_amps[0]
     vis_amp = forcing_amps[1]
-    args_list = (t, x0, list(params), [0, amp, vis_amp])
+    args_list = (t, x0, dt, list(params), [0, amp, vis_amp])
 
     # multiprocessing and solve sdes
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -66,8 +67,8 @@ if __name__ == '__main__':
 
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
-    spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
-    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
+    #spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
+    #print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
 
     # preliminary plotting
     plt.plot(t, hb_pos0)

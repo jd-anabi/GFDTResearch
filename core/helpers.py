@@ -9,13 +9,13 @@ import scipy.constants as constants
 from numpy import ndarray, dtype
 from tqdm import tqdm
 
-import hair_bundle_sde as hb_sde
-import steady_state_hair_bundle_sde as hb_sde0
+import core.hair_bundle_sde as hb_sde
+import core.steady_state_hair_bundle_sde as hb_sde0
 
 warnings.filterwarnings('error')
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
+    DEVICE = torch.device('cpu')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:
@@ -25,16 +25,17 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 16
 SDE_TYPES = ['ito', 'stratonovich']
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: list, dt: float, params: list, force_params: list) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time to evaluate the solution over
     :param x0: the initial conditions of the hair bundle
+    :param dt: time step
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
-    if torch.cuda.is_available() or torch.backends.mps.is_available():
+    if DEVICE.type == 'cuda' or DEVICE.type == 'mps':
         print("Using GPU")
     else:
         print("Using CPU")
@@ -54,7 +55,6 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
 
     # setting up the time array
     t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
-    dt = t[1] - t[0]
 
     print(sde.g_t_ca_max)
     print(sde.E_exp)

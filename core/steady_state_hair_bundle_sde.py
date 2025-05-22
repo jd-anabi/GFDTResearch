@@ -17,6 +17,7 @@ class HairBundleSDE(torch.nn.Module):
                  noise_type: str = 'diagonal', sde_type: str = 'ito', batch_size: int = 3,
                  device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
         super().__init__()
+
         # parameters
         self.c_min = c_min  # min climbing rate
         self.c_max = c_max  # max climbing rate
