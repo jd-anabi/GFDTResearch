@@ -2,15 +2,15 @@ import warnings
 from typing import Any, Callable
 
 import torch
-import torchsde
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
 from numpy import ndarray, dtype
 from tqdm import tqdm
 
-import core.hair_bundle_sde as hb_sde
-import core.steady_state_hair_bundle_sde as hb_sde0
+from core import hair_bundle_sde as hb_sde
+from core import steady_state_hair_bundle_sde as hb_sde0
+from core import sdeint as sdeint
 
 warnings.filterwarnings('error')
 
@@ -22,7 +22,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 16
+BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 5
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, dt: float, params: list, force_params: list) -> np.ndarray:
@@ -54,24 +54,28 @@ def hb_sols(t: np.ndarray, x0: list, dt: float, params: list, force_params: list
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
     # setting up the time array
-    t = torch.tensor(t, dtype=DTYPE, device=DEVICE)
+    ts = torch.tensor(t, dtype=DTYPE, device=DEVICE)
 
     print(sde.g_t_ca_max)
     print(sde.E_exp)
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
-    hb_sol = [x0s]
+    solver = sdeint.Solver()
+    hb_sol = torch.zeros((len(ts), BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
+    #hb_sol = [x0s]
     with torch.no_grad():
-        for i in tqdm(range(1, len(t)), desc=f"Simulating {BATCH_SIZE} batches of hair bundles"):
-            t_interval = torch.tensor([t[i - 1], t[i]], dtype=DTYPE, device=DEVICE)
-            try:
-                curr_sol = torchsde.sdeint(sde, x0s, t_interval, method='euler', dt=dt, adaptive=False)[-1] # only use the last state for the next time step
-                x0s = curr_sol
-            except (Warning, Exception) as e:
-                tqdm.write(str(e))
-                break
-            hb_sol.append(x0s)
-    hb_sol = torch.stack(hb_sol)
+        #for i in tqdm(range(1, len(t)), desc=f"Simulating {BATCH_SIZE} batches of hair bundles"):
+        #t_interval = torch.tensor([t[i - 1].item(), t[i].item()], dtype=DTYPE, device=DEVICE)
+        try:
+            hb_sol = solver.implicit_euler(sde, x0s, ts)[-1] # only use the last state for the next time step
+            #0s = curr_sol
+        except (Warning, Exception) as e:
+            print(e)
+            #tqdm.write(str(e))
+                #break
+        #hb_sol.append(x0s)
+
+    #hb_sol = torch.stack(hb_sol)
     print("SDEs have been solved")
     return hb_sol.cpu().numpy()
 

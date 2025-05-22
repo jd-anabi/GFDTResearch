@@ -2,8 +2,8 @@ import torch
 
 from scipy import constants
 
-kb_SCALE: float = 1e21 # g nm^2 s^-2 K^-1
-K_B: float = kb_SCALE * constants.k # kg m^2 s^-2 K^-1
+kb_SCALE: float = 1 # g nm^2 s^-2 K^-1
+K_B: float = kb_SCALE # kg m^2 s^-2 K^-1
 F_SCALE: float = 1e-3 # C mmol^-1
 F: float = F_SCALE * constants.physical_constants["Faraday constant"][0] # C mol^-1
 
@@ -73,18 +73,14 @@ class HairBundleSDE(torch.nn.Module):
         self.delta_s = self.s_max - self.s_min
 
         arg = self.z_ca * constants.elementary_charge * self.v_m / (K_B * self.temp) * torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
-        self.g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge * F / (K_B * self.temp) * (self.ca2_hb_in - self.ca2_hb_ext) / (1 - torch.exp(arg))
+        self.g_t_ca_max = self.p_t_ca * self.z_ca ** 2 * constants.elementary_charge * F * (self.ca2_hb_in - self.ca2_hb_ext) / (K_B * self.temp * (1 - torch.exp(arg)))
 
         self.delta_v = self.v_m - self.e_t_ca
         self.ca2_denom = 2 * constants.pi * self.z_ca * constants.elementary_charge * self.d_ca
         self.E_exp = torch.exp(self.delta_e / (K_B * self.temp) * torch.ones(self.batch_size, dtype=self.dtype, device=self.device))
 
-    def f(self, t, x) -> torch.Tensor:
-        #x[:, 2] = torch.clamp(x[:, 2], 0, 1)
-        #x[:, 3] = torch.clamp(x[:, 3], 0, 1)
+    def f(self, x: torch.tensor, t: torch.tensor) -> torch.Tensor:
         p_t0 = self.__p_t0(x[:, 0], x[:, 1], x[:, 3])
-        print(p_t0)
-        #p_t0 = torch.clamp(p_t0, 0, 1)
         dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], p_t0)
         dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], p_t0)
         dp_m = self.__p_m_dot(x[:, 2], p_t0)
@@ -93,10 +89,13 @@ class HairBundleSDE(torch.nn.Module):
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs), dim=1)
         return dx
 
-    def g(self, t, x) -> torch.Tensor:
+    def g(self, x: torch.tensor = None, t: torch.tensor = None) -> torch.Tensor:
         zero_noise = torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
         dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise), dim=1)
-        return dsigma
+        diag = []
+        for i in range(self.batch_size):
+            diag.append(torch.diag(dsigma[i]))
+        return torch.stack(diag)
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:

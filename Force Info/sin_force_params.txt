@@ -1,2 +1,2 @@
-amp = 0
+amp = 5
 vis_amp = 0

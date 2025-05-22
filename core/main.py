@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
 
-import core.helpers
+from core import helpers as helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
@@ -63,7 +63,6 @@ if __name__ == '__main__':
     # separate driven and not driven data
     hb_pos0 = results[:, 0, 0]  # data of the hair bundle position from the first batch
     print(hb_pos0)
-    print(np.argwhere(np.isnan(hb_pos0)))
 
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
@@ -76,7 +75,7 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{hb}$')
     plt.show()
 
-    plt.plot(hb_pos0)
+    plt.plot(t, results[:, 0, 4])
     plt.xlabel(r'Time')
     plt.ylabel(r'$x_{hb}$')
     plt.show()
