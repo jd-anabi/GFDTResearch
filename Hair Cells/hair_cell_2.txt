@@ -1,5 +1,5 @@
-xhb_init = 100
-xa_init = 70
+xhb_init = -1
+xa_init = -1
 pm_init = 0.5
 pgs_init = 0.5
 pt_init = 0.5

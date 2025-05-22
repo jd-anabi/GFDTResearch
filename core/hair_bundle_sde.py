@@ -3,9 +3,9 @@ import torch
 
 from scipy import constants
 
-SCALE: float = 1e21 # g nm^2 s^-2 K^-1
+SCALE: float = 1 # g nm^2 s^-2 K^-1
 K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
-F_SCALE: float = 1e-3 # C mmol^-1
+F_SCALE: float = 1 # C mmol^-1
 F: float = F_SCALE * constants.physical_constants["Faraday constant"][0] # C mol^-1
 
 class HairBundleSDE(torch.nn.Module):
@@ -95,8 +95,11 @@ class HairBundleSDE(torch.nn.Module):
 
     def g(self, t, x) -> torch.Tensor:
         zero_noise = torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
-        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1)
-        return dsigma
+        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise), dim=1)
+        diag = []
+        for i in range(self.batch_size):
+            diag.append(torch.diag(dsigma[i]))
+        return torch.stack(diag)
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:

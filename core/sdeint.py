@@ -28,7 +28,7 @@ class Solver():
             g = sde.g()
 
             # recursively define x_{n+1}
-            for i in tqdm(range(0, n-1), desc=f"Simulating {batch_size} batches of hair bundles"):
+            for i in tqdm(range(0, n-1), desc=f"Simulating {batch_size} batches of hair bundles", mininterval=0.1):
                 t_curr, t_next = ts[i], ts[i+1]
                 dt = t_next.item() - t_curr.item()
                 x_curr = xs[i]

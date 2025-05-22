@@ -67,7 +67,7 @@ def hb_sols(t: np.ndarray, x0: list, dt: float, params: list, force_params: list
         #for i in tqdm(range(1, len(t)), desc=f"Simulating {BATCH_SIZE} batches of hair bundles"):
         #t_interval = torch.tensor([t[i - 1].item(), t[i].item()], dtype=DTYPE, device=DEVICE)
         try:
-            hb_sol = solver.implicit_euler(sde, x0s, ts)[-1] # only use the last state for the next time step
+            hb_sol = solver.implicit_euler(sde, x0s, ts, max_iter=1) # only use the last state for the next time step
             #0s = curr_sol
         except (Warning, Exception) as e:
             print(e)
@@ -77,6 +77,7 @@ def hb_sols(t: np.ndarray, x0: list, dt: float, params: list, force_params: list
 
     #hb_sol = torch.stack(hb_sol)
     print("SDEs have been solved")
+    print(hb_sol)
     return hb_sol.cpu().numpy()
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
