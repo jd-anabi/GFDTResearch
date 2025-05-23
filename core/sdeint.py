@@ -28,7 +28,7 @@ class Solver():
             g = sde.g()
 
             # recursively define x_{n+1}
-            for i in tqdm(range(0, n-1), desc=f"Simulating {batch_size} batches of hair bundles", mininterval=0.1):
+            for i in tqdm(range(0, n-1), desc=f"Simulating {batch_size} batches of hair bundles", mininterval=0.01):
                 t_curr, t_next = ts[i], ts[i+1]
                 dt = t_next.item() - t_curr.item()
                 x_curr = xs[i]
@@ -36,7 +36,7 @@ class Solver():
                 dW = torch.rand_like(x_curr) * np.sqrt(dt)
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1) # batch matrix multiplication; shape: (batch_size, d)
                 # recursive iteration
-                x_next = x_curr.clone() # possible candidate for solution at next time step
+                x_next = x_curr.clone() # possible candidate for the solution at next time step
                 for _ in range(max_iter):
                     x_temp = x_curr + sde.f(x_next, t_next) * dt + eta
                     if torch.norm(x_temp - x_next) < tol:

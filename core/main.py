@@ -15,15 +15,17 @@ if __name__ == '__main__':
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # parameters
-    params = np.zeros(33, dtype=float)
+    nd = True
+    file_str = 'Dimensional' if not nd else 'Non-dimensional'
+    params = np.zeros(33, dtype=float) if not nd else np.zeros(17, dtype=complex)
 
     # read hair cell and force info from txt files
     line = 0
     if sys.platform == 'win32':
-        hair_cell_file_path = '\\Hair Cells\\hair_cell_'
+        hair_cell_file_path = '\\Hair Cells\\' + file_str + '\\hair_cell_'
         force_file_path = '\\Force Info\\sin_force_params.txt'
     else:
-        hair_cell_file_path = '/Hair Cells/hair_cell_'
+        hair_cell_file_path = '/Hair Cells/' + file_str + '/hair_cell_'
         force_file_path = '/Force Info/sin_force_params.txt'
     file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
@@ -53,8 +55,8 @@ if __name__ == '__main__':
             val = float(re.findall(pattern, row.strip())[0])
             forcing_amps.append(val)
     amp = forcing_amps[0]
-    vis_amp = forcing_amps[1]
-    args_list = (t, x0, dt, list(params), [0, amp, vis_amp])
+    k_sf = forcing_amps[1]
+    args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf], nd)
 
     # multiprocessing and solve sdes
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)

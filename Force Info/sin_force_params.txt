@@ -1,2 +1,2 @@
-amp = 5
-vis_amp = 0
+amp = 0
+k_sf = 0

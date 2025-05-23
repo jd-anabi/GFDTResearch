@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 from scipy import constants
@@ -14,7 +13,7 @@ class HairBundleSDE(torch.nn.Module):
                  k_gs_min: float, k_gs_max: float, x_c: float, temp: float, z_ca: float, d_ca: float,
                  r_m: float, r_gs: float, v_m: float, e_t_ca: float, p_t_ca: float, ca2_hb_in: float,
                  ca2_hb_ext: float, gamma: float, n: float, lambda_hb: float, lambda_a: float, k_sp: float, x_sp: float,
-                 k_es: float, x_es: float, d: float, epsilon: float, omega_0: float, amp: float, vis_amp: float,
+                 k_es: float, x_es: float, d: float, epsilon: float, omega_0: float, amp: float, k_sf: float,
                  noise_type: str = 'diagonal', sde_type: str = 'ito', batch_size: int = 3,
                  device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
         super().__init__()
@@ -56,7 +55,7 @@ class HairBundleSDE(torch.nn.Module):
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
-        self.vis_amp = vis_amp  # amplitude of the viscous portion of the stimulus force
+        self.k_sf = k_sf  # amplitude of the viscous portion of the stimulus force
         self.omega = self.omega_0 * torch.ones(batch_size, dtype=dtype, device=device)
         for i in range(len(self.omega)):
             self.omega[i] = i * self.omega[i] / round(batch_size / 2)
@@ -89,7 +88,7 @@ class HairBundleSDE(torch.nn.Module):
         dp_m = self.__p_m_dot(x[:, 2], x[:, 4])
         dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4])
         dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
-        dx_hb = dx_hb + self.__sin_force(t) / self.lambda_hb
+        dx_hb = dx_hb - self.k_sf * (x[0,:] - self.__sin_force(t)) / self.lambda_hb
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1)
         return dx
 
@@ -135,7 +134,7 @@ class HairBundleSDE(torch.nn.Module):
 
     # stimulus force
     def __sin_force(self, t):
-        return -1 * self.amp * torch.sin(self.omega * t) + self.vis_amp * self.omega * torch.cos(self.omega * t)
+        return -1 * self.amp * torch.sin(self.omega * t)
     # noise
     def __hb_noise(self) -> torch.Tensor:
         return self.epsilon * torch.sqrt(2 * K_B * self.temp / self.lambda_hb * torch.ones(self.batch_size, dtype=self.dtype, device=self.device))
