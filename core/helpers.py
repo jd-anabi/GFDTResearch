@@ -7,10 +7,10 @@ import scipy.fft as ffts
 import scipy.constants as constants
 from numpy import ndarray, dtype
 
-from core import hbsde as hb_sde
-from core import steadyhbsde as hb_sde0
+from core import dimensinal_model as dim_model
+from core import dimensional_model_steady as dim_model_steady
 from core import sdeint as sdeint
-from core import ndhbsde
+from core import nondimensional_model as nd_model
 
 warnings.filterwarnings('error')
 
@@ -44,15 +44,15 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
     if params[0] == 0:
         x0 = x0[:4]
         if nd:
-            sde = ndhbsde.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            sde = nd_model.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         else:
-            sde = hb_sde0.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            sde = dim_model_steady.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
     else:
         if nd:
-            sde = ndhbsde.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         else:
-            sde = hb_sde.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            sde = dim_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
     print("Hair bundle model has been set up")
 
     # setting up initial conditions

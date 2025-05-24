@@ -1,22 +1,15 @@
 import torch
 
-from scipy import constants
-
-SCALE: float = 1 # g nm^2 s^-2 K^-1
-K_B: float = SCALE * constants.k # kg m^2 s^-2 K^-1
-F_SCALE: float = 1 # C mmol^-1
-F: float = F_SCALE * constants.physical_constants["Faraday constant"][0] # C mol^-1
-
 class HairBundleSDE(torch.nn.Module):
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float,
                  x_c: float, eta_hb: float, eta_a: float, omega_0: float, amp: float, k_sf: float,
-                 noise_type: str = 'diagonal', sde_type: str = 'ito', batch_size: int = 3,
-                 device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
+                 batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64,
+                 noise_type: str = 'general', sde_type: str = 'ito'):
         super().__init__()
         # parameters
-        self.tau_hb = tau_hb  # finite time constant for hair bundle
+        self.tau_hb = tau_hb  # finite time constant for hair-bundle
         self.tau_m = tau_m  # finite time constant for adaptation motor
         self.tau_gs = tau_gs  # finite time constant for gating spring
         self.tau_t = tau_t  # finite time constant for open channel probability
@@ -59,17 +52,13 @@ class HairBundleSDE(torch.nn.Module):
         dp_m = self.__p_m_dot(x[:, 2], x[:, 4])
         dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4])
         dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
-        dx_hb = dx_hb - self.k_sf * (x[0,:] - self.__sin_force(t)) / self.lambda_hb
+        dx_hb = dx_hb + self.__sin_sf(t) / self.tau_hb
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1)
         return dx
 
     def g(self, x: torch.tensor = None, t: torch.tensor = None) -> torch.Tensor:
-        zero_noise = torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
-        dsigma = torch.stack((self.__hb_noise(), self.__a_noise(), zero_noise, zero_noise, zero_noise), dim=1)
-        diag = []
-        for i in range(self.batch_size):
-            diag.append(torch.diag(dsigma[i]))
-        return torch.stack(diag)
+        dsigma = torch.tensor([self.__hb_noise(), self.__a_noise(), 0, 0, 0], dtype=self.dtype, device=self.device)
+        return torch.tile(torch.diag(dsigma), (self.batch_size, 1, 1))
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
@@ -101,11 +90,11 @@ class HairBundleSDE(torch.nn.Module):
     # -------------------------------- PDEs (end) ----------------------------------
 
     # stimulus force
-    def __sin_force(self, t):
+    def __sin_sf(self, t):
         return -1 * self.amp * torch.sin(self.omega * t)
     # noise
-    def __hb_noise(self) -> torch.Tensor:
-        return self.eta_hb / self.tau_hb * torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+    def __hb_noise(self) -> float:
+        return self.eta_hb / self.tau_hb
 
-    def __a_noise(self) -> torch.Tensor:
-        return -1 * self.s_max * self.s_min * self.eta_a * torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+    def __a_noise(self) -> float:
+        return -1 * self.s_max * self.s_min * self.eta_a

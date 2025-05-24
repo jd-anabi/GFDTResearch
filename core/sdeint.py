@@ -1,11 +1,10 @@
+import math
 from typing import Any, Sequence
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
-
-class Solver():
+class Solver:
     def __init__(self):
         def implicit_euler(sde: Any, x0: torch.Tensor, ts: torch.Tensor, max_iter: int = 10, tol: float = 1e-6) -> torch.Tensor:
             """
@@ -33,7 +32,7 @@ class Solver():
                 dt = t_next.item() - t_curr.item()
                 x_curr = xs[i]
                 # Wiener process
-                dW = torch.rand_like(x_curr) * np.sqrt(dt)
+                dW = torch.rand_like(x_curr) * math.sqrt(dt)
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1) # batch matrix multiplication; shape: (batch_size, d)
                 # recursive iteration
                 x_next = x_curr.clone() # possible candidate for the solution at next time step

@@ -11,13 +11,13 @@ from core import helpers as helpers
 if __name__ == '__main__':
     # time and frequency arrays
     dt = 1e-4
-    t = np.arange(0, 1, dt)
+    t = np.arange(0, 100, dt)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # parameters
     nd = True
     file_str = 'Dimensional' if not nd else 'Non-dimensional'
-    params = np.zeros(33, dtype=float) if not nd else np.zeros(17, dtype=complex)
+    params = np.zeros(33, dtype=float) if not nd else np.zeros(17, dtype=float)
 
     # read hair cell and force info from txt files
     line = 0
@@ -38,6 +38,7 @@ if __name__ == '__main__':
             else:
                 params[line - 5] = val
             line = line + 1
+    print(params)
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
     osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
