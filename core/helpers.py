@@ -6,6 +6,7 @@ import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
 from numpy import ndarray, dtype
+from tqdm import tqdm
 
 from core import dimensinal_model as dim_model
 from core import dimensional_model_steady as dim_model_steady
@@ -25,10 +26,11 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 5
 SDE_TYPES = ['ito', 'stratonovich']
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool) -> np.ndarray:
+def hb_sols(ts: tuple, n: int, x0: list, params: list, force_params: list, nd: bool) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
-    :param t: time to evaluate the solution over
+    :param ts: time span to evaluate the solution over
+    :param n: number of time steps
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
@@ -59,17 +61,21 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
-    # setting up the time array
-    ts = torch.tensor(t, dtype=DTYPE, device=DEVICE)
+    # time array
+    t = np.linspace(*ts, n)
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
-    hb_sol = torch.zeros((len(ts), BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
-    with torch.no_grad():
-        try:
-            hb_sol = solver.implicit_euler(sde, x0s, ts, max_iter=1) # only use the last state for the next time step
-        except (Warning, Exception) as e:
-            print(e)
+    hb_sol = torch.zeros((n, BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
+    hb_sol[0] = x0s
+    for i in tqdm(range(n-1) , desc=f"Simulating {BATCH_SIZE} batches of hair-bundles", mininterval=0.1):
+        with torch.no_grad():
+            try:
+                hb_sol[i+1] = solver.euler(sde, x0s, (t[i], t[i+1]), 2)[-1] # only keep the last solution
+                x0s = hb_sol[i+1]
+            except (Warning, Exception) as e:
+                print(e)
+                exit()
 
     print("SDEs have been solved")
     print(hb_sol)

@@ -10,8 +10,10 @@ from core import helpers as helpers
 
 if __name__ == '__main__':
     # time and frequency arrays
-    dt = 1e-4
-    t = np.arange(0, 100, dt)
+    dt = 1e-6
+    ts = (0, 10)
+    n = int((ts[-1] - ts[0]) / dt)
+    t = np.linspace(ts[0], ts[-1], n)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
 
     # parameters
@@ -57,7 +59,7 @@ if __name__ == '__main__':
             forcing_amps.append(val)
     amp = forcing_amps[0]
     k_sf = forcing_amps[1]
-    args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf], nd)
+    args_list = (ts, n, x0, list(params), [osc_freq_center, amp, k_sf], nd)
 
     # multiprocessing and solve sdes
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
