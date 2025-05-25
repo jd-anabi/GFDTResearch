@@ -11,7 +11,7 @@ from core import helpers as helpers
 if __name__ == '__main__':
     # time and frequency arrays
     dt = 1e-6
-    ts = (0, 10)
+    ts = (0, 50)
     n = int((ts[-1] - ts[0]) / dt)
     t = np.linspace(ts[0], ts[-1], n)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]

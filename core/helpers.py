@@ -62,13 +62,14 @@ def hb_sols(ts: tuple, n: int, x0: list, params: list, force_params: list, nd: b
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
     # time array
+    chunk_size = int((n - 1) / 1e3)
     t = np.linspace(*ts, n)
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
     hb_sol = torch.zeros((n, BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
     hb_sol[0] = x0s
-    for i in tqdm(range(n-1) , desc=f"Simulating {BATCH_SIZE} batches of hair-bundles", mininterval=0.1):
+    for i in tqdm(range(n-1, chunk_size), desc=f"Simulating {BATCH_SIZE} batches of hair-bundles", mininterval=0.1):
         with torch.no_grad():
             try:
                 hb_sol[i+1] = solver.euler(sde, x0s, (t[i], t[i+1]), 2)[-1] # only keep the last solution
