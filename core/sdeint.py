@@ -2,6 +2,7 @@ import math
 from typing import Any, Sequence
 
 import torch
+from tqdm import tqdm
 
 class Solver:
     def __init__(self):
@@ -16,6 +17,7 @@ class Solver:
             """
             # time info
             t = torch.linspace(*ts, n)
+            dt = t[1].item() - t[0].item() # fixed time step
 
             # dimensions
             batch_size, d = x0.shape
@@ -27,13 +29,15 @@ class Solver:
             # drift
             g = sde.g()
 
+            # pre-compute constants
+            sqrt_dt = math.sqrt(dt)
+
             # recursively define x_{n+1}
-            for i in range(0, n - 1):
+            for i in tqdm(range(0, n - 1),  desc=f"Simulating {batch_size} batches of hair-bundles", mininterval=0.1):
                 t_curr, t_next = t[i], t[i + 1]
-                dt = t_next.item() - t_curr.item()
                 x_curr = xs[i]
                 # Wiener process
-                dW = torch.rand_like(x_curr) * math.sqrt(dt)
+                dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1)  # batch matrix multiplication; shape: (batch_size, d)
                 # update solution
                 xs[i + 1] = x_curr + sde.f(x_curr, t_curr) * dt + eta
@@ -53,6 +57,7 @@ class Solver:
             """
             # time info
             t = torch.linspace(*ts, n)
+            dt = t[1].item() - t[0].item() # fixed time step
 
             # create tensor of the solution
             batch_size, d = x0.shape
@@ -62,13 +67,15 @@ class Solver:
             # time and state independent drift
             g = sde.g()
 
+            # pre-compute constants
+            sqrt_dt = math.sqrt(dt)
+
             # recursively define x_{n+1}
-            for i in range(0, n-1):
+            for i in tqdm(range(0, n - 1),  desc=f"Simulating {batch_size} batches of hair-bundles", mininterval=0.1):
                 t_curr, t_next = t[i], t[i+1]
-                dt = t_next.item() - t_curr.item()
                 x_curr = xs[i]
                 # Wiener process
-                dW = torch.rand_like(x_curr) * math.sqrt(dt)
+                dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1) # batch matrix multiplication; shape: (batch_size, d)
                 # recursive iteration
                 x_next = x_curr.clone() # possible candidate for the solution at next time step

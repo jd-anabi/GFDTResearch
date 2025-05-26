@@ -8,29 +8,28 @@ import scipy.constants as constants
 from numpy import ndarray, dtype
 from tqdm import tqdm
 
-from core import dimensinal_model as dim_model
-from core import dimensional_model_steady as dim_model_steady
-from core import sdeint as sdeint
-from core import nondimensional_model as nd_model
+import dimensinal_model as dim_model
+import dimensional_model_steady as dim_model_steady
+import sdeint as sdeint
+import nondimensional_model as nd_model
 
 warnings.filterwarnings('error')
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cpu')
+    DEVICE = torch.device('cuda')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 5
+BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 16
 SDE_TYPES = ['ito', 'stratonovich']
 
-def hb_sols(ts: tuple, n: int, x0: list, params: list, force_params: list, nd: bool) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
-    :param ts: time span to evaluate the solution over
-    :param n: number of time steps
+    :param t: time array
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
@@ -62,25 +61,22 @@ def hb_sols(ts: tuple, n: int, x0: list, params: list, force_params: list, nd: b
     x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
     # time array
-    chunk_size = int((n - 1) / 1e3)
-    t = np.linspace(*ts, n)
+    n = len(t)
+    ts = [t[0], t[-1]]
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
     hb_sol = torch.zeros((n, BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
-    hb_sol[0] = x0s
-    for i in tqdm(range(n-1, chunk_size), desc=f"Simulating {BATCH_SIZE} batches of hair-bundles", mininterval=0.1):
-        with torch.no_grad():
-            try:
-                hb_sol[i+1] = solver.euler(sde, x0s, (t[i], t[i+1]), 2)[-1] # only keep the last solution
-                x0s = hb_sol[i+1]
-            except (Warning, Exception) as e:
-                print(e)
-                exit()
+    with torch.no_grad():
+        try:
+            hb_sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+        except (Warning, Exception) as e:
+            print(e)
+            exit()
 
     print("SDEs have been solved")
     print(hb_sol)
-    return hb_sol.cpu().numpy()
+    return hb_sol.to_numpy().cpu()
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
