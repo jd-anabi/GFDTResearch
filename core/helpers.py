@@ -12,11 +12,12 @@ import dimensinal_model as dim_model
 import dimensional_model_steady as dim_model_steady
 import sdeint as sdeint
 import nondimensional_model as nd_model
+import steady_nondimensional_model as steady_nd_model
 
 warnings.filterwarnings('error')
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
+    DEVICE = torch.device('cpu')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:
@@ -42,19 +43,21 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
         print("Using CPU")
 
     # check if we are using the steady-state solution
-    if params[0] == 0:
-        x0 = x0[:4]
-        if nd:
-            sde = nd_model.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+    if nd:
+        if params[3] == 0:
+            x0 = x0[:4]
+            sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            print("Using the steady-state solution for the open-channel probability")
         else:
-            sde = dim_model_steady.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        print("Using the steady-state solution for the open-channel probability")
+            sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE,device=DEVICE, dtype=DTYPE).to(DEVICE)
     else:
-        if nd:
-            sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        if params[0] == 0:
+            x0 = x0[:4]
+            sde = dim_model_steady.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+            print("Using the steady-state solution for the open-channel probability")
         else:
             sde = dim_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-    print("Hair bundle model has been set up")
+        print("Hair bundle model has been set up")
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
@@ -76,7 +79,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
 
     print("SDEs have been solved")
     print(hb_sol)
-    return hb_sol.to_numpy().cpu()
+    return hb_sol.cpu().detach().numpy()
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """

@@ -11,7 +11,7 @@ import helpers
 if __name__ == '__main__':
     # time and frequency arrays
     dt = 1e-4
-    ts = (0, 250)
+    ts = (0, 150)
     n = int((ts[-1] - ts[0]) / dt)
     t = np.linspace(ts[0], ts[-1], n)
     freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
@@ -69,6 +69,22 @@ if __name__ == '__main__':
     hb_pos0 = results[:, 0, 0]  # data of the hair bundle position from the first batch
     print(hb_pos0)
 
+    # rescale parameters
+    tau_hb_nd = params[0]
+    chi_hb_nd = params[12]
+    s_max_nd = params[6]
+    lambda_hb = 1.3e-7 # g ms^-1
+    d = 7 # nm
+    k_sp = 2e-7 # g ms^-2
+    x_sp = 246 # nm
+    k_es = 1.4e-7 # g ms^-2
+    s_max = 610e3 # ms g^-1
+    gamma = 0.14
+    t_offset = 0
+
+    t = s_max_nd / (k_es * s_max) * t + t_offset
+    hb_pos0 = lambda_hb * (k_sp * x_sp / tau_hb_nd - d * chi_hb_nd * hb_pos0 / gamma)
+
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
     #spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
@@ -76,11 +92,11 @@ if __name__ == '__main__':
 
     # preliminary plotting
     plt.plot(t, hb_pos0)
-    plt.xlabel(r'Time')
-    plt.ylabel(r'$x_{hb}$')
+    plt.xlabel(r'Time (ms)')
+    plt.ylabel(r'$x_{hb}$ (nm)')
     plt.show()
 
-    plt.plot(t, results[:, 0, 4])
-    plt.xlabel(r'Time')
-    plt.ylabel(r'$x_{hb}$')
+    plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos0[int(n / 4):int(3 * n / 4)])
+    plt.xlabel(r'Time (ms)')
+    plt.ylabel(r'$x_{hb}$ (nm)')
     plt.show()
