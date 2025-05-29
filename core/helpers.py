@@ -5,11 +5,8 @@ import torch
 import numpy as np
 import scipy.fft as ffts
 import scipy.constants as constants
-from numpy import ndarray, dtype
-from tqdm import tqdm
+from numpy import dtype
 
-import dimensinal_model as dim_model
-import dimensional_model_steady as dim_model_steady
 import sdeint as sdeint
 import nondimensional_model as nd_model
 import steady_nondimensional_model as steady_nd_model
@@ -24,17 +21,16 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 16
+BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 12
 SDE_TYPES = ['ito', 'stratonovich']
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time array
     :param x0: the initial conditions of the hair bundle
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
-    :param nd: whether to use non-dimensional model
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     if DEVICE.type == 'cuda' or DEVICE.type == 'mps':
@@ -43,20 +39,12 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
         print("Using CPU")
 
     # check if we are using the steady-state solution
-    if nd:
-        if params[3] == 0:
-            x0 = x0[:4]
-            sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-            print("Using the steady-state solution for the open-channel probability")
-        else:
-            sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE,device=DEVICE, dtype=DTYPE).to(DEVICE)
+    if params[3] == 0:
+        x0 = x0[:4]
+        sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        print("Using the steady-state solution for the open-channel probability")
     else:
-        if params[0] == 0:
-            x0 = x0[:4]
-            sde = dim_model_steady.HairBundleSDE(*(params[1:]), *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-            print("Using the steady-state solution for the open-channel probability")
-        else:
-            sde = dim_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE,device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Hair bundle model has been set up")
 
     # setting up initial conditions
@@ -78,8 +66,44 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list, nd: bool)
             exit()
 
     print("SDEs have been solved")
-    print(hb_sol)
     return hb_sol.cpu().detach().numpy()
+
+def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
+            gamma: float, d: float, x_sp: float, k_sp: float, k_sf: float, k_gs_max: float,
+            s_max: float, t_0: float, s_max_nd: float, chi_hb: float, chi_a: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Rescaling the hair-bundle displacement, the stimulus force, and the time
+    :param gamma: geometric conversion factor
+    :param d: distance of gating spring relaxation on channel opening
+    :param x_sp: resting deflection of stereociliary pivots
+    :param k_sp: stiffness of stereociliary pivots
+    :param k_sf: stiffness of stimulus force
+    :param k_gs_max: maximum stiffness of gating spring
+    :param s_max: maximum slipping rate
+    :param t_0: time offset
+    :param s_max_nd: non-dimensional maximum slipping rate
+    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
+    :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
+    :return: tuple containing the rescaled hair-bundle displacement, stimulus force, and time
+    """
+    hb_pos = chi_hb * d / gamma * nd_hb_pos + k_sp / (k_sp + k_sf) * x_sp
+    sf_pos = chi_hb * (k_sp + k_sf) * d / (gamma * k_sf) * nd_sf_pos
+    t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
+    return hb_pos, sf_pos, t
+
+def sf_pos(t: np.ndarray, amp: float, omega_0) -> np.ndarray:
+    """
+    Returns the stimulus force position at times t
+    :param t: time
+    :param amp: amplitude
+    :param omega_0: angular frequency to center at
+    :return: the stimulus force position
+    """
+    sf_pos_data = np.zeros((BATCH_SIZE - 1, len(t)))
+    for i in range(BATCH_SIZE - 1):
+        omega = i * omega_0 / round(BATCH_SIZE / 2)
+        sf_pos_data[i] = amp * np.sin(omega * t)
+    return sf_pos_data
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
@@ -92,7 +116,7 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     c = c[len(hb_pos) - 1:]
     return c / (len(hb_pos) * c[0])
 
-def lin_resp_freq(omega: float, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> ndarray[Any, dtype[Any]]:
+def lin_resp_freq(omega: float, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray[Any, dtype[Any]]:
     """
     Returns the linear response function, at a specific frequency, of the hair bundle (ran over multiple trials) with a stimulating force applied
     :param omega: the frequency tin calculate the response function at
@@ -137,43 +161,3 @@ def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, 
     lin_resp_omega = lin_resp_freq(omega, hb_driven, x_sf, dt)
     theta = omega * autocorr_omega / np.imag(lin_resp_omega)
     return theta
-
-def p_t0(x_hb: np.ndarray, x_a: np.ndarray, p_gs: np.ndarray, params: list, nd: bool) -> np.ndarray:
-    """
-    Steady-state solution for the open-channel probability
-    :param x_hb: hair bundle displacement
-    :param x_a: adaptation motor displacement
-    :param p_gs: calcium binding probability for gating spring
-    :param params: list of parameters for steady-state solution; [u_gs_max, delta_e, k_gs_min, chi_hb, chi_a, x_c] if non-dimensional model, [delta_e, k_gs_min, k_gs_max, x_c, temp, d] otherwise
-    :param nd: whether to use the non-dimensional model or not
-    :return: steady-state solution for the open-channel probability
-    """
-    if nd:
-        k_gs_var = 1 - p_gs * (1 - params[2])
-        x_gs = params[3] * x_hb - params[4] * x_a + params[5]
-        return 1 / (1 + np.exp(params[0] * (params[1] - k_gs_var * (x_gs - 0.5))))
-    else:
-        k_gs_var = params[2] - p_gs * (params[2] - params[1])
-        x_gs = k_gs_var * params[5] / (constants.k * params[4]) * (x_hb - x_a + params[3] - params[5] / 2)
-        return 1 / (1 + np.exp(params[0] / (constants.k * params[4]) - x_gs))
-
-def itoEuler(f: Callable[[float, ndarray], ndarray], G: ndarray, y0: ndarray, t: ndarray, generator=None, nan_index: float = 10):
-    if generator is None:
-        generator = np.random.default_rng()
-    t_size = t.size
-    y_count = y0.shape[0]
-    dt = (t[t_size - 1] - t[0]) / (t_size - 1)
-    y = np.zeros((t_size, y_count), dtype=y0.dtype)
-    eta = G * generator.normal(0, np.sqrt(dt), (t_size, y_count))
-    y[0] = y0
-    yn = y0
-    for n in range(nan_index):
-        yn = yn + f(yn, t[n]) * dt + eta[n, :]
-        y[n + 1, :] = yn
-    if np.any(np.isnan(y[:nan_index, :])):
-        y[nan_index:, :] = np.nan
-        return y
-    for n in range(nan_index, t_size - 1):
-        yn = yn + f(yn, t[n]) * dt + eta[n, :]
-        y[n + 1, :] = yn
-    return y.T

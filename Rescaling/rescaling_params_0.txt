@@ -1,0 +1,8 @@
+gamma = 0.14
+d (nm) = 7
+x_sp (nm) = 246
+k_sp (ug ms^-2) = 0.2
+k_sf (ug ms^-2) = 0.1
+k_gs_max (ug ms^-2) = 1.6
+s_max (ms / ug) = 0.61
+t_0 = 0

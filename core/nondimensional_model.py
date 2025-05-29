@@ -3,7 +3,7 @@ import torch
 class HairBundleSDE(torch.nn.Module):
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
-                 u_gs_max: float, delta_e: float, k_gs_min: float, chi_hb: float, chi_a: float,
+                 u_gs_max: float, delta_e: float, k_gs_ratio: float, chi_hb: float, chi_a: float,
                  x_c: float, eta_hb: float, eta_a: float, omega_0: float, amp: float, k_sf: float,
                  batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64,
                  noise_type: str = 'general', sde_type: str = 'ito'):
@@ -20,7 +20,7 @@ class HairBundleSDE(torch.nn.Module):
         self.ca2_gs = ca2_gs  # calcium ion concentration near gating spring
         self.u_gs_max = u_gs_max  # max gating spring potential
         self.delta_e = delta_e  # intrinsic energy difference between the transduction channel's two states
-        self.k_gs_min = k_gs_min  # min gating spring stiffness
+        self.k_gs_ratio = k_gs_ratio  # gating spring stiffness ratio
         self.chi_hb = chi_hb  # hair bundle conversion factor
         self.chi_a = chi_a  # adaptation motor conversion factor
         self.x_c = x_c  # average equilibrium position of the adaptation motors
@@ -43,7 +43,10 @@ class HairBundleSDE(torch.nn.Module):
         self.dtype = dtype
 
         # subsuming parameters
-        self.c_max = self.c_max = 1 - self.s_max
+        self.c_max = 1 - self.s_max
+        self.c_offset = 1 - self.c_min
+        self.s_offset = 1 - self.s_min
+        self.k_gs_offset = 1 - self.k_gs_ratio
         self.E_exp = torch.exp(self.u_gs_max * self.delta_e * torch.ones(self.batch_size, dtype=self.dtype, device=self.device))
 
     def f(self, x, t) -> torch.Tensor:
@@ -63,15 +66,15 @@ class HairBundleSDE(torch.nn.Module):
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
         x_gs = self.chi_hb * x_hb - self.chi_a * x_a + self.x_c
-        k_gs = 1 - p_gs * (1 - self.k_gs_min)
+        k_gs = 1 - p_gs * self.k_gs_offset
         f_gs = k_gs * (x_gs - p_t)
         return -1 * (f_gs + x_hb) / self.tau_hb
 
     def __x_a_dot(self, x_hb, x_a, p_m, p_gs, p_t) -> torch.Tensor:
-        c = 1 - p_m * (1 - self.c_min)
-        s = self.s_min + p_m * (1 - self.s_min)
+        c = 1 - p_m * self.c_offset
+        s = self.s_min + p_m * self.s_offset
         x_gs = self.chi_hb * x_hb - self.chi_a * x_a + self.x_c
-        k_gs = 1 - p_gs * (1 - self.k_gs_min)
+        k_gs = 1 - p_gs * self.k_gs_offset
         f_gs = k_gs * (x_gs - p_t)
         return self.s_max * s * (f_gs - x_a) - self.c_max * c
 
@@ -82,7 +85,7 @@ class HairBundleSDE(torch.nn.Module):
         return (self.ca2_gs * p_t * (1 - p_gs) - p_gs) / self.tau_gs
 
     def __p_t_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
-        k_gs = 1 - p_gs * (1 - self.k_gs_min)
+        k_gs = 1 - p_gs * self.k_gs_offset
         x_gs = self.chi_hb * x_hb - self.chi_a * x_a + self.x_c
         arg = -1 * self.u_gs_max * k_gs * (x_gs - 0.5)
         p_t0 = 1 / (1 + self.E_exp * torch.exp(arg))

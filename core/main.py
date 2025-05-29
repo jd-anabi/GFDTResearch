@@ -11,27 +11,34 @@ import helpers
 if __name__ == '__main__':
     # time and frequency arrays
     dt = 1e-4
-    ts = (0, 150)
+    ts = (0, 75)
     n = int((ts[-1] - ts[0]) / dt)
     t = np.linspace(ts[0], ts[-1], n)
-    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))[len(t) // 2:]
+    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))
 
-    # parameters
-    nd = True
-    file_str = 'Dimensional' if not nd else 'Non-dimensional'
-    params = np.zeros(33, dtype=float) if not nd else np.zeros(17, dtype=float)
+    # parameters and initial conditions
+    file_str = 'Non-dimensional'
+    params = np.zeros(17, dtype=float)
+    x0 = []
+    hb_rescale_params = np.zeros(8, dtype=float)
+    hb_nd_rescale_params = np.zeros(3, dtype=float) # 6, 12, 13
 
-    # read hair cell and force info from txt files
+    # pattern matching for file reading
+    pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
+
+    # read hair cell,  force info, and rescaling parameters from txt files
     line = 0
     if sys.platform == 'win32':
         hair_cell_file_path = '\\Hair Cells\\' + file_str + '\\hair_cell_'
+        rescale_file_path = '\\Rescaling\\rescaling_params_'
         force_file_path = '\\Force Info\\sin_force_params.txt'
     else:
         hair_cell_file_path = '/Hair Cells/' + file_str + '/hair_cell_'
+        rescale_file_path = '/Rescaling/rescaling_params_'
         force_file_path = '/Force Info/sin_force_params.txt'
+
+    # hair cell parameters
     file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
-    pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
-    x0 = []
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
@@ -40,15 +47,19 @@ if __name__ == '__main__':
             else:
                 params[line - 5] = val
             line = line + 1
-    print(params)
 
-    # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
-    osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
-    pt0_params = []
-
-    # check if we want to use the steady-state solution
-    if params[0] == 0:
-        pt0_params = [params[5], *params[10:14], params[31]]
+    # rescaling parameters
+    line = 0
+    file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
+    with open(file, mode='r') as txtfile:
+        for row in txtfile:
+            val = float(re.findall(pattern, row.strip())[0])
+            hb_rescale_params[line] = val
+            line = line + 1
+    # need to add in non-dimensional parameters for rescaling too
+    hb_nd_rescale_params[0] = params[6]
+    hb_nd_rescale_params[1] = params[12]
+    hb_nd_rescale_params[2] = params[13]
 
     # set up forcing params
     file = os.getcwd() + force_file_path
@@ -59,44 +70,42 @@ if __name__ == '__main__':
             forcing_amps.append(val)
     amp = forcing_amps[0]
     k_sf = forcing_amps[1]
-    args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf], nd)
+    # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
+    osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
+    args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf])
 
     # multiprocessing and solve sdes
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
-    print(results)
 
     # separate driven and not driven data
-    hb_pos0 = results[:, 0, 0]  # data of the hair bundle position from the first batch
-    print(hb_pos0)
+    hb_pos_undriven = results[:, 0, 0]  # data of the hair bundle position from the first batch
+    hb_pos_driven_data = np.zeros((results.shape[1] - 1, n))
+    for i in range(len(hb_pos_driven_data)):
+        hb_pos_driven_data[i] = results[:, i + 1, 0]
 
-    # rescale parameters
-    tau_hb_nd = params[0]
-    chi_hb_nd = params[12]
-    s_max_nd = params[6]
-    lambda_hb = 1.3e-7 # g ms^-1
-    d = 7 # nm
-    k_sp = 2e-7 # g ms^-2
-    x_sp = 246 # nm
-    k_es = 1.4e-7 # g ms^-2
-    s_max = 610e3 # ms g^-1
-    gamma = 0.14
-    t_offset = 0
-
-    t = s_max_nd / (k_es * s_max) * t + t_offset
-    hb_pos0 = lambda_hb * (k_sp * x_sp / tau_hb_nd - d * chi_hb_nd * hb_pos0 / gamma)
+    # rescale
+    sf_pos = helpers.sf_pos(t, amp, osc_freq_center)
+    hb_pos_undriven, sf_pos, t = helpers.rescale(hb_pos_undriven, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params)
 
     # get frequency of spontaneous oscillations
-    hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos0 - np.mean(hb_pos0)))[len(t) // 2:]  # fft for non-driven data
-    #spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
-    #print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
+    hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)))[len(t) // 2:]  # fft for non-driven data
+    spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
+    print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
 
     # preliminary plotting
-    plt.plot(t, hb_pos0)
+    plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (ms)')
     plt.ylabel(r'$x_{hb}$ (nm)')
     plt.show()
 
-    plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos0[int(n / 4):int(3 * n / 4)])
+    plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos_undriven[int(n / 4):int(3 * n / 4)])
     plt.xlabel(r'Time (ms)')
     plt.ylabel(r'$x_{hb}$ (nm)')
+    plt.show()
+
+    # autocorrelation function
+    auto_correlation = helpers.auto_corr(hb_pos_undriven)
+    plt.plot(freq, auto_correlation)
+    plt.xlabel(r'Frequency (Hz)')
+    plt.ylabel(r'Autocorrelation')
     plt.show()
