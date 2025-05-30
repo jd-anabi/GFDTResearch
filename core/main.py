@@ -105,7 +105,7 @@ if __name__ == '__main__':
 
     # autocorrelation function
     auto_correlation = helpers.auto_corr(hb_pos_undriven)
-    plt.plot(freq, auto_correlation)
-    plt.xlabel(r'Frequency (Hz)')
+    plt.plot(t, auto_correlation)
+    plt.xlabel(r'Time (ms)')
     plt.ylabel(r'Autocorrelation')
     plt.show()
