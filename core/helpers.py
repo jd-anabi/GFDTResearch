@@ -91,7 +91,7 @@ def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
     t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
     return hb_pos, sf_pos, t
 
-def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
+def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> tuple[np.ndarray, np.ndarray]:
     """
     Returns the stimulus force position at times t
     :param t: time
@@ -100,10 +100,11 @@ def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
     :return: the stimulus force position
     """
     sf_pos_data = np.zeros((BATCH_SIZE, len(t)))
+    omegas = np.zeros(BATCH_SIZE)
     for i in range(BATCH_SIZE):
-        omega = i * omega_0 / round(BATCH_SIZE / 2)
-        sf_pos_data[i] = amp * np.sin(omega * t)
-    return sf_pos_data
+        omegas[i] = i * omega_0 / round(BATCH_SIZE / 2)
+        sf_pos_data[i] = amp * np.sin(omegas[i] * t)
+    return sf_pos_data, omegas
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
@@ -128,5 +129,5 @@ def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, shift: bool = True) -> np.nd
     hb_pos_ft = sp.fft.fft2(hb_pos - np.mean(hb_pos))
     sf_pos_ft = sp.fft.fft2(sf - np.mean(sf))
     if shift:
-        return sp.fft.fftshift(hb_pos_ft / sf_pos_ft)
+        return sp.fft.fftshift(hb_pos_ft / sf_pos_ft, axes=1)
     return hb_pos_ft / sf_pos_ft
