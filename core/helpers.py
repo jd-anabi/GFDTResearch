@@ -1,11 +1,8 @@
 import warnings
-from typing import Any, Callable
 
+import scipy as sp
 import torch
 import numpy as np
-import scipy.fft as ffts
-import scipy.constants as constants
-from numpy import dtype
 
 import sdeint as sdeint
 import nondimensional_model as nd_model
@@ -73,6 +70,9 @@ def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
             s_max: float, t_0: float, s_max_nd: float, chi_hb: float, chi_a: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Rescaling the hair-bundle displacement, the stimulus force, and the time
+    :param nd_hb_pos: the hair bundle position
+    :param nd_sf_pos: the stimulus force position
+    :param nd_t: the time array
     :param gamma: geometric conversion factor
     :param d: distance of gating spring relaxation on channel opening
     :param x_sp: resting deflection of stereociliary pivots
@@ -91,23 +91,23 @@ def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
     t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
     return hb_pos, sf_pos, t
 
-def sf_pos(t: np.ndarray, amp: float, omega_0) -> np.ndarray:
+def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
     """
     Returns the stimulus force position at times t
     :param t: time
     :param amp: amplitude
-    :param omega_0: angular frequency to center at
+    :param omega_0: angular frequency of spontaneous oscillations
     :return: the stimulus force position
     """
-    sf_pos_data = np.zeros((BATCH_SIZE - 1, len(t)))
-    for i in range(BATCH_SIZE - 1):
+    sf_pos_data = np.zeros((BATCH_SIZE, len(t)))
+    for i in range(BATCH_SIZE):
         omega = i * omega_0 / round(BATCH_SIZE / 2)
         sf_pos_data[i] = amp * np.sin(omega * t)
     return sf_pos_data
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
-    Returns the auto-correlation function <X(t) X(0)> for the position of a hair bundle
+    Returns the (normalized) auto-correlation function <X(t) X(0)> for the position of a hair bundle
     :param hb_pos: the position of a hair bundle
     :return: the auto-correlation function
     """
@@ -116,48 +116,17 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     c = c[len(hb_pos) - 1:]
     return c / (len(hb_pos) * c[0])
 
-def lin_resp_freq(omega: float, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray[Any, dtype[Any]]:
+def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, shift: bool = True) -> np.ndarray:
     """
-    Returns the linear response function, at a specific frequency, of the hair bundle (ran over multiple trials) with a stimulating force applied
-    :param omega: the frequency tin calculate the response function at
-    :param hb_trials: trials of hair bundle position
-    :param x_sf: stimulating force
-    :param dt: time step, otherwise known as the sample spacing
-    :return: the linear response function
+    Returns the linear response function (in frequency space) for the position of a hair bundle in response to a stimulus force
+    :param hb_pos: the position of a hair bundle
+    :param sf: the stimulus forces
+    :param shift: whether to perform a shift on the response function before returning it
+    :return: the linear response function (in frequency space)
     """
-    # transfer to the frequency domain
-    hb_freq = ffts.fft(hb_driven - np.mean(hb_driven))
-    x_sf_freq = ffts.fft(x_sf - np.mean(x_sf))
-    # shift ffts
-    hb_freq = ffts.fftshift(hb_freq) # type: np.ndarray
-    x_sf_freq = ffts.fftshift(x_sf_freq) # type: np.ndarray
-    # generate frequency array and shift it
-    freqs = ffts.fftfreq(len(x_sf), d=dt)
-    freqs = ffts.fftshift(freqs)
-    # now for the fun (hard) part, extracting the values at a given frequency
-    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi))) # calculate the index closest to the desired frequency
-    return hb_freq[index] / x_sf_freq[index]
-
-def fdt_ratio(omega: float, hb_pos_undriven: np.ndarray, hb_driven: np.ndarray, x_sf: np.ndarray, dt: float) -> np.ndarray:
-    """
-    Returns the fluctuation-response ratio, at a given frequency, given a set of an ensemble of hair-bundle positions
-    :param omega: the frequency to calculate the ratio at
-    :param hb_pos_undriven: the undriven hair bundle position
-    :param hb_driven: set of an ensemble of hair-bundle positions at different frequencies
-    :param x_sf: applied stimulus force at a given frequency omega
-    :param dt: time stept
-    :return: the fluctuation-response ratio at a specific frequencies
-    """
-    # generate auto-correlation function in frequency space
-    autocorr = auto_corr(hb_pos_undriven)
-    autocorr_freq = ffts.fft(autocorr)
-    autocorr_freq = ffts.fftshift(autocorr_freq) # type: np.ndarray
-    # generate frequency array and shift it
-    freqs = ffts.fftfreq(len(autocorr), d=dt)
-    freqs = ffts.fftshift(freqs)
-    # get auto-correlation function and linear response function at a specific frequency
-    index = np.argmin(np.abs(freqs - omega / (2 * constants.pi)))  # calculate the index closest to the desired frequency
-    autocorr_omega = autocorr_freq[index]
-    lin_resp_omega = lin_resp_freq(omega, hb_driven, x_sf, dt)
-    theta = omega * autocorr_omega / np.imag(lin_resp_omega)
-    return theta
+    # compute the Fourier Transform
+    hb_pos_ft = sp.fft.fft2(hb_pos - np.mean(hb_pos))
+    sf_pos_ft = sp.fft.fft2(sf - np.mean(sf))
+    if shift:
+        return sp.fft.fftshift(hb_pos_ft / sf_pos_ft)
+    return hb_pos_ft / sf_pos_ft

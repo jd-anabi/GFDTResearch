@@ -14,7 +14,8 @@ if __name__ == '__main__':
     ts = (0, 75)
     n = int((ts[-1] - ts[0]) / dt)
     t = np.linspace(ts[0], ts[-1], n)
-    freq = sp.fft.fftshift(sp.fft.fftfreq(len(t), dt))
+    freq = sp.fft.fftfreq(len(t), dt)
+    freq = sp.fft.fftshift(freq)
 
     # parameters and initial conditions
     file_str = 'Non-dimensional'
@@ -69,6 +70,7 @@ if __name__ == '__main__':
             val = float(re.findall(pattern, row.strip())[0])
             forcing_amps.append(val)
     amp = forcing_amps[0]
+    amp = (hb_rescale_params[0] * hb_rescale_params[4]) / (hb_nd_rescale_params[1] * (hb_rescale_params[3] + hb_rescale_params[4]) * hb_rescale_params[1])  * amp # non-dimensional amplitude
     k_sf = forcing_amps[1]
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
     osc_freq_center = 2 * sp.constants.pi * float(input("Frequency to center driving at (Hz): "))
@@ -78,19 +80,27 @@ if __name__ == '__main__':
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
     # separate driven and not driven data
-    hb_pos_undriven = results[:, 0, 0]  # data of the hair bundle position from the first batch
-    hb_pos_driven_data = np.zeros((results.shape[1] - 1, n))
-    for i in range(len(hb_pos_driven_data)):
-        hb_pos_driven_data[i] = results[:, i + 1, 0]
+    hb_pos_data = np.zeros((results.shape[1], n))
+    for i in range(results.shape[1]):
+        hb_pos_data[i] = results[:, i, 0]
 
     # rescale
-    sf_pos = helpers.sf_pos(t, amp, osc_freq_center)
-    hb_pos_undriven, sf_pos, t = helpers.rescale(hb_pos_undriven, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params)
+    sf_pos = helpers.sf_pos(t, amp, 2 * np.pi * osc_freq_center)
+    hb_pos, sf_pos, t = helpers.rescale(hb_pos_data, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params)
+
+    # get undriven data
+    hb_pos_undriven = hb_pos[0, :]
 
     # get frequency of spontaneous oscillations
     hb_pos0_freq = sp.fft.fftshift(sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)))[len(t) // 2:]  # fft for non-driven data
     spon_osc_freq = freq[np.argmax(hb_pos0_freq)]  # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {spon_osc_freq} Hz. Angular frequency: {2 * np.pi * spon_osc_freq} rad/s')
+
+    # get stimulus force
+    sf = hb_rescale_params[4] * (hb_pos - sf_pos)
+
+    # get linear response function
+    lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)
 
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
@@ -108,4 +118,10 @@ if __name__ == '__main__':
     plt.plot(t, auto_correlation)
     plt.xlabel(r'Time (ms)')
     plt.ylabel(r'Autocorrelation')
+    plt.show()
+
+    # linear response function
+    plt.plot(freq, np.real(lin_resp_ft[1]))
+    plt.xlabel(r'Frequency (Hz)')
+    plt.ylabel(r'$\Re{\chi}_{hb}$')
     plt.show()
