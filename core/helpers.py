@@ -18,7 +18,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 256 if DEVICE.type == 'cuda' else 12
+BATCH_SIZE = 64 if DEVICE.type == 'cuda' else 12
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
@@ -114,7 +114,7 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """
     hb_pos = hb_pos - np.mean(hb_pos)
     c = np.correlate(hb_pos, hb_pos, mode='full')
-    c = c[len(hb_pos) - 1:]
+    c = c[len(c) // 2:]
     return c / (len(hb_pos) * c[0])
 
 def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, shift: bool = True) -> np.ndarray:
