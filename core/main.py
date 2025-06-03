@@ -73,7 +73,7 @@ if __name__ == '__main__':
     k_sf = forcing_amps[1]
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
-    osc_freq_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): ")) / time_rescale
+    osc_freq_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): ")) * time_rescale
     args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf])
 
     # multiprocessing and solve sdes
@@ -127,7 +127,7 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{\text{hb}}$ (nm)')
     plt.show()
 
-    plt.plot(freqs[:n // 700], pos_mags[: n // 700])
+    plt.plot(freqs[:n // 700], pos_mags[:n // 700])
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_{\text{hb}}(\omega)$')
     plt.show()
