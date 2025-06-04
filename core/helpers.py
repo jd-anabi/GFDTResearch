@@ -11,14 +11,14 @@ import steady_nondimensional_model as steady_nd_model
 warnings.filterwarnings('error')
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cpu')
+    DEVICE = torch.device('cuda')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 64 if DEVICE.type == 'cuda' else 12
+BATCH_SIZE = 128 if DEVICE.type == 'cuda' else 12
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
@@ -117,17 +117,17 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / (len(hb_pos) * c[0])
 
-def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, shift: bool = True) -> np.ndarray:
+def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, norm: bool = True) -> np.ndarray:
     """
     Returns the linear response function (in frequency space) for the position of a hair bundle in response to a stimulus force
     :param hb_pos: the position of a hair bundle
     :param sf: the stimulus forces
-    :param shift: whether to perform a shift on the response function before returning it
+    :param norm: whether to normalize the response function
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
     hb_pos_ft = sp.fft.fft2(hb_pos - np.mean(hb_pos))
     sf_pos_ft = sp.fft.fft2(sf - np.mean(sf))
-    if shift:
-        return sp.fft.fftshift(hb_pos_ft / sf_pos_ft, axes=1)
+    if norm:
+        return (hb_pos_ft / sf_pos_ft) / (len(hb_pos))
     return hb_pos_ft / sf_pos_ft

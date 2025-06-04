@@ -85,19 +85,22 @@ if __name__ == '__main__':
         hb_pos_data[i] = results[:, i, 0]
 
     # rescale
-    sf_pos, omegas = helpers.sf_pos(t, amp, 2 * np.pi * osc_freq_center)
+    sf_pos, omegas = helpers.sf_pos(t, amp, osc_freq_center)
     hb_pos, sf_pos, t = helpers.rescale(hb_pos_data, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params)
+    dt = float(t[1] - t[0])
 
     # get undriven data
     hb_pos_undriven = hb_pos[0, :]
 
     # get frequency of spontaneous oscillations
+    if n % 2 == 0:
+        upper_bound = int(n / 2)
+    else:
+        upper_bound = int((n - 1) / 2) + 1
     freqs = sp.fft.fftfreq(n, dt)
-    freqs = sp.fft.fftshift(freqs)
-    freqs = freqs[n // 2:]
-    hb_pos0_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven))  # fft for non-driven data
-    hb_pos0_freq = sp.fft.fftshift(hb_pos0_freq)
-    pos_mags = np.abs(hb_pos0_freq)[n // 2:]
+    freqs = freqs[:upper_bound]
+    hb_pos0_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
+    pos_mags = np.abs(hb_pos0_freq)[:upper_bound]
     peak_index = np.argmax(pos_mags)
     freqs = freqs / time_rescale # rescale from kHz -> Hz
     s_osc_freq = freqs[peak_index] # frequency of spontaneous oscillations
@@ -107,7 +110,7 @@ if __name__ == '__main__':
     sf = hb_rescale_params[4] * (hb_pos - sf_pos)
 
     # get linear response function
-    lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)
+    lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)[:upper_bound]
 
     # calculate linear response at each driving frequency
     omegas = omegas / time_rescale # rescale back to rad/s
