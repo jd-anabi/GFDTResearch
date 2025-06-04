@@ -18,7 +18,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 128 if DEVICE.type == 'cuda' else 12
+BATCH_SIZE = 32 if DEVICE.type == 'cuda' else 12
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
@@ -41,7 +41,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
         sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
     else:
-        sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE,device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Hair bundle model has been set up")
 
     # setting up initial conditions
@@ -100,9 +100,11 @@ def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> tuple[np.ndarray, np.nd
     :return: the stimulus force position
     """
     sf_pos_data = np.zeros((BATCH_SIZE, len(t)))
-    omegas = np.zeros(BATCH_SIZE)
+    omegas = np.linspace(0, 3.2 * omega_0, BATCH_SIZE-1)
+    omegas = np.append(omegas, omega_0)
+    omegas = np.sort(omegas)
+    omegas = np.unique(omegas)
     for i in range(BATCH_SIZE):
-        omegas[i] = i * omega_0 / round(BATCH_SIZE / 2)
         sf_pos_data[i] = amp * np.sin(omegas[i] * t)
     return sf_pos_data, omegas
 
@@ -126,8 +128,8 @@ def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, norm: bool = True) -> np.nda
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
-    hb_pos_ft = sp.fft.fft2(hb_pos - np.mean(hb_pos))
-    sf_pos_ft = sp.fft.fft2(sf - np.mean(sf))
+    hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
+    sf_pos_ft = sp.fft.fft(sf - np.mean(sf), axis=1)
     if norm:
         return (hb_pos_ft / sf_pos_ft) / (len(hb_pos))
     return hb_pos_ft / sf_pos_ft

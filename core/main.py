@@ -73,7 +73,7 @@ if __name__ == '__main__':
     k_sf = forcing_amps[1]
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
-    osc_freq_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): ")) * time_rescale
+    osc_freq_center = 2 * np.pi * float(input("Frequency to center driving at (Non-dimensional): "))
     args_list = (t, x0, list(params), [osc_freq_center, amp, k_sf])
 
     # multiprocessing and solve sdes
@@ -86,8 +86,10 @@ if __name__ == '__main__':
 
     # rescale
     sf_pos, omegas = helpers.sf_pos(t, amp, osc_freq_center)
-    hb_pos, sf_pos, t = helpers.rescale(hb_pos_data, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params)
-    dt = float(t[1] - t[0])
+    t_nd = t
+    hb_pos, sf_pos, t = helpers.rescale(hb_pos_data, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params) # rescale hb_pos, sf_pos, and t
+    omegas = omegas * t_nd[1] / t[1] # rescale angular frequencies
+    dt = float(t[1] - t[0]) # rescale dt
 
     # get undriven data
     hb_pos_undriven = hb_pos[0, :]
@@ -122,7 +124,12 @@ if __name__ == '__main__':
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (ms)')
-    plt.ylabel(r'$x_{hb}$ (nm)')
+    plt.ylabel(r'$x_{hb, 0}$ (nm)')
+    plt.show()
+
+    plt.plot(t, hb_pos[31, :])
+    plt.xlabel(r'Time (ms)')
+    plt.ylabel(r'$x_{hb, 1}$ (nm)')
     plt.show()
 
     plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos_undriven[int(n / 4):int(3 * n / 4)])
