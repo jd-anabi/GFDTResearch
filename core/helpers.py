@@ -18,7 +18,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 32 if DEVICE.type == 'cuda' else 12
+BATCH_SIZE = 32 if DEVICE.type == 'cuda' else 24
 SDE_TYPES = ['ito', 'stratonovich']
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
@@ -91,7 +91,7 @@ def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
     t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
     return hb_pos, sf_pos, t
 
-def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> tuple[np.ndarray, np.ndarray]:
+def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
     """
     Returns the stimulus force position at times t
     :param t: time
@@ -106,7 +106,7 @@ def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> tuple[np.ndarray, np.nd
     omegas = np.unique(omegas)
     for i in range(BATCH_SIZE):
         sf_pos_data[i] = amp * np.sin(omegas[i] * t)
-    return sf_pos_data, omegas
+    return sf_pos_data
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     """

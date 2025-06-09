@@ -69,7 +69,6 @@ if __name__ == '__main__':
             val = float(re.findall(pattern, row.strip())[0])
             forcing_amps.append(val)
     amp = forcing_amps[0]
-    amp = (hb_rescale_params[0] * hb_rescale_params[4]) / (hb_nd_rescale_params[1] * (hb_rescale_params[3] + hb_rescale_params[4]) * hb_rescale_params[1])  * amp # non-dimensional amplitude
     k_sf = forcing_amps[1]
 
     # read user input for spontaneous oscilaltion frequency and whether to use the steady-state solution for the open-channel probability
@@ -85,10 +84,16 @@ if __name__ == '__main__':
         hb_pos_data[i] = results[:, i, 0]
 
     # rescale
-    sf_pos, omegas = helpers.sf_pos(t, amp, osc_freq_center)
-    t_nd = t
+    sf_pos = helpers.sf_pos(t, amp, osc_freq_center)
     hb_pos, sf_pos, t = helpers.rescale(hb_pos_data, sf_pos, t, *hb_rescale_params, *hb_nd_rescale_params) # rescale hb_pos, sf_pos, and t
-    omegas = omegas * t_nd[1] / t[1] # rescale angular frequencies
+    mean = np.mean(hb_pos, axis=1)
+    for i in range(len(hb_pos)):
+        hb_pos[i] = hb_pos[i] - mean[i]
+    t = time_rescale * t # rescale from ms -> s
+    omegas = np.zeros(len(sf_pos), dtype=float)
+    for i in range(1, len(omegas)):
+        omegas[i] = np.arcsin(sf_pos[i, 1] / np.max(sf_pos[i])) / t[1]
+    print(omegas / (2 * np.pi))
     dt = float(t[1] - t[0]) # rescale dt
 
     # get undriven data
@@ -104,7 +109,6 @@ if __name__ == '__main__':
     hb_pos0_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
     pos_mags = np.abs(hb_pos0_freq)[:upper_bound]
     peak_index = np.argmax(pos_mags)
-    freqs = freqs / time_rescale # rescale from kHz -> Hz
     s_osc_freq = freqs[peak_index] # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
 
@@ -115,26 +119,27 @@ if __name__ == '__main__':
     lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)[:upper_bound]
 
     # calculate linear response at each driving frequency
-    omegas = omegas / time_rescale # rescale back to rad/s
     lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
     for i in range(len(lin_resp_driving_freq)):
-        index = np.argmin(2 * np.pi * freqs - omegas[i])
+        diff = 2 * np.pi * freqs - omegas[i]
+        diff = np.where(diff < 0, np.nan, diff)
+        index = np.nanargmin(diff)
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
-    plt.xlabel(r'Time (ms)')
+    plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{hb, 0}$ (nm)')
     plt.show()
 
-    plt.plot(t, hb_pos[31, :])
-    plt.xlabel(r'Time (ms)')
+    plt.plot(t, hb_pos[11, :])
+    plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{hb, 1}$ (nm)')
     plt.show()
 
     plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos_undriven[int(n / 4):int(3 * n / 4)])
-    plt.xlabel(r'Time (ms)')
-    plt.ylabel(r'$x_{\text{hb}}$ (nm)')
+    plt.xlabel(r'Time (s)')
+    plt.ylabel(r'$x_{\text{hb, 0}}$ (nm)')
     plt.show()
 
     plt.plot(freqs[:n // 700], pos_mags[:n // 700])
@@ -145,17 +150,17 @@ if __name__ == '__main__':
     # autocorrelation function
     auto_correlation = helpers.auto_corr(hb_pos_undriven)
     plt.plot(t, auto_correlation)
-    plt.xlabel(r'Time (ms)')
+    plt.xlabel(r'Time (s)')
     plt.ylabel(r'Autocorrelation')
     plt.show()
 
     # linear response function
-    plt.scatter(omegas / (2 * np.pi), np.real(lin_resp_driving_freq))
+    plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.real)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Re{\chi}_{\text{hb}}$')
     plt.show()
 
-    plt.scatter(omegas / (2 * np.pi), np.imag(lin_resp_driving_freq))
+    plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im{\chi}_{\text{hb}}$')
     plt.show()
