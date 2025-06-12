@@ -1,10 +1,11 @@
+import numpy as np
 import torch
 
 class HairBundleSDE(torch.nn.Module):
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_ratio: float, chi_hb: float, chi_a: float,
-                 x_c: float, eta_hb: float, eta_a: float, omega_0: float, amp: float, k_sf: float,
+                 x_c: float, eta_hb: float, eta_a: float, omega: np.ndarray, amp: float,
                  batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64,
                  noise_type: str = 'general', sde_type: str = 'ito'):
         super().__init__()
@@ -26,15 +27,10 @@ class HairBundleSDE(torch.nn.Module):
         self.x_c = x_c  # average equilibrium position of the adaptation motors
         self.eta_hb = eta_hb  # hair bundle diffusion constant
         self.eta_a = eta_a  # adaptation motor diffusion constant
-        self.omega_0 = omega_0  # frequency of spontaneous oscillations
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
-        self.k_sf = k_sf  # amplitude of the viscous portion of the stimulus force
-        self.omega = torch.linspace(0, 3.2 * omega_0, batch_size-1, dtype=dtype, device=device)
-        self.omega = torch.cat([self.omega, torch.tensor([self.omega_0], dtype=dtype, device=device)])
-        self.omega = torch.sort(self.omega)[0]
-        self.omega = torch.unique(self.omega, sorted=True)
+        self.omega = torch.tensor(omega, dtype=dtype, device=device)
 
         # sde model parameters
         self.noise_type = noise_type

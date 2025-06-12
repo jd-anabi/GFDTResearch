@@ -11,7 +11,7 @@ import steady_nondimensional_model as steady_nd_model
 warnings.filterwarnings('error')
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
+    DEVICE = torch.device('cpu')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:
@@ -65,31 +65,62 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
     print("SDEs have been solved")
     return hb_sol.cpu().detach().numpy()
 
-def rescale(nd_hb_pos: np.ndarray, nd_sf_pos: np.ndarray, nd_t: np.ndarray,
-            gamma: float, d: float, x_sp: float, k_sp: float, k_sf: float, k_gs_max: float,
-            s_max: float, t_0: float, s_max_nd: float, chi_hb: float, chi_a: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def rescale_x(nd_hb_pos: np.ndarray, gamma: float, d: float, x_sp: float, k_sp: float, k_sf: float, chi_hb: float) -> np.ndarray:
     """
-    Rescaling the hair-bundle displacement, the stimulus force, and the time
+    Rescaling the hair-bundle displacement
     :param nd_hb_pos: the hair bundle position
-    :param nd_sf_pos: the stimulus force position
-    :param nd_t: the time array
     :param gamma: geometric conversion factor
     :param d: distance of gating spring relaxation on channel opening
     :param x_sp: resting deflection of stereociliary pivots
     :param k_sp: stiffness of stereociliary pivots
     :param k_sf: stiffness of stimulus force
+    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
+    :return: the rescaled hair-bundle displacement
+    """
+    hb_pos = chi_hb * d / gamma * nd_hb_pos + k_sp / (k_sp + k_sf) * x_sp
+    return hb_pos
+
+def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:
+    """
+    Rescaling the time array
+    :param nd_t: the time array
     :param k_gs_max: maximum stiffness of gating spring
     :param s_max: maximum slipping rate
     :param t_0: time offset
     :param s_max_nd: non-dimensional maximum slipping rate
-    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
     :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
-    :return: tuple containing the rescaled hair-bundle displacement, stimulus force, and time
+    :return:  the rescaled time
     """
-    hb_pos = chi_hb * d / gamma * nd_hb_pos + k_sp / (k_sp + k_sf) * x_sp
-    sf_pos = chi_hb * (k_sp + k_sf) * d / (gamma * k_sf) * nd_sf_pos
     t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
-    return hb_pos, sf_pos, t
+    return t
+
+def inv_rescale_f(x_sf: np.ndarray, gamma: float, d: float, k_sp: float, k_sf: float, chi_hb: float) -> np.ndarray:
+    """
+    Rescaling the stimulus force from dimensional -> non-dimensional
+    :param x_sf: the stimulus force position
+    :param gamma: geometric conversion factor
+    :param d: distance of gating spring relaxation on channel opening
+    :param k_sp: stiffness of stereociliary pivots
+    :param k_sf: stiffness of stimulus force
+    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
+    :return: the rescaled stimulus force
+    """
+    x_sf_nd = (gamma * k_sf) / (chi_hb * (k_sp + k_sf) * d) * x_sf
+    return x_sf_nd
+
+def driving_freqs(omega_0: float) -> np.ndarray:
+    """
+    Returns an array of driving frequencies around omega_0
+    :param omega_0: the frequency to generate the array around
+    :return: an array of driving frequencies around omega_0
+    """
+    omegas = np.linspace(0, 3 * omega_0, BATCH_SIZE - 1)
+    delta = omegas[1] - omegas[0]
+    if np.any(omegas == omega_0):
+        omegas[omegas == omega_0] = omega_0 + delta / 2
+    omegas = np.append(omegas, omega_0)
+    omegas = np.sort(omegas)
+    return np.unique(omegas)
 
 def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
     """
@@ -100,10 +131,7 @@ def sf_pos(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
     :return: the stimulus force position
     """
     sf_pos_data = np.zeros((BATCH_SIZE, len(t)))
-    omegas = np.linspace(0, 3.2 * omega_0, BATCH_SIZE-1)
-    omegas = np.append(omegas, omega_0)
-    omegas = np.sort(omegas)
-    omegas = np.unique(omegas)
+    omegas = driving_freqs(omega_0)
     for i in range(BATCH_SIZE):
         sf_pos_data[i] = amp * np.sin(omegas[i] * t)
     return sf_pos_data
