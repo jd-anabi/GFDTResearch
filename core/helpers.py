@@ -8,8 +8,6 @@ import sdeint as sdeint
 import nondimensional_model as nd_model
 import steady_nondimensional_model as steady_nd_model
 
-warnings.filterwarnings('error')
-
 if torch.cuda.is_available():
     DEVICE = torch.device('cpu')
 elif torch.backends.mps.is_available():
@@ -20,6 +18,7 @@ else:
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
 BATCH_SIZE = 32 if DEVICE.type == 'cuda' else 24
 SDE_TYPES = ['ito', 'stratonovich']
+K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
@@ -156,8 +155,26 @@ def lin_resp_ft(hb_pos: np.ndarray, sf: np.ndarray, norm: bool = True) -> np.nda
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
-    hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
-    sf_pos_ft = sp.fft.fft(sf - np.mean(sf), axis=1)
     if norm:
-        return (hb_pos_ft / sf_pos_ft) / (len(hb_pos))
+        hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1) / len(hb_pos)
+        sf_pos_ft = sp.fft.fft(sf - np.mean(sf), axis=1) / len(sf)
+    else:
+        hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
+        sf_pos_ft = sp.fft.fft(sf - np.mean(sf), axis=1)
     return hb_pos_ft / sf_pos_ft
+
+def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray,
+              temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
+    """
+    Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
+    :param autocorr_ft: the auto-correlation function in frequency space (specifically at the driving frequencies)
+    :param linresp_ft: the linear response function in frequency space (specifically at the driving frequencies)
+    :param omegas: the driving frequencies
+    :param temp: the temperature
+    :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
+    :return: the fluctuation response function
+    """
+    theta = np.zeros_like(omegas)
+    for i in range(len(theta)):
+        theta[i] = (omegas[i] * autocorr_ft[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)).real
+    return theta

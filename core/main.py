@@ -10,6 +10,7 @@ import scipy as sp
 import helpers
 
 if __name__ == '__main__':
+    # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
     ts = (0, 100)
@@ -74,7 +75,9 @@ if __name__ == '__main__':
 
     # read user input for spontaneous oscillation frequency
     sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
+    # ------------- END SETUP ------------- #
 
+    # ------------- BEGIN RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
     # rescale time
     t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
@@ -95,7 +98,9 @@ if __name__ == '__main__':
     # rescaling time and making an array of driving frequencies
     t = time_rescale * t # rescale from ms -> s
     dt = float(t[1] - t[0]) # rescale dt
+    # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
+    # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
     args_list = (t_nd, x0, list(params), [helpers.driving_freqs(sosc_nd), amp_nd])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -128,21 +133,37 @@ if __name__ == '__main__':
     peak_index = np.argmax(pos_mags)
     s_osc_freq = freqs[peak_index] # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
+    # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
+    # ------------- BEGIN FDT CALCULATIONS ------------- #
     # get stimulus force
     sf = hb_rescale_params['k_sf'] * (hb_pos - x_sf)
 
     # get linear response function
     lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)[:upper_bound]
 
-    # calculate linear response at each driving frequency
+    # do the same for the autocorrelation function
+    autocorr = helpers.auto_corr(hb_pos_undriven)
+    autocorr_ft = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
+
+    # calculate the autocorrelation function and the linear response at each driving frequency
+    autocorr_driving_freq = np.zeros(len(omegas), dtype=complex)
     lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
     for i in range(len(lin_resp_driving_freq)):
         diff = 2 * np.pi * freqs - omegas[i]
         diff = np.where(diff < 0, np.nan, diff)
         index = np.nanargmin(diff)
+        autocorr_driving_freq[i] = autocorr[index]
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
+    # calculate fluctuation response
+    k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
+    boltzmann_rescale = 1e27 # nm^2 ug s^-2 K^-1
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
+    theta = helpers.fluc_resp(autocorr_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
+    # ------------- END FDT CALCULATIONS ------------- #
+
+    # ------------- BEGIN PLOTTING ------------- #
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
@@ -165,8 +186,7 @@ if __name__ == '__main__':
     plt.show()
 
     # autocorrelation function
-    auto_correlation = helpers.auto_corr(hb_pos_undriven)
-    plt.plot(t, auto_correlation)
+    plt.plot(t, autocorr)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'Autocorrelation')
     plt.show()
@@ -181,3 +201,9 @@ if __name__ == '__main__':
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im{\chi}_{\text{hb}}$')
     plt.show()
+
+    plt.scatter(omegas[1:] / (2 * np.pi), theta)
+    plt.xlabel(r'Driving Frequency (Hz)')
+    plt.ylabel(r'$\theta(\omega)$')
+    plt.show()
+    # ------------- END PLOTTING ------------- #
