@@ -93,6 +93,7 @@ if __name__ == '__main__':
     omegas = helpers.driving_freqs(sosc)
     sosc_index = np.argmax(omegas == sosc)
     amp_nd = np.max(x_sf_nd[sosc_index]) - xsf_nd_means[sosc_index]
+    print(amp_nd)
     sosc_nd = np.arcsin(x_sf_nd[sosc_index, 1] / amp_nd) / t[1]
 
     # rescaling time and making an array of driving frequencies
