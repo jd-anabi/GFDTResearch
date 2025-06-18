@@ -59,8 +59,8 @@ if __name__ == '__main__':
             line = line + 1
     hb_rescale_params: Dict[str, float] = {'gamma': hb_rescale_arr[0].item(), 'd': hb_rescale_arr[1].item(),
                                            'x_sp': hb_rescale_arr[2].item(), 'k_sp': hb_rescale_arr[3].item(),
-                                           'k_sf': hb_rescale_arr[4].item(), 'k_gs_max': hb_rescale_arr[5].item(),
-                                           's_max': hb_rescale_arr[6].item(), 't_0': hb_rescale_arr[7].item()}
+                                           'k_gs_max': hb_rescale_arr[4].item(), 's_max': hb_rescale_arr[5].item(),
+                                           't_0': hb_rescale_arr[6].item()}
     # need to add in non-dimensional parameters for rescaling too
     hb_nd_rescale_params: Dict[str, float] = {'s_max': params[6].item(), 'chi_hb': params[12].item(), 'chi_a': params[13].item()}
 
@@ -83,18 +83,17 @@ if __name__ == '__main__':
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # calculate stimulus force position (both models)
-    x_sf = helpers.sf_pos(t, amp, sosc)
-    x_sf_nd = helpers.inv_rescale_f(x_sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                                    hb_rescale_params['k_sp'], hb_rescale_params['k_sf'],
-                                    hb_nd_rescale_params['chi_hb'])
+    sf = helpers.sf(t, amp, sosc)
+    sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
+                                  hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
 
     # find which index in the array of driving frequencies corresponds to sosc
-    xsf_nd_means = np.mean(x_sf_nd, axis=1)
+    sf_nd_means = np.mean(sf_nd, axis=1)
     omegas = helpers.driving_freqs(sosc)
     sosc_index = np.argmax(omegas == sosc)
-    amp_nd = np.max(x_sf_nd[sosc_index]) - xsf_nd_means[sosc_index]
+    amp_nd = np.max(sf_nd[sosc_index]) - sf_nd_means[sosc_index]
     print(amp_nd)
-    sosc_nd = np.arcsin(x_sf_nd[sosc_index, 1] / amp_nd) / t[1]
+    sosc_nd = np.arcsin(sf_nd[sosc_index, 1] / amp_nd) / t_nd[1]
 
     # rescaling time and making an array of driving frequencies
     t = time_rescale * t # rescale from ms -> s
@@ -113,14 +112,14 @@ if __name__ == '__main__':
 
     # rescale hb_pos
     hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                               hb_rescale_params['x_sp'], hb_rescale_params['k_sp'], hb_rescale_params['k_sf'],
-                               hb_nd_rescale_params['chi_hb'])
+                               hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
     mean = np.mean(hb_pos, axis=1)
     for i in range(len(hb_pos)):
         hb_pos[i] = hb_pos[i] - mean[i]
 
-    # get undriven data
+    # get undriven and driven data
     hb_pos_undriven = hb_pos[0, :]
+    hb_pos_driven = hb_pos[1:, :]
 
     # get frequency of spontaneous oscillations
     if n % 2 == 0:
@@ -137,11 +136,11 @@ if __name__ == '__main__':
     # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
-    # get stimulus force
-    sf = hb_rescale_params['k_sf'] * (hb_pos - x_sf)
-
     # get linear response function
-    lin_resp_ft = helpers.lin_resp_ft(hb_pos, sf)[:upper_bound]
+    # only want the driven data
+    omegas = omegas[1:]
+    sf = sf[1:, :]
+    lin_resp_ft = helpers.lin_resp_ft(hb_pos_driven, sf)[:upper_bound]
 
     # do the same for the autocorrelation function
     autocorr = helpers.auto_corr(hb_pos_undriven)
@@ -168,17 +167,22 @@ if __name__ == '__main__':
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{hb, \omega = \omega_0}$ (nm)')
+    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
     plt.show()
 
-    plt.plot(t, hb_pos[-1, :])
+    plt.plot(t, hb_pos_driven[0, :])
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{hb, \omega = \omega_D}$ (nm)')
+    plt.ylabel(r'$x_{\omega = \omega_D}$ (nm)')
     plt.show()
 
     plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos_undriven[int(n / 4):int(3 * n / 4)])
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{\text{hb, \omega = \omega_0}}$ (nm)')
+    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
+    plt.show()
+
+    plt.plot(t, sf[0])
+    plt.xlabel(r'Time (s)')
+    plt.ylabel(r'$F(t) (\text{ug nm} text{ ms}^{-2})$')
     plt.show()
 
     plt.plot(freqs[:n // 700], pos_mags[:n // 700])
@@ -195,12 +199,12 @@ if __name__ == '__main__':
     # linear response function
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.real)
     plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Re{\chi}_{\text{hb}}$')
+    plt.ylabel(r'$\Re{\chi}_{x}$')
     plt.show()
 
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Im{\chi}_{\text{hb}}$')
+    plt.ylabel(r'$\Im{\chi}_{x}$')
     plt.show()
 
     plt.scatter(omegas[1:] / (2 * np.pi), theta)
