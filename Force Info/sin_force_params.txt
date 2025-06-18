@@ -1,1 +1,1 @@
-amp (ug nm ms^-2) = 100
+amp (mg nm ms^-2) = 0.1

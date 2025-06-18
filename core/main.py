@@ -199,12 +199,12 @@ if __name__ == '__main__':
     # linear response function
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.real)
     plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Re{\chi}_{x}$')
+    plt.ylabel(r'$\Re\{\chi_x\}$')
     plt.show()
 
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Im{\chi}_{x}$')
+    plt.ylabel(r'$\Im\{\chi_x\}$')
     plt.show()
 
     plt.scatter(omegas[1:] / (2 * np.pi), theta)
