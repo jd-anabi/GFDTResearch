@@ -14,7 +14,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 512 if DEVICE.type == 'cuda' else 24
+BATCH_SIZE = 64 if DEVICE.type == 'cuda' else 24
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 
@@ -108,7 +108,7 @@ def driving_freqs(omega_0: float) -> np.ndarray:
     :param omega_0: the frequency to generate the array around
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(0, 3 * omega_0, BATCH_SIZE - 1)
+    omegas = np.linspace(0, 30 * omega_0, BATCH_SIZE - 1)
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
