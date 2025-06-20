@@ -17,6 +17,7 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 64 if DEVICE.type == 'cuda' else 24
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
+SOSC_MAX_RANGE = 7
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
@@ -108,7 +109,7 @@ def driving_freqs(omega_0: float) -> np.ndarray:
     :param omega_0: the frequency to generate the array around
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(0, 30 * omega_0, BATCH_SIZE - 1)
+    omegas = np.linspace(0, SOSC_MAX_RANGE * omega_0, BATCH_SIZE - 1)
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2

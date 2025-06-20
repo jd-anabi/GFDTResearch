@@ -18,6 +18,10 @@ if __name__ == '__main__':
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
 
+    # frequency arrays
+    fs = 70
+    freqs = sp.fft.fftfreq(n, dt)
+
     # parameters and initial conditions
     file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
@@ -126,14 +130,13 @@ if __name__ == '__main__':
         upper_bound = int(n / 2)
     else:
         upper_bound = int((n - 1) / 2) + 1
-    freqs = sp.fft.fftfreq(n, dt)
-    freqs = freqs[:upper_bound]
+    pos_freqs = freqs[:upper_bound]
     hb_pos_undriven_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
     hb_pos_driven_freq = sp.fft.fft(hb_pos_driven - np.mean(hb_pos_driven), axis=1) / len(hb_pos_driven) # fft for driven data
     undriven_pos_mags = np.abs(hb_pos_undriven_freq)[:upper_bound]
     driven_pos_mags = np.abs(hb_pos_driven_freq)[:, :upper_bound]
     peak_index = np.argmax(undriven_pos_mags)
-    s_osc_freq = freqs[peak_index] # frequency of spontaneous oscillations
+    s_osc_freq = pos_freqs[peak_index] # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
     # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
@@ -146,16 +149,17 @@ if __name__ == '__main__':
 
     # do the same for the autocorrelation function
     autocorr = helpers.auto_corr(hb_pos_undriven)
-    autocorr_ft = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
+    psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
+    psd = psd[:upper_bound]
 
     # calculate the autocorrelation function and the linear response at each driving frequency
     autocorr_driving_freq = np.zeros(len(omegas), dtype=complex)
     lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
     print('Frequencies of oscillations:')
     for i in range(len(lin_resp_driving_freq)):
-        diff = np.abs(2 * np.pi * freqs - omegas[i])
+        diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
         index = np.argmin(diff)
-        print(freqs[index])
+        print(pos_freqs[index])
         autocorr_driving_freq[i] = autocorr[index]
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
@@ -178,25 +182,29 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{\omega = \omega_D}$ (nm)')
     plt.show()
 
-    plt.plot(t[int(n / 4):int(3 * n / 4)], hb_pos_undriven[int(n / 4):int(3 * n / 4)])
+    plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
+    plt.xlim(0.05, 0.4)
     plt.show()
 
-    plt.plot(t, sf[0])
-    plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$F(t) (\text{ug nm} text{ ms}^{-2})$')
-    plt.show()
-
-    plt.plot(freqs[:n // 700], undriven_pos_mags[:n // 700])
+    plt.plot(pos_freqs, undriven_pos_mags)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
+    plt.xlim(0, 100)
     plt.show()
 
     # autocorrelation function
     plt.plot(t, autocorr)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'Autocorrelation')
+    plt.show()
+
+    # Power spectral density
+    plt.plot(pos_freqs, psd)
+    plt.xlabel(r'Frequency (Hz)')
+    plt.ylabel(r'Power spectral density')
+    plt.xlim(0, 20)
     plt.show()
 
     # linear response function
