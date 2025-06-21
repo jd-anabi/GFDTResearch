@@ -185,13 +185,13 @@ if __name__ == '__main__':
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
-    plt.xlim(0.05, 0.4)
+    plt.xlim(0.005, 0.07)
     plt.show()
 
     plt.plot(pos_freqs, undriven_pos_mags)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
-    plt.xlim(0, 100)
+    plt.xlim(0, 1)
     plt.show()
 
     # autocorrelation function
@@ -204,7 +204,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 20)
+    plt.xlim(0, 1)
     plt.show()
 
     # linear response function
