@@ -13,7 +13,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
-    ts = (0, 75)
+    ts = (0, 300)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
@@ -155,11 +155,9 @@ if __name__ == '__main__':
     # calculate the autocorrelation function and the linear response at each driving frequency
     autocorr_driving_freq = np.zeros(len(omegas), dtype=complex)
     lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
-    print('Frequencies of oscillations:')
     for i in range(len(lin_resp_driving_freq)):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
         index = np.argmin(diff)
-        print(pos_freqs[index])
         autocorr_driving_freq[i] = autocorr[index]
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
@@ -204,7 +202,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 1)
+    plt.xlim(0, 0.05)
     plt.show()
 
     # linear response function
