@@ -172,17 +172,17 @@ if __name__ == '__main__':
     # preliminary plotting
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
+    plt.ylabel(r'$x_{0}$ (nm)')
     plt.show()
 
-    plt.plot(t, hb_pos_driven[0, :])
+    plt.plot(t, hb_pos_driven[sosc_index, :])
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{\omega = \omega_D}$ (nm)')
+    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
     plt.show()
 
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
+    plt.ylabel(r'$x_0$ (nm)')
     plt.xlim(0.005, 0.07)
     plt.show()
 
