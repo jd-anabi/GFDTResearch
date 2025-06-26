@@ -1,1 +1,3 @@
 amp (mg nm ms^-2) = 0.1
+phase = 3.14
+offset = 0

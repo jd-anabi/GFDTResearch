@@ -76,6 +76,8 @@ if __name__ == '__main__':
             val = float(re.findall(pattern, row.strip())[0])
             forcing_amps.append(val)
     amp = forcing_amps[0]
+    phase = forcing_amps[1]
+    offset = forcing_amps[2]
 
     # read user input for spontaneous oscillation frequency
     sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
@@ -87,7 +89,7 @@ if __name__ == '__main__':
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # calculate stimulus force position (both models)
-    sf = helpers.sf(t, amp, sosc)
+    sf = helpers.sf(t, amp, sosc, phase, offset)
     sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
 
@@ -96,8 +98,11 @@ if __name__ == '__main__':
     omegas = helpers.driving_freqs(sosc)
     print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
-    amp_nd = np.max(sf_nd[sosc_index]) - sf_nd_means[sosc_index]
-    sosc_nd = np.arcsin(sf_nd[sosc_index, 1] / amp_nd) / t_nd[1]
+    params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
+                                             hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
+                                             hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
+                                             hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
+    amp_nd, omegas_nd, phases_nd, offset_nd = params_nd[0], params_nd[1], params_nd[2], params_nd[3]
 
     # rescaling time and making an array of driving frequencies
     t = time_rescale * t # rescale from ms -> s
@@ -106,7 +111,7 @@ if __name__ == '__main__':
 
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
-    args_list = (t_nd, x0, list(params), [helpers.driving_freqs(sosc_nd), amp_nd])
+    args_list = (t_nd, x0, list(params), [omegas_nd, amp_nd, phases_nd, offset_nd])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
     # separate driven and not driven data
@@ -175,9 +180,10 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{0}$ (nm)')
     plt.show()
 
-    plt.plot(t, hb_pos_driven[sosc_index, :])
+    plt.plot(t, hb_pos_driven[sosc_index, :] / 1000, label=r'$x_{\omega = \omega_0}$ (mm)')
+    plt.plot(t, sf[sosc_index], label=rf'$F(t) = {amp} \sin({omegas[sosc_index]} \ t + {phase}) + {offset}$')
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{\omega = \omega_0}$ (nm)')
+    plt.legend()
     plt.show()
 
     plt.plot(t, hb_pos_undriven)

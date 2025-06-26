@@ -5,7 +5,7 @@ class HairBundleSDE(torch.nn.Module):
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_ratio: float, chi_hb: float, chi_a: float,
-                 x_c: float, eta_hb: float, eta_a: float, omega: np.ndarray, amp: float,
+                 x_c: float, eta_hb: float, eta_a: float, omega: np.ndarray, amp: float, phase: np.ndarray, offset: float,
                  batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64,
                  noise_type: str = 'general', sde_type: str = 'ito'):
         super().__init__()
@@ -30,6 +30,8 @@ class HairBundleSDE(torch.nn.Module):
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
+        self.phase = phase # phase of the stimulus force
+        self.offset = offset # stimulus force offset
         self.omega = torch.tensor(omega, dtype=dtype, device=device)
 
         # sde model parameters
@@ -89,7 +91,7 @@ class HairBundleSDE(torch.nn.Module):
 
     # stimulus force
     def __sin_sf(self, t):
-        return self.amp * torch.sin(self.omega * t)
+        return self.amp * torch.sin(self.omega * t + self.phase) + self.offset
     # noise
     def __hb_noise(self) -> float:
         return self.eta_hb / self.tau_hb

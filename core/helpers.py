@@ -103,6 +103,34 @@ def inv_rescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb
     force_nd = gamma / (chi_hb * k_sp * d) * force
     return force_nd
 
+def rescale_force_params(amp: float, omegas: np.ndarray, phase: float, offset: float,
+                         gamma: float, d: float, k_sp: float, chi_hb: float,
+                         k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[float, np.ndarray, np.ndarray, float]:
+    """
+    Rescale the stimulus force parameters from dimensional -> non-dimensional
+    :param amp: amplitude
+    :param omegas: frequencies
+    :param phase: phase
+    :param offset: offset
+    :param gamma: geometric conversion factor
+    :param d: distance of gating spring relaxation on channel opening
+    :param k_sp: stiffness of stereociliary pivots
+    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
+    :param k_gs_max: maximum stiffness of gating spring
+    :param s_max: maximum slipping rate
+    :param s_max_nd: non-dimensional maximum slipping rate
+    :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
+    :param t_0: time offset
+    :return: the rescaled stimulus force parameters
+    """
+    alpha = gamma / (chi_hb * k_sp * d)
+    t_prime = chi_a * s_max_nd / (k_gs_max * s_max)
+    amp_nd = alpha * amp
+    offset_nd = alpha * offset
+    omega_nd = t_prime * omegas
+    phases_nd = phase - t_0 * omegas
+    return amp_nd, omega_nd, phases_nd, offset_nd
+
 def driving_freqs(omega_0: float) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
@@ -117,18 +145,20 @@ def driving_freqs(omega_0: float) -> np.ndarray:
     omegas = np.sort(omegas)
     return np.unique(omegas)
 
-def sf(t: np.ndarray, amp: float, omega_0: float) -> np.ndarray:
+def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float) -> np.ndarray:
     """
     Returns the stimulus force position at times t
     :param t: time
     :param amp: amplitude
     :param omega_0: angular frequency of spontaneous oscillations
+    :param phase: phase of the stimulus force
+    :param offset: offset of the stimulus force
     :return: the stimulus force position
     """
     sf_batches = np.zeros((BATCH_SIZE, len(t)))
     omegas = driving_freqs(omega_0)
     for i in range(BATCH_SIZE):
-        sf_batches[i] = amp * np.sin(omegas[i] * t)
+        sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
 
 def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
