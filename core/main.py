@@ -94,7 +94,6 @@ if __name__ == '__main__':
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
 
     # find which index in the array of driving frequencies corresponds to sosc
-    sf_nd_means = np.mean(sf_nd, axis=1)
     omegas = helpers.driving_freqs(sosc)
     print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
@@ -180,16 +179,23 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{0}$ (nm)')
     plt.show()
 
-    plt.plot(t, hb_pos_driven[sosc_index, :] / 1000, label=r'$x_{\omega = \omega_0}$ (mm)')
-    plt.plot(t, sf[sosc_index], label=rf'$F(t) = {amp} \sin({omegas[sosc_index]} \ t + {phase}) + {offset}$')
-    plt.xlabel(r'Time (s)')
-    plt.legend()
-    plt.show()
-
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_0$ (nm)')
     plt.xlim(0.005, 0.07)
+    plt.show()
+
+    # entrainment plotting
+    fig, ax = plt.subplots(figsize=(12, 10))
+    ax.plot(t, hb_pos_driven[sosc_index, :], color='b')
+    ax.set_xlabel(r'Time (s)')
+    ax.set_ylabel(r'$x_{\omega = \omega_0}$ (nm)', color='b')
+    ax.tick_params(axis='y')
+
+    axf = ax.twinx()
+    axf.plot(t, sf[sosc_index], color='r')
+    axf.set_ylabel(rf'$F(t) = {amp} \sin({omegas[sosc_index]} \ t + {phase}) + {offset}$ (mg nm ms^-2)', color='r')
+    axf.tick_params(axis='y')
     plt.show()
 
     plt.plot(pos_freqs, undriven_pos_mags)
