@@ -177,37 +177,49 @@ if __name__ == '__main__':
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{0}$ (nm)')
+    plt.tight_layout()
     plt.show()
 
     plt.plot(t, hb_pos_undriven)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_0$ (nm)')
     plt.xlim(0.005, 0.07)
+    plt.tight_layout()
     plt.show()
 
     # entrainment plotting
-    fig, ax = plt.subplots(figsize=(12, 10))
-    ax.plot(t, hb_pos_driven[sosc_index, :], color='b')
-    ax.set_xlabel(r'Time (s)')
-    ax.set_ylabel(r'$x_{\omega = \omega_0}$ (nm)', color='b')
-    ax.tick_params(axis='y')
-
-    axf = ax.twinx()
-    axf.plot(t, sf[sosc_index], color='r')
-    axf.set_ylabel(rf'$F(t) = {amp} \sin({omegas[sosc_index]} \ t + {phase}) + {offset}$ (mg nm ms^-2)', color='r')
-    axf.tick_params(axis='y')
+    fig, ax = plt.subplots(3, 3, figsize=(36, 20))
+    for i in range(3):
+        for j in range(3):
+            iteration = 3*i + j
+            index = sosc_index + iteration
+            if index >= len(omegas):
+                index = sosc_index
+            curr_omega = round(omegas[index].item(), 3)
+            ax[i, j].plot(t, hb_pos_driven[index, :], color='b')
+            ax[i, j].set_xlabel(r'Time (s)')
+            ax[i, j].set_ylabel(rf'$x$ (nm)', color='b')
+            ax[i, j].tick_params(axis='y')
+            ax[i, j].set_title(rf'$\omega = {curr_omega}$ rad/s')
+            axf = ax[i, j].twinx()
+            axf.plot(t, sf[index], color='r')
+            axf.set_ylabel(rf'$F(t) = {amp} \sin({curr_omega} \ t + {phase}) + {offset}$ (mg nm ms$^-2$)', color='r')
+            axf.tick_params(axis='y')
+    plt.tight_layout()
     plt.show()
 
     plt.plot(pos_freqs, undriven_pos_mags)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
     plt.xlim(0, 1)
+    plt.tight_layout()
     plt.show()
 
     # autocorrelation function
     plt.plot(t, autocorr)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'Autocorrelation')
+    plt.tight_layout()
     plt.show()
 
     # Power spectral density
@@ -215,21 +227,25 @@ if __name__ == '__main__':
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
     plt.xlim(0, 0.05)
+    plt.tight_layout()
     plt.show()
 
     # linear response function
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.real)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Re\{\chi_x\}$')
+    plt.tight_layout()
     plt.show()
 
     plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im\{\chi_x\}$')
+    plt.tight_layout()
     plt.show()
 
     plt.scatter(omegas[1:] / (2 * np.pi), theta)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
+    plt.tight_layout()
     plt.show()
     # ------------- END PLOTTING ------------- #
