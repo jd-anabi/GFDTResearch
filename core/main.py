@@ -18,10 +18,6 @@ if __name__ == '__main__':
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
 
-    # frequency arrays
-    fs = 70
-    freqs = sp.fft.fftfreq(n, dt)
-
     # parameters and initial conditions
     file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
@@ -88,6 +84,10 @@ if __name__ == '__main__':
     t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
+    # rescaling time and making an array of driving frequencies
+    t = time_rescale * t # rescale from ms -> s
+    dt = float(t[1] - t[0]) # rescale dt
+
     # calculate stimulus force position (both models)
     sf = helpers.sf(t, amp, sosc, phase, offset)
     sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
@@ -103,9 +103,9 @@ if __name__ == '__main__':
                                              hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
     amp_nd, omegas_nd, phases_nd, offset_nd = params_nd[0], params_nd[1], params_nd[2], params_nd[3]
 
-    # rescaling time and making an array of driving frequencies
-    t = time_rescale * t # rescale from ms -> s
-    dt = float(t[1] - t[0]) # rescale dt
+    # frequency arrays
+    fs = 70
+    freqs = sp.fft.fftfreq(n, dt)
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
@@ -167,7 +167,7 @@ if __name__ == '__main__':
 
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    boltzmann_rescale = 1e27 # nm^2 ug s^-2 K^-1
+    boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     theta = helpers.fluc_resp(autocorr_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
@@ -201,6 +201,7 @@ if __name__ == '__main__':
             ax[i, j].set_ylabel(rf'$x$ (nm)', color='b')
             ax[i, j].tick_params(axis='y')
             ax[i, j].set_title(rf'$\omega = {curr_omega}$ rad/s')
+            #ax[i, j].set_xlim(0.02, 0.05)
             axf = ax[i, j].twinx()
             axf.plot(t, sf[index], color='r')
             axf.set_ylabel(rf'$F(t) = {amp} \sin({curr_omega} \ t + {phase}) + {offset}$ (mg nm ms$^-2$)', color='r')
@@ -211,7 +212,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, undriven_pos_mags)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
-    plt.xlim(0, 1)
+    plt.xlim(0, 200)
     plt.tight_layout()
     plt.show()
 
@@ -226,7 +227,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 0.05)
+    plt.xlim(0, 200)
     plt.tight_layout()
     plt.show()
 
