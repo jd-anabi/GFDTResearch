@@ -5,6 +5,7 @@ import numpy as np
 import sdeint as sdeint
 import nondimensional_model as nd_model
 import steady_nondimensional_model as steady_nd_model
+import examples.harmonic_oscillator as harmonic_oscillator
 
 if torch.cuda.is_available():
     DEVICE = torch.device('cpu')
@@ -14,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 24
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 7
@@ -35,11 +36,13 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
 
     # check if we are using the steady-state solution
     if params[3] == 0:
-        x0 = x0[:4]
-        sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        #x0 = x0[:4]
+        #sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
     else:
-        sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        #sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Hair bundle model has been set up")
 
     # setting up initial conditions
@@ -200,6 +203,9 @@ def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarra
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
     :return: the fluctuation response function
     """
+    # convert to angular frequency
+    autocorr_ft = 2 * np.pi * autocorr_ft
+    linresp_ft = 2 * np.pi * linresp_ft
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
         theta[i] = (omegas[i] * autocorr_ft[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)).real

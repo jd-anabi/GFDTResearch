@@ -13,7 +13,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
-    ts = (0, 300)
+    ts = (0, 100)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
@@ -86,6 +86,7 @@ if __name__ == '__main__':
 
     # rescaling time and making an array of driving frequencies
     t = time_rescale * t # rescale from ms -> s
+    t = t_nd
     dt = float(t[1] - t[0]) # rescale dt
 
     # calculate stimulus force position (both models)
@@ -97,11 +98,11 @@ if __name__ == '__main__':
     omegas = helpers.driving_freqs(sosc)
     print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
-    params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
-                                             hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
-                                             hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
-                                             hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
-    amp_nd, omegas_nd, phases_nd, offset_nd = params_nd[0], params_nd[1], params_nd[2], params_nd[3]
+    force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
+                                                   hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
+                                                   hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
+                                                   hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
+    amp_nd, omegas_nd, phases_nd, offset_nd = force_params_nd[0], force_params_nd[1], force_params_nd[2], force_params_nd[3]
 
     # frequency arrays
     fs = 70
@@ -110,7 +111,9 @@ if __name__ == '__main__':
 
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
-    args_list = (t_nd, x0, list(params), [omegas_nd, amp_nd, phases_nd, offset_nd])
+    x0 = [1.0, 1.0]
+    parameters = [1.0, 0.5, 1.0, 1.0]
+    args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
     # separate driven and not driven data
@@ -121,6 +124,7 @@ if __name__ == '__main__':
     # rescale hb_pos
     hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
+    hb_pos = hb_pos_data
     mean = np.mean(hb_pos, axis=1)
     for i in range(len(hb_pos)):
         hb_pos[i] = hb_pos[i] - mean[i]
@@ -162,7 +166,7 @@ if __name__ == '__main__':
     for i in range(len(lin_resp_driving_freq)):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
         index = np.argmin(diff)
-        autocorr_driving_freq[i] = autocorr[index]
+        autocorr_driving_freq[i] = psd[index]
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
     # calculate fluctuation response
@@ -212,7 +216,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, undriven_pos_mags)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
-    plt.xlim(0, 200)
+    plt.xlim(0, 5)
     plt.tight_layout()
     plt.show()
 
@@ -227,7 +231,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 200)
+    plt.xlim(0, 5)
     plt.tight_layout()
     plt.show()
 
