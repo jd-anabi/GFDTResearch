@@ -112,7 +112,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
     x0 = [1.0, 1.0]
-    parameters = [1.0, 0.5, 1.0, 1.0]
+    parameters = [5, 2.5, 5, 5]
     args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
