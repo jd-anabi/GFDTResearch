@@ -15,10 +15,11 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 24
+BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 7
+SOSC_MAX_RANGE = 1.5
+SOSC_MIN_RANGE = 0.5
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
@@ -140,11 +141,12 @@ def driving_freqs(omega_0: float) -> np.ndarray:
     :param omega_0: the frequency to generate the array around
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(0, SOSC_MAX_RANGE * omega_0, BATCH_SIZE - 1)
+    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, BATCH_SIZE - 2)
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
     omegas = np.append(omegas, omega_0)
+    omegas = np.append(omegas, 0)
     omegas = np.sort(omegas)
     return np.unique(omegas)
 
@@ -173,7 +175,7 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     hb_pos = hb_pos - np.mean(hb_pos)
     c = np.correlate(hb_pos, hb_pos, mode='full')
     c = c[len(c) // 2:]
-    return c / (len(hb_pos) * c[0])
+    return c / c[0]
 
 def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray, norm: bool = True) -> np.ndarray:
     """
@@ -185,8 +187,8 @@ def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray, norm: bool = True) -> np.
     """
     # compute the Fourier Transform
     if norm:
-        hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1) / len(hb_pos)
-        sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1) / len(force)
+        hb_pos_ft = 2 * sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1) / len(hb_pos)
+        sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
     else:
         hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
         sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
@@ -203,10 +205,8 @@ def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarra
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
     :return: the fluctuation response function
     """
-    # convert to angular frequency
-    autocorr_ft = 2 * np.pi * autocorr_ft
-    linresp_ft = 2 * np.pi * linresp_ft
+    boltzmann_scale = 1
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = (omegas[i] * autocorr_ft[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)).real
+        theta[i] = omegas[i] * autocorr_ft[i].real / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
     return theta
