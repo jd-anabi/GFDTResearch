@@ -1,6 +1,9 @@
 import numpy as np
 import torch
 
+BOLTZMANN_RESCALE = 1e18 # nm^2 mg ms^-2 K^-1
+K_B = BOLTZMANN_RESCALE * 1.380649e-23 # m^2 kg s^-2 K^-1
+
 class HarmonicOscillator(torch.nn.Module):
     def __init__(self, mass: float, gamma: float, omega_0: float, temp: float,
                  omega: np.ndarray, amp: float, phase: np.ndarray, offset: float,
@@ -11,7 +14,7 @@ class HarmonicOscillator(torch.nn.Module):
         self.gamma = gamma
         self.omega_0 = omega_0
         self.temp = temp
-        self.eta = np.sqrt(2 * self.gamma * self.temp / self.mass)
+        self.eta = np.sqrt(2 * K_B * self.gamma * self.temp / self.mass)
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force

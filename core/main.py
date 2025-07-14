@@ -112,7 +112,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
     x0 = [1.0, 1.0]
-    parameters = [1, 0.5, 10, 1]
+    parameters = [1, 0.5, 1, 70]
     args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
@@ -171,7 +171,7 @@ if __name__ == '__main__':
 
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
+    boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     theta = helpers.fluc_resp(autocorr_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
@@ -252,5 +252,12 @@ if __name__ == '__main__':
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
     plt.tight_layout()
+    plt.show()
+
+    plt.scatter(omegas[1:] / (2 * np.pi), theta)
+    plt.xlabel(r'Driving Frequency (Hz)')
+    plt.ylabel(r'$\theta(\omega)$')
+    plt.tight_layout()
+    plt.ylim(0, 5)
     plt.show()
     # ------------- END PLOTTING ------------- #

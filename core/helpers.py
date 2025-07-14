@@ -15,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 32
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
@@ -205,7 +205,6 @@ def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarra
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
     :return: the fluctuation response function
     """
-    boltzmann_scale = 1
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
         theta[i] = omegas[i] * autocorr_ft[i].real / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
