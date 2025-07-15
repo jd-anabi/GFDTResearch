@@ -13,7 +13,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
-    ts = (0, 100)
+    ts = (0, 300)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
@@ -111,8 +111,8 @@ if __name__ == '__main__':
 
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
-    x0 = [1.0, 1.0]
-    parameters = [1, 0.5, 1, 70]
+    x0 = [0.1, 0.0]
+    parameters = [1, 0.5, 1, 1]
     args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
