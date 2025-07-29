@@ -8,7 +8,7 @@ import steady_nondimensional_model as steady_nd_model
 import examples.harmonic_oscillator as harmonic_oscillator
 
 if torch.cuda.is_available():
-    DEVICE = torch.device('cpu')
+    DEVICE = torch.device('cuda')
 elif torch.backends.mps.is_available():
     DEVICE = torch.device('cpu')
 else:

@@ -192,7 +192,7 @@ if __name__ == '__main__':
     plt.show()
 
     # entrainment plotting
-    fig, ax = plt.subplots(3, 3, figsize=(36, 20))
+    fig, ax = plt.subplots(3, 3, figsize=(56, 40))
     for i in range(3):
         for j in range(3):
             iteration = 3*i + j
@@ -258,6 +258,6 @@ if __name__ == '__main__':
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
     plt.tight_layout()
-    plt.ylim(0, 5)
+    plt.ylim(-30, 30)
     plt.show()
     # ------------- END PLOTTING ------------- #
