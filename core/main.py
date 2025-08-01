@@ -6,14 +6,18 @@ from typing import Dict
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
+from fontTools.misc.psOperators import ps_dict
 
 import helpers
 
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
+    # damped harmonic oscillator parameters
+    parameters = [1, 0.2, 1, 0.5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-3
-    ts = (0, 150)
+    t_max = 100 / parameters[2] + 50 / parameters[1]
+    ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     time_rescale = 1e-3 # ms -> s
@@ -76,7 +80,8 @@ if __name__ == '__main__':
     offset = forcing_amps[2]
 
     # read user input for spontaneous oscillation frequency
-    sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
+    #sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
+    sosc = parameters[2]
     # ------------- END SETUP ------------- #
 
     # ------------- BEGIN RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
@@ -104,15 +109,11 @@ if __name__ == '__main__':
                                                    hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
     amp_nd, omegas_nd, phases_nd, offset_nd = force_params_nd[0], force_params_nd[1], force_params_nd[2], force_params_nd[3]
 
-    # frequency arrays
-    fs = 70
-    freqs = sp.fft.fftfreq(n, dt)
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
     x0 = [0.1, 0.0]
-    parameters = [1, 0.1, 3, 5]
     args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
     results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
@@ -125,6 +126,11 @@ if __name__ == '__main__':
     hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
     hb_pos = hb_pos_data
+    t = t[len(t) // 2:]
+    t = t - t[0]
+    n = len(t)
+    hb_pos = hb_pos[:, n:]
+    sf = sf[:, n:]
     mean = np.mean(hb_pos, axis=1)
     for i in range(len(hb_pos)):
         hb_pos[i] = hb_pos[i] - mean[i]
@@ -134,6 +140,9 @@ if __name__ == '__main__':
     hb_pos_driven = hb_pos[1:, :]
 
     # get frequency of spontaneous oscillations
+    # frequency arrays
+    fs = 70
+    freqs = sp.fft.fftfreq(n, dt)
     if n % 2 == 0:
         upper_bound = int(n / 2)
     else:
