@@ -177,7 +177,7 @@ def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / c[0]
 
-def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray, norm: bool = True) -> np.ndarray:
+def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
     Returns the linear response function (in frequency space) for the position of a hair bundle in response to a stimulus force
     :param hb_pos: the position of a hair bundle
@@ -186,12 +186,8 @@ def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray, norm: bool = True) -> np.
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
-    if norm:
-        hb_pos_ft = 2 * sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1) / len(hb_pos)
-        sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
-    else:
-        hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
-        sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
+    hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
+    sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
     return hb_pos_ft / sf_pos_ft
 
 def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray,
@@ -207,5 +203,5 @@ def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarra
     """
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = omegas[i] * autocorr_ft[i].real / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
+        theta[i] = -1 * omegas[i] * autocorr_ft[i].real / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
     return theta

@@ -13,7 +13,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.2, 1, 0.5] # mass, gamma, omega_0, temperature
+    parameters = [0.5, 0.1, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-3
     t_max = 100 / parameters[2] + 50 / parameters[1]
@@ -126,11 +126,12 @@ if __name__ == '__main__':
     hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
     hb_pos = hb_pos_data
-    t = t[len(t) // 2:]
+    idx = int(0.7 * len(t))
+    t = t[idx:] # take last 30% for steady state
     t = t - t[0]
     n = len(t)
-    hb_pos = hb_pos[:, n:]
-    sf = sf[:, n:]
+    hb_pos = hb_pos[:, idx:]
+    sf = sf[:, idx:]
     mean = np.mean(hb_pos, axis=1)
     for i in range(len(hb_pos)):
         hb_pos[i] = hb_pos[i] - mean[i]
