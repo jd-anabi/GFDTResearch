@@ -6,7 +6,6 @@ from typing import Dict
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
-from fontTools.misc.psOperators import ps_dict
 
 import helpers
 
