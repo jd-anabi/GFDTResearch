@@ -14,8 +14,8 @@ if __name__ == '__main__':
     # damped harmonic oscillator parameters
     parameters = [0.5, 0.1, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
-    dt = 1e-3
-    t_max = 100 / parameters[2] + 50 / parameters[1]
+    dt = 1e-2
+    t_max = 2 * np.pi * 100 / parameters[2] + 50 / parameters[1]
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
@@ -260,6 +260,7 @@ if __name__ == '__main__':
     plt.scatter(omegas[1:] / (2 * np.pi), theta)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
+    plt.hlines(1, 0.07, 0.25, linestyle='--', color='r')
     plt.tight_layout()
     plt.show()
 
