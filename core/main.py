@@ -158,31 +158,33 @@ if __name__ == '__main__':
     # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
-    # get linear response function
-    # only want the driven data
+    # get autocorrelation function
+    autocorr = helpers.auto_corr(hb_pos_undriven)
+    # angular frequencies and stimulus force
     omegas = omegas[1:]
     sf = sf[1:, :]
-    lin_resp_ft = helpers.lin_resp_ft(hb_pos_driven, sf)[:, :upper_bound]
+    # get linear response function
+    # only want the driven data
+    lin_resp_ft = helpers.lin_resp_ft(hb_pos_driven, sf, dt, freqs)[:, :upper_bound]
 
-    # do the same for the autocorrelation function
-    autocorr = helpers.auto_corr(hb_pos_undriven)
-    psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
-    psd = psd[:upper_bound]
+    #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
+    #psd = psd[:upper_bound]
+    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs)[1]
 
     # calculate the autocorrelation function and the linear response at each driving frequency
-    autocorr_driving_freq = np.zeros(len(omegas), dtype=complex)
+    psd_driving_freq = np.zeros(len(omegas), dtype=complex)
     lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
     for i in range(len(lin_resp_driving_freq)):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
         index = np.argmin(diff)
-        autocorr_driving_freq[i] = psd[index]
+        psd_driving_freq[i] = psd[index]
         lin_resp_driving_freq[i] = lin_resp_ft[i, index]
 
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    theta = helpers.fluc_resp(autocorr_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
+    theta = helpers.fluc_resp(psd_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #

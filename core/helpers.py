@@ -15,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 32
+BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
@@ -166,42 +166,59 @@ def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float) -
         sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
 
-def auto_corr(hb_pos: np.ndarray) -> np.ndarray:
+def auto_corr(x: np.ndarray) -> np.ndarray:
     """
-    Returns the (normalized) auto-correlation function <X(t) X(0)> for the position of a hair bundle
-    :param hb_pos: the position of a hair bundle
+    Returns the (normalized) auto-correlation function <X(t) X(0)> for the time series data
+    :param x: the time series data
     :return: the auto-correlation function
     """
-    hb_pos = hb_pos - np.mean(hb_pos)
-    c = np.correlate(hb_pos, hb_pos, mode='full')
+    x = x - np.mean(x)
+    c = np.correlate(x, x, mode='full')
     c = c[len(c) // 2:]
     return c / c[0]
 
-def lin_resp_ft(hb_pos: np.ndarray, force: np.ndarray) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, int_freqs: np.ndarray) -> np.ndarray:
     """
-    Returns the linear response function (in frequency space) for the position of a hair bundle in response to a stimulus force
-    :param hb_pos: the position of a hair bundle
+    Returns the power spectral density (PSD) of the input signal x
+    :param x: the time series input signal
+    :param dt: the time step
+    :param int_freqs: the frequencies to interpolate the PSD with
+    :return: the power spectral density
+    """
+    fs = 1 / dt
+    freqs, psd = sp.signal.welch(x, fs=fs, nperseg=(len(x) - 1))
+    psd = np.interp(int_freqs, freqs, psd)
+    return psd
+
+def lin_resp_ft(x: np.ndarray, force: np.ndarray, dt: float, int_freqs: np.ndarray) -> np.ndarray:
+    """
+    Returns the linear response function (in frequency space) for the time series data in response to a stimulus force
+    :param x: the time series data
     :param force: the stimulus forces
-    :param norm: whether to normalize the response function
+    :param dt: the time step
+    :param int_freqs: the frequencies to interpolate the linear response with
     :return: the linear response function (in frequency space)
     """
+    # compute the frequency array
+    freqs = sp.fft.fftfreq(len(x), dt)
     # compute the Fourier Transform
-    hb_pos_ft = sp.fft.fft(hb_pos - np.mean(hb_pos), axis=1)
-    sf_pos_ft = sp.fft.fft(force - np.mean(force), axis=1)
-    return hb_pos_ft / sf_pos_ft
+    x_ft = sp.fft.fft(x - np.mean(x), axis=1)
+    sf_ft = sp.fft.fft(force - np.mean(force), axis=1)
+    chi = x_ft / sf_ft
+    chi = np.interp(int_freqs, freqs, chi)
+    return chi
 
-def fluc_resp(autocorr_ft: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray,
-              temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
+def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
     """
     Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
-    :param autocorr_ft: the auto-correlation function in frequency space (specifically at the driving frequencies)
+    :param psd: the power spectral density
     :param linresp_ft: the linear response function in frequency space (specifically at the driving frequencies)
-    :param omegas: the driving frequencies
+    :param omegas: the driving frequencies (angular frequencies)
     :param temp: the temperature
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
     :return: the fluctuation response function
     """
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = -1 * omegas[i] * autocorr_ft[i].real / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
+        theta[i] = -1 * omegas[i] * psd[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
     return theta
