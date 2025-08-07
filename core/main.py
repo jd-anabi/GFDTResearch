@@ -15,7 +15,8 @@ if __name__ == '__main__':
     parameters = [0.5, 0.1, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
-    t_max = 2 * np.pi * 100 / parameters[2] + 50 / parameters[1]
+    t_equilibrium = 50 / parameters[1]
+    t_max = 2 * np.pi * 100 / parameters[2] + t_equilibrium
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
@@ -126,6 +127,7 @@ if __name__ == '__main__':
                                hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
     hb_pos = hb_pos_data
     idx = int(0.7 * len(t))
+    idx = int(t_equilibrium / dt)
     t = t[idx:] # take last 30% for steady state
     t = t - t[0]
     n = len(t)
@@ -160,31 +162,29 @@ if __name__ == '__main__':
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # get autocorrelation function
     autocorr = helpers.auto_corr(hb_pos_undriven)
+
     # angular frequencies and stimulus force
     omegas = omegas[1:]
     sf = sf[1:, :]
-    # get linear response function
-    # only want the driven data
-    lin_resp_ft = helpers.lin_resp_ft(hb_pos_driven, sf, dt, freqs)[:, :upper_bound]
 
     #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
     #psd = psd[:upper_bound]
-    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs)[1]
+    chi = helpers.chi_ft(hb_pos_driven, sf)[:, :upper_bound]
+    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, len(freqs) // 4)
 
     # calculate the autocorrelation function and the linear response at each driving frequency
-    psd_driving_freq = np.zeros(len(omegas), dtype=complex)
-    lin_resp_driving_freq = np.zeros(len(omegas), dtype=complex)
-    for i in range(len(lin_resp_driving_freq)):
+    psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), len(freqs)) / (2 * np.pi) # in units of rad/s
+    chi_df = np.zeros(len(omegas), dtype=complex)
+    for i in range(len(chi_df)):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
         index = np.argmin(diff)
-        psd_driving_freq[i] = psd[index]
-        lin_resp_driving_freq[i] = lin_resp_ft[i, index]
+        chi_df[i] = chi[i, index]
 
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    theta = helpers.fluc_resp(psd_driving_freq[1:], lin_resp_driving_freq[1:], omegas[1:], temp, boltzmann_rescale)
+    theta = helpers.fluc_resp(psd_df[1:], chi_df[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
@@ -247,13 +247,13 @@ if __name__ == '__main__':
     plt.show()
 
     # linear response function
-    plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.real)
+    plt.scatter(omegas / (2 * np.pi), chi_df.real)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Re\{\chi_x\}$')
     plt.tight_layout()
     plt.show()
 
-    plt.scatter(omegas / (2 * np.pi), lin_resp_driving_freq.imag)
+    plt.scatter(omegas / (2 * np.pi), chi_df.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im\{\chi_x\}$')
     plt.tight_layout()

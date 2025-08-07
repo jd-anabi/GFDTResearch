@@ -177,35 +177,31 @@ def auto_corr(x: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / c[0]
 
-def psd(x: np.ndarray, dt: float, int_freqs: np.ndarray) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, nperseg: float) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
     :param dt: the time step
-    :param int_freqs: the frequencies to interpolate the PSD with
+    :param ifreqs: the frequencies to interpolate the PSD with
+    :param nperseg: length of each segment
     :return: the power spectral density
     """
     fs = 1 / dt
-    freqs, psd = sp.signal.welch(x, fs=fs, nperseg=(len(x) - 1))
-    psd = np.interp(int_freqs, freqs, psd)
+    freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
+    psd = np.interp(ifreqs, freqs, psd)
     return psd
 
-def lin_resp_ft(x: np.ndarray, force: np.ndarray, dt: float, int_freqs: np.ndarray) -> np.ndarray:
+def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
-    Returns the linear response function (in frequency space) for the time series data in response to a stimulus force
-    :param x: the time series data
-    :param force: the stimulus forces
-    :param dt: the time step
-    :param int_freqs: the frequencies to interpolate the linear response with
+    Returns the linear response function (in frequency space) for the time series data in response to a stimulus force at different frequencies
+    :param x: the time series data; n x m array: n = number of simulations, m = number of time steps
+    :param force: the stimulus forces; n x m array: n = number of simulations, m = number of time steps
     :return: the linear response function (in frequency space)
     """
-    # compute the frequency array
-    freqs = sp.fft.fftfreq(len(x), dt)
     # compute the Fourier Transform
     x_ft = sp.fft.fft(x - np.mean(x), axis=1)
     sf_ft = sp.fft.fft(force - np.mean(force), axis=1)
-    chi = x_ft / sf_ft
-    chi = np.interp(int_freqs, freqs, chi)
+    chi = x_ft / sf_ft # n x m array
     return chi
 
 def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
@@ -220,5 +216,5 @@ def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp:
     """
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = -1 * omegas[i] * psd[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
+        theta[i] = -1 * omegas[i] * psd[i] / (boltzmann_scale * K_B * temp * linresp_ft[i].imag)
     return theta
