@@ -12,7 +12,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [0.5, 0.1, 1, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.1, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
@@ -149,11 +149,11 @@ if __name__ == '__main__':
         upper_bound = int(n / 2)
     else:
         upper_bound = int((n - 1) / 2) + 1
-    pos_freqs = freqs[:upper_bound]
+    pos_freqs = freqs[1:upper_bound]
     hb_pos_undriven_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
     hb_pos_driven_freq = sp.fft.fft(hb_pos_driven - np.mean(hb_pos_driven), axis=1) / len(hb_pos_driven) # fft for driven data
-    undriven_pos_mags = np.abs(hb_pos_undriven_freq)[:upper_bound]
-    driven_pos_mags = np.abs(hb_pos_driven_freq)[:, :upper_bound]
+    undriven_pos_mags = np.abs(hb_pos_undriven_freq)[1:upper_bound]
+    driven_pos_mags = np.abs(hb_pos_driven_freq)[:, 1:upper_bound]
     peak_index = np.argmax(undriven_pos_mags)
     s_osc_freq = pos_freqs[peak_index] # frequency of spontaneous oscillations
     print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
@@ -169,11 +169,13 @@ if __name__ == '__main__':
 
     #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
     #psd = psd[:upper_bound]
-    chi = helpers.chi_ft(hb_pos_driven, sf)[:, :upper_bound]
-    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, len(freqs) // 4)
+    nperseg_needed = int(1 / (dt * pos_freqs[0]))
+    nperseg = min(nperseg_needed, len(hb_pos_undriven))
+    chi = helpers.chi_ft(hb_pos_driven, sf)[:, 1:upper_bound]
+    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, nperseg)
 
     # calculate the autocorrelation function and the linear response at each driving frequency
-    psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), len(freqs)) / (2 * np.pi) # in units of rad/s
+    psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), nperseg) / (2 * np.pi) # in units of rad/s
     chi_df = np.zeros(len(omegas), dtype=complex)
     for i in range(len(chi_df)):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
@@ -183,6 +185,7 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
+    boltzmann_rescale = 1e23
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     theta = helpers.fluc_resp(psd_df[1:], chi_df[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
@@ -262,7 +265,7 @@ if __name__ == '__main__':
     plt.scatter(omegas[1:] / (2 * np.pi), theta)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
-    plt.hlines(1, 0.07, 0.25, linestyle='--', color='r')
+    plt.hlines(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi), linestyle='--', color='r')
     plt.tight_layout()
     plt.show()
 
@@ -270,6 +273,6 @@ if __name__ == '__main__':
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
     plt.tight_layout()
-    plt.ylim(-30, 30)
+    plt.ylim(-1, 1)
     plt.show()
     # ------------- END PLOTTING ------------- #
