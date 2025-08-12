@@ -15,11 +15,11 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 500 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.9
-SOSC_MIN_RANGE = 0.1
+SOSC_MAX_RANGE = 1.3
+SOSC_MIN_RANGE = 0.7
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """

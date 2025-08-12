@@ -170,7 +170,7 @@ if __name__ == '__main__':
     #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
     #psd = psd[:upper_bound]
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
-    nperseg = min(nperseg_needed, len(hb_pos_undriven))
+    nperseg = min(nperseg_needed, len(hb_pos_undriven) // 4)
     chi = helpers.chi_ft(hb_pos_driven, sf)[:, 1:upper_bound]
     psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, nperseg)
 
@@ -185,7 +185,6 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
-    boltzmann_rescale = 1e23
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     theta = helpers.fluc_resp(psd_df[1:], chi_df[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
@@ -245,7 +244,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 5)
+    plt.xlim(0, 0.7)
     plt.tight_layout()
     plt.show()
 
@@ -273,6 +272,5 @@ if __name__ == '__main__':
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\theta(\omega)$')
     plt.tight_layout()
-    plt.ylim(-1, 1)
     plt.show()
     # ------------- END PLOTTING ------------- #
