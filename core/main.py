@@ -94,14 +94,34 @@ if __name__ == '__main__':
     t = t_nd
     dt = float(t[1] - t[0]) # rescale dt
 
+    idx = int(0.7 * len(t))
+    idx = int(t_equilibrium / dt)
+    t = t[idx:]  # take last 30% for steady state
+    t = t - t[0]
+    n = len(t)
+
+    # frequency arrays
+    fs = 70
+    freqs = sp.fft.fftfreq(n, dt)
+    if n % 2 == 0:
+        upper_bound = int(n / 2)
+    else:
+        upper_bound = int((n - 1) / 2) + 1
+    pos_freqs = freqs[1:upper_bound]
+
+    nperseg_needed = int(1 / (dt * pos_freqs[0]))
+
+    ensemble_batch_size = 10
+    rep_num = int(helpers.BATCH_SIZE / ensemble_batch_size)
+
     # calculate stimulus force position (both models)
-    sf = helpers.sf(t, amp, sosc, phase, offset)
+    sf = helpers.sf(t, amp, sosc, phase, offset, rep_num)
     sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
 
     # find which index in the array of driving frequencies corresponds to sosc
-    omegas = helpers.driving_freqs(sosc)
-    print("Driving frequencies: \n", omegas / (2 * np.pi))
+    omegas = helpers.driving_freqs(sosc, int(helpers.BATCH_SIZE / ensemble_batch_size))
+    #print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
     force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
                                                    hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
@@ -114,73 +134,70 @@ if __name__ == '__main__':
     # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
     # solve sdes
     x0 = [0.1, 0.0]
-    args_list = (t_nd, x0, list(parameters), [omegas, amp, phase, offset])
-    results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
+    tiled_omegas = np.tile(omegas, ensemble_batch_size) # let's do ensemble size of 10 each iteration
+    num_iterations = 10
+    args_list = (t_nd, x0, list(parameters), [tiled_omegas, amp, phase, offset])
+    avg_results = np.zeros((n, rep_num, 2))
+    for i in range(num_iterations):
+        results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
+        #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_batch_size, temp_results.shape[2]).mean(axis=2)
 
-    # separate driven and not driven data
-    hb_pos_data = np.zeros((results.shape[1], n))
-    for i in range(results.shape[1]):
-        hb_pos_data[i] = results[:, i, 0]
+        # separate driven and not driven data
+        hb_pos_data = np.zeros((results.shape[1], n))
+        for i in range(results.shape[1]):
+            hb_pos_data[i] = results[:, i, 0]
 
-    # rescale hb_pos
-    hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                               hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
-    hb_pos = hb_pos_data
-    idx = int(0.7 * len(t))
-    idx = int(t_equilibrium / dt)
-    t = t[idx:] # take last 30% for steady state
-    t = t - t[0]
-    n = len(t)
-    hb_pos = hb_pos[:, idx:]
-    sf = sf[:, idx:]
-    mean = np.mean(hb_pos, axis=1)
-    for i in range(len(hb_pos)):
-        hb_pos[i] = hb_pos[i] - mean[i]
+        # rescale hb_pos
+        hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
+                                   hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
+        hb_pos = hb_pos_data
+        hb_pos = hb_pos[:, idx:]
+        sf = sf[:, idx:]
+        mean = np.mean(hb_pos, axis=1)
+        for i in range(len(hb_pos)):
+            hb_pos[i] = hb_pos[i] - mean[i]
 
-    # get undriven and driven data
-    hb_pos_undriven = hb_pos[0, :]
-    hb_pos_driven = hb_pos[1:, :]
+        # get undriven and driven data
+        hb_pos_undriven = hb_pos[0, :]
+        x0 = hb_pos[::rep_num]
+        hb_pos_driven = hb_pos[1:, :]
+        xd = np.zeros((results.shape[1] - ensemble_batch_size, n))
+        for i in range(xd.shape[0]):
+            xd[i] = hb_pos[(1 + i)::rep_num]
 
-    # get frequency of spontaneous oscillations
-    # frequency arrays
-    fs = 70
-    freqs = sp.fft.fftfreq(n, dt)
-    if n % 2 == 0:
-        upper_bound = int(n / 2)
-    else:
-        upper_bound = int((n - 1) / 2) + 1
-    pos_freqs = freqs[1:upper_bound]
-    hb_pos_undriven_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
-    hb_pos_driven_freq = sp.fft.fft(hb_pos_driven - np.mean(hb_pos_driven), axis=1) / len(hb_pos_driven) # fft for driven data
-    undriven_pos_mags = np.abs(hb_pos_undriven_freq)[1:upper_bound]
-    driven_pos_mags = np.abs(hb_pos_driven_freq)[:, 1:upper_bound]
-    peak_index = np.argmax(undriven_pos_mags)
-    s_osc_freq = pos_freqs[peak_index] # frequency of spontaneous oscillations
-    print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
-    # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
+        # get frequency of spontaneous oscillations
+        hb_pos_undriven_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
+        hb_pos_driven_freq = sp.fft.fft(hb_pos_driven - np.mean(hb_pos_driven), axis=1) / len(hb_pos_driven) # fft for driven data
+        undriven_pos_mags = np.abs(hb_pos_undriven_freq)[1:upper_bound]
+        driven_pos_mags = np.abs(hb_pos_driven_freq)[:, 1:upper_bound]
+        peak_index = np.argmax(undriven_pos_mags)
+        s_osc_freq = pos_freqs[peak_index] # frequency of spontaneous oscillations
+        print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
+        # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
-    # ------------- BEGIN FDT CALCULATIONS ------------- #
-    # get autocorrelation function
-    autocorr = helpers.auto_corr(hb_pos_undriven)
+        # ------------- BEGIN FDT CALCULATIONS ------------- #
+        # get autocorrelation function
+        autocorr = helpers.auto_corr(hb_pos_undriven)
 
-    # angular frequencies and stimulus force
-    omegas = omegas[1:]
-    sf = sf[1:, :]
+        # angular frequencies and stimulus force
+        omegas = omegas[1:]
+        sf = sf[1:, :]
 
-    #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
-    #psd = psd[:upper_bound]
-    nperseg_needed = int(1 / (dt * pos_freqs[0]))
-    nperseg = min(nperseg_needed, len(hb_pos_undriven) // 4)
-    chi = helpers.chi_ft(hb_pos_driven, sf)[:, 1:upper_bound]
-    psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, nperseg)
+        #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
+        #psd = psd[:upper_bound]
+        nperseg = min(nperseg_needed, len(hb_pos_undriven) // 4)
+        chi = helpers.chi_ft(hb_pos_driven, sf)[:, 1:upper_bound]
+        psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, nperseg)
 
-    # calculate the autocorrelation function and the linear response at each driving frequency
-    psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), nperseg) / (2 * np.pi) # in units of rad/s
-    chi_df = np.zeros(len(omegas), dtype=complex)
-    for i in range(len(chi_df)):
-        diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
-        index = np.argmin(diff)
-        chi_df[i] = chi[i, index]
+        # calculate the autocorrelation function and the linear response at each driving frequency
+        psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), nperseg) / (2 * np.pi) # in units of rad/s
+        chi_df = np.zeros(len(omegas), dtype=complex)
+        for i in range(len(chi_df)):
+            diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
+            index = np.argmin(diff)
+            chi_df[i] = chi[i, index]
+
+        print("Number of ensembles done: ", i + 1)
 
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1

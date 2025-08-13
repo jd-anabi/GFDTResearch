@@ -15,11 +15,11 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 500 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.3
-SOSC_MIN_RANGE = 0.7
+SOSC_MAX_RANGE = 1.5
+SOSC_MIN_RANGE = 0.5
 
 def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
     """
@@ -135,13 +135,13 @@ def rescale_force_params(amp: float, omegas: np.ndarray, phase: float, offset: f
     phases_nd = phase - t_0 * omegas
     return amp_nd, omega_nd, phases_nd, offset_nd
 
-def driving_freqs(omega_0: float) -> np.ndarray:
+def driving_freqs(omega_0: float, nfreqs: int = BATCH_SIZE) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
     :param omega_0: the frequency to generate the array around
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, BATCH_SIZE - 2)
+    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, nfreqs - 2)
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
@@ -150,7 +150,7 @@ def driving_freqs(omega_0: float) -> np.ndarray:
     omegas = np.sort(omegas)
     return np.unique(omegas)
 
-def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float) -> np.ndarray:
+def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n: int = BATCH_SIZE) -> np.ndarray:
     """
     Returns the stimulus force position at times t
     :param t: time
@@ -160,9 +160,9 @@ def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float) -
     :param offset: offset of the stimulus force
     :return: the stimulus force position
     """
-    sf_batches = np.zeros((BATCH_SIZE, len(t)))
+    sf_batches = np.zeros((n, len(t)))
     omegas = driving_freqs(omega_0)
-    for i in range(BATCH_SIZE):
+    for i in range(n):
         sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
 
