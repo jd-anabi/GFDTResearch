@@ -200,8 +200,8 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
     # compute the Fourier Transform
     x_ft = sp.fft.fft(x - np.mean(x), axis=1)
-    sf_ft = sp.fft.fft(force - np.mean(force), axis=1)
-    chi = x_ft / sf_ft # n x m array
+    force_ft = sp.fft.fft(force - np.mean(force), axis=1)
+    chi = x_ft / force_ft # n x m array
     return chi
 
 def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:

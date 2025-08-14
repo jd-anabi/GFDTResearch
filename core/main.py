@@ -94,9 +94,9 @@ if __name__ == '__main__':
     t = t_nd
     dt = float(t[1] - t[0]) # rescale dt
 
-    idx = int(0.7 * len(t))
-    idx = int(t_equilibrium / dt)
-    t = t[idx:]  # take last 30% for steady state
+    steady_id = int(0.7 * len(t))
+    steady_id = int(t_equilibrium / dt)
+    t = t[steady_id:]  # take last 30% for steady state
     t = t - t[0]
     n = len(t)
 
@@ -110,9 +110,10 @@ if __name__ == '__main__':
     pos_freqs = freqs[1:upper_bound]
 
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
+    nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_batch_size = 10
-    rep_num = int(helpers.BATCH_SIZE / ensemble_batch_size)
+    ensemble_size_per_batch = 10
+    rep_num = int(helpers.BATCH_SIZE / ensemble_size_per_batch)
 
     # calculate stimulus force position (both models)
     sf = helpers.sf(t, amp, sosc, phase, offset, rep_num)
@@ -120,7 +121,7 @@ if __name__ == '__main__':
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
 
     # find which index in the array of driving frequencies corresponds to sosc
-    omegas = helpers.driving_freqs(sosc, int(helpers.BATCH_SIZE / ensemble_batch_size))
+    omegas = helpers.driving_freqs(sosc, rep_num)
     #print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
     force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
@@ -131,17 +132,76 @@ if __name__ == '__main__':
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
-    # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
+    # let's do ensemble size of 10 each iteration; so total batch size = rep_num * ensemble_batch_size = 400 * 10 = 4000
+    tiled_omegas = np.tile(omegas, ensemble_size_per_batch)
+
     # solve sdes
     x0 = [0.1, 0.0]
-    tiled_omegas = np.tile(omegas, ensemble_batch_size) # let's do ensemble size of 10 each iteration
-    num_iterations = 10
+    num_iterations = 1
+    num_vars = 2
     args_list = (t_nd, x0, list(parameters), [tiled_omegas, amp, phase, offset])
-    avg_results = np.zeros((n, rep_num, 2))
-    for i in range(num_iterations):
+    avg_results = np.zeros((n, rep_num, num_vars))
+    avg_psd_at_omegas = None
+    avg_chis = None
+    pos_magnitudes = None
+    avg_auto_corr = None
+    avg_psd = None
+    for iteration in range(num_iterations):
+        # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
         #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_batch_size, temp_results.shape[2]).mean(axis=2)
 
+        x_data = results[:, :, 0].T # (BATCH_SIZE, T)
+
+        # get steady-state portion of data and stimulus force
+        x_data = x_data[:, steady_id:]
+        sf = sf[:, steady_id:]
+
+        # subtract off the average
+        for i in range(x_data.shape[0]):
+            x_data[i] = x_data[i] - np.mean(x_data[i])
+
+        # seperate undriven and driven data (noting every rep_num of batches is a new simulation)
+        x0 = x_data[::rep_num, :] # every rep_num repetitions is a new simulation for the same frequency
+        id0 = np.arange(0, x_data.shape[0], rep_num) # indices of the undriven simulations
+        x = np.delete(x_data, id0, axis=0)
+        # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
+
+        # frequency space
+        x0_f = sp.fft.fft(x0, axis=1) / len(x0)
+        avg_x0_f = np.mean(x0_f, axis=0) # average the fourier transforms
+        magnitudes = np.abs(avg_x0_f)
+        pos_magnitudes = magnitudes[1:upper_bound]
+        spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]
+
+        # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
+        # calculate the autocorrelations then average it
+        auto_corrs = np.zeros_like(x0)
+        for i in range(auto_corrs.shape[0]):
+            auto_corrs[i] = helpers.auto_corr(x0[i])
+        avg_auto_corr = np.mean(auto_corrs, axis=0)
+
+        # spectral density
+        psd = np.zeros((x0.shape[0], pos_freqs.shape[0]))
+        for i in range(psd.shape[0]):
+            psd[i] = helpers.psd(x0[i], dt, pos_freqs, nperseg)
+        avg_psd = np.mean(psd, axis=0)
+
+        psd_at_omegas = np.zeros((x0.shape[0], omegas.shape[0]))
+        for i in range(psd_at_omegas.shape[0]):
+            psd_at_omegas[i] = helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
+        avg_psd_at_omegas = np.mean(psd_at_omegas, axis=0)
+
+        # stimulus force and frequencies information
+        f_driven = sf[1:, :]
+        tiled_f_driven = np.tile(f_driven, (ensemble_size_per_batch, 1))
+        omegas_driven = omegas[1:]
+
+        # linear response
+        chis = helpers.chi_ft(x, tiled_f_driven)[:, 1:upper_bound]
+        avg_chis = chis.reshape(-1, rep_num, chis.shape[1]).mean(axis=1)
+        # ------------- END AVERAGING CALCULATIONS ------------- #
+        '''
         # separate driven and not driven data
         hb_pos_data = np.zeros((results.shape[1], n))
         for i in range(results.shape[1]):
@@ -151,7 +211,7 @@ if __name__ == '__main__':
         hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                    hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
         hb_pos = hb_pos_data
-        hb_pos = hb_pos[:, idx:]
+        hb_pos = hb_pos[:, steady_id:]
         sf = sf[:, idx:]
         mean = np.mean(hb_pos, axis=1)
         for i in range(len(hb_pos)):
@@ -161,7 +221,7 @@ if __name__ == '__main__':
         hb_pos_undriven = hb_pos[0, :]
         x0 = hb_pos[::rep_num]
         hb_pos_driven = hb_pos[1:, :]
-        xd = np.zeros((results.shape[1] - ensemble_batch_size, n))
+        xd = np.zeros((results.shape[1] - ensemble_size_per_batch, n))
         for i in range(xd.shape[0]):
             xd[i] = hb_pos[(1 + i)::rep_num]
 
@@ -196,32 +256,34 @@ if __name__ == '__main__':
             diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
             index = np.argmin(diff)
             chi_df[i] = chi[i, index]
+        '''
 
-        print("Number of ensembles done: ", i + 1)
+        print("Number of ensembles done: ", iteration + 1)
 
+    chi_at_omegas = np.zeros(len(omegas), dtype=complex)
+    for i in range(avg_chis.shape[0]):
+        diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
+        index = np.argmin(diff)
+        chi_at_omegas[i] = avg_chis[i, index]
+
+    # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    theta = helpers.fluc_resp(psd_df[1:], chi_df[1:], omegas[1:], temp, boltzmann_rescale)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], chi_at_omegas[1:], omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
     # preliminary plotting
-    plt.plot(t, hb_pos_undriven)
+    plt.plot(t, x0[0])
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{0}$ (nm)')
     plt.tight_layout()
     plt.show()
 
-    plt.plot(t, hb_pos_undriven)
-    plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_0$ (nm)')
-    plt.xlim(0.005, 0.07)
-    plt.tight_layout()
-    plt.show()
-
     # entrainment plotting
+    r'''
     fig, ax = plt.subplots(3, 3, figsize=(56, 40))
     for i in range(3):
         for j in range(3):
@@ -230,7 +292,7 @@ if __name__ == '__main__':
             if index >= len(omegas):
                 index = sosc_index
             curr_omega = round(omegas[index].item(), 3)
-            ax[i, j].plot(t, hb_pos_driven[index, :], color='b')
+            ax[i, j].plot(t, x[index, :], color='b')
             ax[i, j].set_xlabel(r'Time (s)')
             ax[i, j].set_ylabel(rf'$x$ (nm)', color='b')
             ax[i, j].tick_params(axis='y')
@@ -242,8 +304,9 @@ if __name__ == '__main__':
             axf.tick_params(axis='y')
     plt.tight_layout()
     plt.show()
+    '''
 
-    plt.plot(pos_freqs, undriven_pos_mags)
+    plt.plot(pos_freqs, pos_magnitudes)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'$\tilde{x}_0(\omega)$')
     plt.xlim(0, 5)
@@ -251,14 +314,14 @@ if __name__ == '__main__':
     plt.show()
 
     # autocorrelation function
-    plt.plot(t, autocorr)
+    plt.plot(t, avg_auto_corr)
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'Autocorrelation')
     plt.tight_layout()
     plt.show()
 
     # Power spectral density
-    plt.plot(pos_freqs, psd)
+    plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
     plt.xlim(0, 0.7)
@@ -266,13 +329,13 @@ if __name__ == '__main__':
     plt.show()
 
     # linear response function
-    plt.scatter(omegas / (2 * np.pi), chi_df.real)
+    plt.scatter(omegas / (2 * np.pi), chi_at_omegas.real)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Re\{\chi_x\}$')
     plt.tight_layout()
     plt.show()
 
-    plt.scatter(omegas / (2 * np.pi), chi_df.imag)
+    plt.scatter(omegas / (2 * np.pi), chi_at_omegas.imag)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im\{\chi_x\}$')
     plt.tight_layout()
