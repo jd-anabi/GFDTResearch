@@ -12,7 +12,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.1, 1, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 2, 1, 0.5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
@@ -96,7 +96,7 @@ if __name__ == '__main__':
 
     steady_id = int(0.7 * len(t))
     steady_id = int(t_equilibrium / dt)
-    t = t[steady_id:]  # take last 30% for steady state
+    #t = t[steady_id:]  # take last 30% for steady state
     t = t - t[0]
     n = len(t)
 
@@ -135,14 +135,15 @@ if __name__ == '__main__':
     # let's do ensemble size of 10 each iteration; so total batch size = rep_num * ensemble_batch_size = 400 * 10 = 4000
     tiled_omegas = np.tile(omegas, ensemble_size_per_batch)
 
-    # solve sdes
+    # solve ensemble of SDEs
     x0 = [0.1, 0.0]
-    num_iterations = 1
+    num_iterations = 5
     num_vars = 2
-    args_list = (t_nd, x0, list(parameters), [tiled_omegas, amp, phase, offset])
+    args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset])
     avg_results = np.zeros((n, rep_num, num_vars))
-    avg_psd_at_omegas = None
-    avg_chis = None
+    avg_psd_at_omegas = np.zeros((ensemble_size_per_batch, omegas.shape[0]))
+    avg_imag_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
+    avg_real_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
     pos_magnitudes = None
     avg_auto_corr = None
     avg_psd = None
@@ -190,7 +191,7 @@ if __name__ == '__main__':
         psd_at_omegas = np.zeros((x0.shape[0], omegas.shape[0]))
         for i in range(psd_at_omegas.shape[0]):
             psd_at_omegas[i] = helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
-        avg_psd_at_omegas = np.mean(psd_at_omegas, axis=0)
+        avg_psd_at_omegas += np.mean(psd_at_omegas, axis=0)
 
         # stimulus force and frequencies information
         f_driven = sf[1:, :]
@@ -199,7 +200,17 @@ if __name__ == '__main__':
 
         # linear response
         chis = helpers.chi_ft(x, tiled_f_driven)[:, 1:upper_bound]
-        avg_chis = chis.reshape(-1, rep_num, chis.shape[1]).mean(axis=1)
+
+        real_chis = chis.real
+        real_chis = real_chis.reshape(-1, rep_num - 1, real_chis.shape[1])
+        real_chis = real_chis.transpose(1, 0, 2)
+
+        imag_chis = chis.imag
+        imag_chis = imag_chis.reshape(-1, rep_num - 1, imag_chis.shape[1])
+        imag_chis = imag_chis.transpose(1, 0, 2)
+
+        avg_real_chi += real_chis.mean(axis=1)
+        avg_imag_chi += imag_chis.mean(axis=1)
         # ------------- END AVERAGING CALCULATIONS ------------- #
         '''
         # separate driven and not driven data
@@ -260,21 +271,29 @@ if __name__ == '__main__':
 
         print("Number of ensembles done: ", iteration + 1)
 
-    chi_at_omegas = np.zeros(len(omegas), dtype=complex)
-    for i in range(avg_chis.shape[0]):
-        diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
+    avg_psd_at_omegas = avg_psd_at_omegas / 10
+    avg_real_chi = avg_real_chi / 10
+    avg_imag_chi = avg_imag_chi / 10
+
+    driv_freq_num = len(omegas) - 1
+    real_chi_at_omegas = np.zeros(driv_freq_num, dtype=float)
+    imag_chi_at_omegas = np.zeros(driv_freq_num, dtype=float)
+    for i in range(driv_freq_num):
+        diff = np.abs(2 * np.pi * pos_freqs - omegas[i + 1])
         index = np.argmin(diff)
-        chi_at_omegas[i] = avg_chis[i, index]
+        real_chi_at_omegas[i] = avg_real_chi[i, index]
+        imag_chi_at_omegas[i] = avg_imag_chi[i, index]
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], chi_at_omegas[1:], omegas[1:], temp, boltzmann_rescale)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
+    t = t[steady_id:]
     # preliminary plotting
     plt.plot(t, x0[0])
     plt.xlabel(r'Time (s)')
@@ -329,13 +348,13 @@ if __name__ == '__main__':
     plt.show()
 
     # linear response function
-    plt.scatter(omegas / (2 * np.pi), chi_at_omegas.real)
+    plt.scatter(omegas[1:] / (2 * np.pi), real_chi_at_omegas)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Re\{\chi_x\}$')
     plt.tight_layout()
     plt.show()
 
-    plt.scatter(omegas / (2 * np.pi), chi_at_omegas.imag)
+    plt.scatter(omegas[1:] / (2 * np.pi), imag_chi_at_omegas)
     plt.xlabel(r'Driving Frequency (Hz)')
     plt.ylabel(r'$\Im\{\chi_x\}$')
     plt.tight_layout()

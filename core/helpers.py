@@ -15,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
@@ -161,7 +161,7 @@ def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n
     :return: the stimulus force position
     """
     sf_batches = np.zeros((n, len(t)))
-    omegas = driving_freqs(omega_0)
+    omegas = driving_freqs(omega_0, n)
     for i in range(n):
         sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
@@ -204,11 +204,11 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     chi = x_ft / force_ft # n x m array
     return chi
 
-def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
+def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
     """
     Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
     :param psd: the power spectral density
-    :param linresp_ft: the linear response function in frequency space (specifically at the driving frequencies)
+    :param imag_chi: the linear response function (imaginary component) in frequency space (specifically at the driving frequencies)
     :param omegas: the driving frequencies (angular frequencies)
     :param temp: the temperature
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
@@ -216,5 +216,5 @@ def fluc_resp(psd: np.ndarray, linresp_ft: np.ndarray, omegas: np.ndarray, temp:
     """
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = -1 * omegas[i] * psd[i] / (2 * boltzmann_scale * K_B * temp * linresp_ft[i].imag)
+        theta[i] = -1 * omegas[i] * psd[i] / (2 * boltzmann_scale * K_B * temp * imag_chi[i])
     return theta
