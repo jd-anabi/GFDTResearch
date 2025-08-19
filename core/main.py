@@ -12,7 +12,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 2, 1, 0.5] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.3, 2, 5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
@@ -112,17 +112,19 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_batch = 10
+    ensemble_size_per_batch = 1
     rep_num = int(helpers.BATCH_SIZE / ensemble_size_per_batch)
 
     # calculate stimulus force position (both models)
     sf = helpers.sf(t, amp, sosc, phase, offset, rep_num)
     sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
+    sf = sf[:, steady_id:] # steady-state portion of force
+    f_driven = sf[1:, :] # ignore undriven force
+    tiled_f_driven = np.tile(f_driven, (ensemble_size_per_batch, 1)) # tile the driven forces for the size of the ensemble
 
     # find which index in the array of driving frequencies corresponds to sosc
     omegas = helpers.driving_freqs(sosc, rep_num)
-    #print("Driving frequencies: \n", omegas / (2 * np.pi))
     sosc_index = np.argmax(omegas == sosc)
     force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
                                                    hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
@@ -137,11 +139,11 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = [0.1, 0.0]
-    num_iterations = 5
+    num_iterations = 1
     num_vars = 2
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset])
     avg_results = np.zeros((n, rep_num, num_vars))
-    avg_psd_at_omegas = np.zeros((ensemble_size_per_batch, omegas.shape[0]))
+    avg_psd_at_omegas = np.zeros(omegas.shape[0])
     avg_imag_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
     avg_real_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
     pos_magnitudes = None
@@ -154,9 +156,8 @@ if __name__ == '__main__':
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
 
-        # get steady-state portion of data and stimulus force
+        # get steady-state portion of data
         x_data = x_data[:, steady_id:]
-        sf = sf[:, steady_id:]
 
         # subtract off the average
         for i in range(x_data.shape[0]):
@@ -193,9 +194,7 @@ if __name__ == '__main__':
             psd_at_omegas[i] = helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
         avg_psd_at_omegas += np.mean(psd_at_omegas, axis=0)
 
-        # stimulus force and frequencies information
-        f_driven = sf[1:, :]
-        tiled_f_driven = np.tile(f_driven, (ensemble_size_per_batch, 1))
+        # only use the driven frequencies
         omegas_driven = omegas[1:]
 
         # linear response
@@ -271,9 +270,9 @@ if __name__ == '__main__':
 
         print("Number of ensembles done: ", iteration + 1)
 
-    avg_psd_at_omegas = avg_psd_at_omegas / 10
-    avg_real_chi = avg_real_chi / 10
-    avg_imag_chi = avg_imag_chi / 10
+    avg_psd_at_omegas /= num_iterations
+    avg_real_chi /= num_iterations
+    avg_imag_chi /= num_iterations
 
     driv_freq_num = len(omegas) - 1
     real_chi_at_omegas = np.zeros(driv_freq_num, dtype=float)
@@ -288,7 +287,9 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
+    boltzmann_rescale = 1
+    #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
+    temp = parameters[3]
     theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale)
     # ------------- END FDT CALCULATIONS ------------- #
 
