@@ -12,7 +12,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.3, 2, 5] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.3, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
@@ -43,7 +43,8 @@ if __name__ == '__main__':
         force_file_path = '/Force Info/sin_force_params.txt'
 
     # hair cell parameters
-    file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
+    #file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
+    file = os.getcwd() + hair_cell_file_path + '0' + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
@@ -55,7 +56,8 @@ if __name__ == '__main__':
 
     # rescaling parameters
     line = 0
-    file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
+    #file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
+    file = os.getcwd() + rescale_file_path + '1' + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
@@ -112,7 +114,7 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_batch = 1
+    ensemble_size_per_batch = 10
     rep_num = int(helpers.BATCH_SIZE / ensemble_size_per_batch)
 
     # calculate stimulus force position (both models)
@@ -139,7 +141,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = [0.1, 0.0]
-    num_iterations = 1
+    num_iterations = 5
     num_vars = 2
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset])
     avg_results = np.zeros((n, rep_num, num_vars))
@@ -152,21 +154,27 @@ if __name__ == '__main__':
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
+        print(results)
         #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_batch_size, temp_results.shape[2]).mean(axis=2)
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
+        print(x_data)
 
         # get steady-state portion of data
         x_data = x_data[:, steady_id:]
+        print(x_data)
 
         # subtract off the average
         for i in range(x_data.shape[0]):
             x_data[i] = x_data[i] - np.mean(x_data[i])
+        print(x_data)
 
         # seperate undriven and driven data (noting every rep_num of batches is a new simulation)
-        x0 = x_data[::rep_num, :] # every rep_num repetitions is a new simulation for the same frequency
+        x0 = x_data[::rep_num] # every rep_num repetitions is a new simulation for the same frequency
+        print(x0)
         id0 = np.arange(0, x_data.shape[0], rep_num) # indices of the undriven simulations
         x = np.delete(x_data, id0, axis=0)
+        print(x)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # frequency space
@@ -199,16 +207,19 @@ if __name__ == '__main__':
 
         # linear response
         chis = helpers.chi_ft(x, tiled_f_driven)[:, 1:upper_bound]
+        print(chis)
 
         real_chis = chis.real
         real_chis = real_chis.reshape(-1, rep_num - 1, real_chis.shape[1])
         real_chis = real_chis.transpose(1, 0, 2)
+        print(real_chis)
 
         imag_chis = chis.imag
         imag_chis = imag_chis.reshape(-1, rep_num - 1, imag_chis.shape[1])
         imag_chis = imag_chis.transpose(1, 0, 2)
 
         avg_real_chi += real_chis.mean(axis=1)
+        print(avg_real_chi)
         avg_imag_chi += imag_chis.mean(axis=1)
         # ------------- END AVERAGING CALCULATIONS ------------- #
         '''
@@ -274,10 +285,9 @@ if __name__ == '__main__':
     avg_real_chi /= num_iterations
     avg_imag_chi /= num_iterations
 
-    driv_freq_num = len(omegas) - 1
-    real_chi_at_omegas = np.zeros(driv_freq_num, dtype=float)
-    imag_chi_at_omegas = np.zeros(driv_freq_num, dtype=float)
-    for i in range(driv_freq_num):
+    real_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
+    imag_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
+    for i in range(len(omegas) - 1):
         diff = np.abs(2 * np.pi * pos_freqs - omegas[i + 1])
         index = np.argmin(diff)
         real_chi_at_omegas[i] = avg_real_chi[i, index]

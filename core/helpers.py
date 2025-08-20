@@ -15,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
