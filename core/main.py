@@ -136,21 +136,21 @@ if __name__ == '__main__':
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
-    # let's do ensemble size of 10 each iteration; so total batch size = rep_num * ensemble_batch_size = 400 * 10 = 4000
+    # let's do ensemble size of 10 each iteration; so total batch size = rep_num x ensemble_batch_size = 400 x 10 = 4000
     tiled_omegas = np.tile(omegas, ensemble_size_per_batch)
 
-    # solve ensemble of SDEs
-    x0 = [0.1, 0.0]
-    num_iterations = 5
-    num_vars = 2
-    args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset])
-    avg_results = np.zeros((n, rep_num, num_vars))
+    # instantiate needed values
     avg_psd_at_omegas = np.zeros(omegas.shape[0])
     avg_imag_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
     avg_real_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
     pos_magnitudes = None
     avg_auto_corr = None
     avg_psd = None
+
+    # solve ensemble of SDEs
+    x0 = [0.1, 0.0] # initial conditions
+    num_iterations = 1 # total ensemble size = ensemble_size_per_batch x num_iterations
+    args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -169,12 +169,19 @@ if __name__ == '__main__':
             x_data[i] = x_data[i] - np.mean(x_data[i])
         print(x_data)
 
+        x_data = x_data.reshape(ensemble_size_per_batch, rep_num, -1) # (ensemble_size_per_batch, rep_num, T)
+        print(x_data)
+
         # seperate undriven and driven data (noting every rep_num of batches is a new simulation)
         x0 = x_data[::rep_num] # every rep_num repetitions is a new simulation for the same frequency
         print(x0)
         id0 = np.arange(0, x_data.shape[0], rep_num) # indices of the undriven simulations
         x = np.delete(x_data, id0, axis=0)
         print(x)
+        #x0 = x_data[:, 0, :].reshape(ensemble_size_per_batch, -1) # ensemble for x0; (ensemble_size_per_batch, T)
+        #x = x_data[:, 1:, :].reshape(-1, results.shape[2]) # first k-1 rows ->  omega_1 ensemble, next k-1 rows -> omega_2 ensemble, ...; ((rep_num - 1) x ensemble_size_per_batch, T)
+        #print(x0)
+        #print(x)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # frequency space
