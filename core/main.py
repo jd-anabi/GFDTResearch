@@ -114,19 +114,19 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_batch = 10
-    rep_num = int(helpers.BATCH_SIZE / ensemble_size_per_batch)
+    ensemble_size_per_iter = 10
+    num_unique = int(helpers.BATCH_SIZE / ensemble_size_per_iter)
 
     # calculate stimulus force position (both models)
-    sf = helpers.sf(t, amp, sosc, phase, offset, rep_num)
+    sf = helpers.sf(t, amp, sosc, phase, offset, num_unique)
     sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                   hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
     sf = sf[:, steady_id:] # steady-state portion of force
     f_driven = sf[1:, :] # ignore undriven force
-    tiled_f_driven = np.tile(f_driven, (ensemble_size_per_batch, 1)) # tile the driven forces for the size of the ensemble
+    #tiled_f_driven = np.tile(f_driven, (ensemble_size, 1)) # tile the driven forces for the size of the ensemble
 
     # find which index in the array of driving frequencies corresponds to sosc
-    omegas = helpers.driving_freqs(sosc, rep_num)
+    omegas = helpers.driving_freqs(sosc, num_unique)
     sosc_index = np.argmax(omegas == sosc)
     force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
                                                    hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
@@ -136,50 +136,50 @@ if __name__ == '__main__':
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
-    # let's do ensemble size of 10 each iteration; so total batch size = rep_num x ensemble_batch_size = 400 x 10 = 4000
-    tiled_omegas = np.tile(omegas, ensemble_size_per_batch)
+    # let's do ensemble size of 10 each iteration; so total batch size = num_unique x ensemble_size_per_iter = 400 x 10 = 4000
+    tiled_omegas = np.tile(omegas, ensemble_size_per_iter)
 
     # instantiate needed values
+    avg_psd = np.zeros(pos_freqs.shape[0])
     avg_psd_at_omegas = np.zeros(omegas.shape[0])
-    avg_imag_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
-    avg_real_chi = np.zeros((rep_num - 1, pos_freqs.shape[0]))
-    pos_magnitudes = None
-    avg_auto_corr = None
-    avg_psd = None
+    avg_amp = np.zeros((num_unique - 1, pos_freqs.shape[0]))
+    avg_phase = np.zeros((num_unique - 1, pos_freqs.shape[0]))
+    pos_magnitudes = np.zeros(pos_freqs.shape[0])
+    avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
     x0 = [0.1, 0.0] # initial conditions
-    num_iterations = 1 # total ensemble size = ensemble_size_per_batch x num_iterations
+    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
-        print(results)
-        #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_batch_size, temp_results.shape[2]).mean(axis=2)
+        #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_size_per_iter, temp_results.shape[2]).mean(axis=2)
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
-        print(x_data)
 
         # get steady-state portion of data
         x_data = x_data[:, steady_id:]
-        print(x_data)
 
         # subtract off the average
         for i in range(x_data.shape[0]):
             x_data[i] = x_data[i] - np.mean(x_data[i])
+        print('Average:')
         print(x_data)
 
-        x_data = x_data.reshape(ensemble_size_per_batch, rep_num, -1) # (ensemble_size_per_batch, rep_num, T)
+        x_data = x_data.reshape(ensemble_size_per_iter, num_unique, -1) # (ensemble_size_per_iter, num_unique, T)
+        print('Reshape:')
         print(x_data)
 
-        # seperate undriven and driven data (noting every rep_num of batches is a new simulation)
-        x0 = x_data[::rep_num] # every rep_num repetitions is a new simulation for the same frequency
+        # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
+        x0 = x_data[:, 0] # (ensemble_size_per_iter, T)
+        print('x0:')
         print(x0)
-        id0 = np.arange(0, x_data.shape[0], rep_num) # indices of the undriven simulations
-        x = np.delete(x_data, id0, axis=0)
+        x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
+        print('x:')
         print(x)
-        #x0 = x_data[:, 0, :].reshape(ensemble_size_per_batch, -1) # ensemble for x0; (ensemble_size_per_batch, T)
-        #x = x_data[:, 1:, :].reshape(-1, results.shape[2]) # first k-1 rows ->  omega_1 ensemble, next k-1 rows -> omega_2 ensemble, ...; ((rep_num - 1) x ensemble_size_per_batch, T)
+        #x0 = x_data[:, 0, :].reshape(ensemble_size_per_iter, -1) # ensemble for x0; (ensemble_size_per_iter, T)
+        #x = x_data[:, 1:, :].reshape(-1, results.shape[2]) # first k-1 rows ->  omega_1 ensemble, next k-1 rows -> omega_2 ensemble, ...; ((num_unique - 1) x ensemble_size_per_batch, T)
         #print(x0)
         #print(x)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
@@ -193,41 +193,37 @@ if __name__ == '__main__':
 
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         # calculate the autocorrelations then average it
-        auto_corrs = np.zeros_like(x0)
-        for i in range(auto_corrs.shape[0]):
-            auto_corrs[i] = helpers.auto_corr(x0[i])
-        avg_auto_corr = np.mean(auto_corrs, axis=0)
+        for i in range(x0.shape[0]):
+            avg_auto_corr += helpers.auto_corr(x0[i])
+        avg_auto_corr /= ensemble_size_per_iter
 
         # spectral density
-        psd = np.zeros((x0.shape[0], pos_freqs.shape[0]))
-        for i in range(psd.shape[0]):
-            psd[i] = helpers.psd(x0[i], dt, pos_freqs, nperseg)
-        avg_psd = np.mean(psd, axis=0)
+        for i in range(x0.shape[0]):
+            avg_psd += helpers.psd(x0[i], dt, pos_freqs, nperseg)
+        avg_psd /= ensemble_size_per_iter
 
-        psd_at_omegas = np.zeros((x0.shape[0], omegas.shape[0]))
-        for i in range(psd_at_omegas.shape[0]):
-            psd_at_omegas[i] = helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
-        avg_psd_at_omegas += np.mean(psd_at_omegas, axis=0)
+        for i in range(x0.shape[0]):
+            avg_psd_at_omegas += helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
+        avg_psd_at_omegas /= ensemble_size_per_iter
 
         # only use the driven frequencies
         omegas_driven = omegas[1:]
 
         # linear response
-        chis = helpers.chi_ft(x, tiled_f_driven)[:, 1:upper_bound]
-        print(chis)
+        for i in range(x.shape[0]):
+            chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
+            avg_amp += np.abs(chis)
+            avg_phase += np.angle(chis)
 
-        real_chis = chis.real
-        real_chis = real_chis.reshape(-1, rep_num - 1, real_chis.shape[1])
-        real_chis = real_chis.transpose(1, 0, 2)
-        print(real_chis)
+            '''real_chis = chis.real
+            real_chis = real_chis.reshape(-1, num_unique - 1, real_chis.shape[1])
+            real_chis = real_chis.transpose(1, 0, 2)
+            imag_chis = chis.imag
+            imag_chis = imag_chis.reshape(-1, num_unique - 1, imag_chis.shape[1])
+            imag_chis = imag_chis.transpose(1, 0, 2)'''
 
-        imag_chis = chis.imag
-        imag_chis = imag_chis.reshape(-1, rep_num - 1, imag_chis.shape[1])
-        imag_chis = imag_chis.transpose(1, 0, 2)
-
-        avg_real_chi += real_chis.mean(axis=1)
-        print(avg_real_chi)
-        avg_imag_chi += imag_chis.mean(axis=1)
+        avg_amp /= ensemble_size_per_iter
+        avg_phase /= ensemble_size_per_iter
         # ------------- END AVERAGING CALCULATIONS ------------- #
         '''
         # separate driven and not driven data
@@ -289,8 +285,11 @@ if __name__ == '__main__':
         print("Number of ensembles done: ", iteration + 1)
 
     avg_psd_at_omegas /= num_iterations
-    avg_real_chi /= num_iterations
-    avg_imag_chi /= num_iterations
+    avg_amp /= num_iterations
+    avg_phase /= num_iterations
+
+    avg_real_chi = avg_amp * np.cos(avg_phase)
+    avg_imag_chi = avg_amp * np.sin(avg_phase)
 
     real_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
     imag_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
