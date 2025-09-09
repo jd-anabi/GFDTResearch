@@ -177,7 +177,7 @@ def auto_corr(x: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / c[0]
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, nperseg: float) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, nperseg: float, welch: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
@@ -186,8 +186,13 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, nperseg: float) -> np.ndar
     :param nperseg: length of each segment
     :return: the power spectral density
     """
-    fs = 1 / dt
-    freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
+    fs = 1 / (0.0001 * dt)
+    if welch:
+        freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
+    else:
+        corr = auto_corr(x)
+        psd = sp.fft.fft(corr - np.mean(corr)) / corr.shape[0]
+        freqs = sp.fft.fftfreq(corr.shape[0], dt)
     psd = np.interp(ifreqs, freqs, psd)
     return psd
 

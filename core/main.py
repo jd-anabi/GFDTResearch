@@ -16,7 +16,8 @@ if __name__ == '__main__':
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
-    t_max = 2 * np.pi * 100 / parameters[2] + t_equilibrium
+    num_cycles = 100
+    t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
@@ -142,8 +143,8 @@ if __name__ == '__main__':
     # instantiate needed values
     avg_psd = np.zeros(pos_freqs.shape[0])
     avg_psd_at_omegas = np.zeros(omegas.shape[0])
-    avg_amp = np.zeros((num_unique - 1, pos_freqs.shape[0]))
-    avg_phase = np.zeros((num_unique - 1, pos_freqs.shape[0]))
+    avg_real_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
+    avg_imag_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
     pos_magnitudes = np.zeros(pos_freqs.shape[0])
     avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
@@ -154,7 +155,6 @@ if __name__ == '__main__':
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
-        #results = results + temp_results.reshape(temp_results.shape[0], -1, ensemble_size_per_iter, temp_results.shape[2]).mean(axis=2)
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
 
@@ -172,16 +172,12 @@ if __name__ == '__main__':
         print(x_data)
 
         # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
-        x0 = x_data[:, 0] # (ensemble_size_per_iter, T)
+        x0 = x_data[:, 0] # (rensemble_size_per_ite, T)
         print('x0:')
         print(x0)
         x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
         print('x:')
         print(x)
-        #x0 = x_data[:, 0, :].reshape(ensemble_size_per_iter, -1) # ensemble for x0; (ensemble_size_per_iter, T)
-        #x = x_data[:, 1:, :].reshape(-1, results.shape[2]) # first k-1 rows ->  omega_1 ensemble, next k-1 rows -> omega_2 ensemble, ...; ((num_unique - 1) x ensemble_size_per_batch, T)
-        #print(x0)
-        #print(x)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # frequency space
@@ -212,84 +208,17 @@ if __name__ == '__main__':
         # linear response
         for i in range(x.shape[0]):
             chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
-            avg_amp += np.abs(chis)
-            avg_phase += np.angle(chis)
+            avg_real_chi += np.real(chis)
+            avg_imag_chi += np.imag(chis)
 
-            '''real_chis = chis.real
-            real_chis = real_chis.reshape(-1, num_unique - 1, real_chis.shape[1])
-            real_chis = real_chis.transpose(1, 0, 2)
-            imag_chis = chis.imag
-            imag_chis = imag_chis.reshape(-1, num_unique - 1, imag_chis.shape[1])
-            imag_chis = imag_chis.transpose(1, 0, 2)'''
-
-        avg_amp /= ensemble_size_per_iter
-        avg_phase /= ensemble_size_per_iter
+        avg_real_chi /= ensemble_size_per_iter
+        avg_imag_chi /= ensemble_size_per_iter
         # ------------- END AVERAGING CALCULATIONS ------------- #
-        '''
-        # separate driven and not driven data
-        hb_pos_data = np.zeros((results.shape[1], n))
-        for i in range(results.shape[1]):
-            hb_pos_data[i] = results[:, i, 0]
-
-        # rescale hb_pos
-        hb_pos = helpers.rescale_x(hb_pos_data, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                                   hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
-        hb_pos = hb_pos_data
-        hb_pos = hb_pos[:, steady_id:]
-        sf = sf[:, idx:]
-        mean = np.mean(hb_pos, axis=1)
-        for i in range(len(hb_pos)):
-            hb_pos[i] = hb_pos[i] - mean[i]
-
-        # get undriven and driven data
-        hb_pos_undriven = hb_pos[0, :]
-        x0 = hb_pos[::rep_num]
-        hb_pos_driven = hb_pos[1:, :]
-        xd = np.zeros((results.shape[1] - ensemble_size_per_batch, n))
-        for i in range(xd.shape[0]):
-            xd[i] = hb_pos[(1 + i)::rep_num]
-
-        # get frequency of spontaneous oscillations
-        hb_pos_undriven_freq = sp.fft.fft(hb_pos_undriven - np.mean(hb_pos_undriven)) / len(hb_pos_undriven)  # fft for non-driven data
-        hb_pos_driven_freq = sp.fft.fft(hb_pos_driven - np.mean(hb_pos_driven), axis=1) / len(hb_pos_driven) # fft for driven data
-        undriven_pos_mags = np.abs(hb_pos_undriven_freq)[1:upper_bound]
-        driven_pos_mags = np.abs(hb_pos_driven_freq)[:, 1:upper_bound]
-        peak_index = np.argmax(undriven_pos_mags)
-        s_osc_freq = pos_freqs[peak_index] # frequency of spontaneous oscillations
-        print(f'Frequency of spontaneous oscillations: {s_osc_freq} Hz. Angular frequency: {2 * np.pi * s_osc_freq} rad/s')
-        # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
-
-        # ------------- BEGIN FDT CALCULATIONS ------------- #
-        # get autocorrelation function
-        autocorr = helpers.auto_corr(hb_pos_undriven)
-
-        # angular frequencies and stimulus force
-        omegas = omegas[1:]
-        sf = sf[1:, :]
-
-        #psd = sp.fft.fft(autocorr - np.mean(autocorr)) / len(autocorr)
-        #psd = psd[:upper_bound]
-        nperseg = min(nperseg_needed, len(hb_pos_undriven) // 4)
-        chi = helpers.chi_ft(hb_pos_driven, sf)[:, 1:upper_bound]
-        psd = helpers.psd(hb_pos_undriven, dt, pos_freqs, nperseg)
-
-        # calculate the autocorrelation function and the linear response at each driving frequency
-        psd_df = helpers.psd(hb_pos_undriven, dt, omegas / (2 * np.pi), nperseg) / (2 * np.pi) # in units of rad/s
-        chi_df = np.zeros(len(omegas), dtype=complex)
-        for i in range(len(chi_df)):
-            diff = np.abs(2 * np.pi * pos_freqs - omegas[i])
-            index = np.argmin(diff)
-            chi_df[i] = chi[i, index]
-        '''
-
         print("Number of ensembles done: ", iteration + 1)
 
     avg_psd_at_omegas /= num_iterations
-    avg_amp /= num_iterations
-    avg_phase /= num_iterations
-
-    avg_real_chi = avg_amp * np.cos(avg_phase)
-    avg_imag_chi = avg_amp * np.sin(avg_phase)
+    avg_real_chi /= num_iterations
+    avg_imag_chi /= num_iterations
 
     real_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
     imag_chi_at_omegas = np.zeros(len(omegas) - 1, dtype=float)
@@ -317,30 +246,6 @@ if __name__ == '__main__':
     plt.ylabel(r'$x_{0}$ (nm)')
     plt.tight_layout()
     plt.show()
-
-    # entrainment plotting
-    r'''
-    fig, ax = plt.subplots(3, 3, figsize=(56, 40))
-    for i in range(3):
-        for j in range(3):
-            iteration = 3*i + j
-            index = sosc_index + iteration
-            if index >= len(omegas):
-                index = sosc_index
-            curr_omega = round(omegas[index].item(), 3)
-            ax[i, j].plot(t, x[index, :], color='b')
-            ax[i, j].set_xlabel(r'Time (s)')
-            ax[i, j].set_ylabel(rf'$x$ (nm)', color='b')
-            ax[i, j].tick_params(axis='y')
-            ax[i, j].set_title(rf'$\omega = {curr_omega}$ rad/s')
-            #ax[i, j].set_xlim(0.02, 0.05)
-            axf = ax[i, j].twinx()
-            axf.plot(t, sf[index], color='r')
-            axf.set_ylabel(rf'$F(t) = {amp} \sin({curr_omega} \ t + {phase}) + {offset}$ (mg nm ms$^-2$)', color='r')
-            axf.tick_params(axis='y')
-    plt.tight_layout()
-    plt.show()
-    '''
 
     plt.plot(pos_freqs, pos_magnitudes)
     plt.xlabel(r'Frequency (Hz)')
