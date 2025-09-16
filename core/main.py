@@ -12,7 +12,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.3, 1, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.02, np.sqrt(1/1), 1] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     t_equilibrium = 50 / parameters[1]
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_iter = 10
+    ensemble_size_per_iter = 1
     num_unique = int(helpers.BATCH_SIZE / ensemble_size_per_iter)
 
     # calculate stimulus force position (both models)
@@ -150,7 +150,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = [0.1, 0.0] # initial conditions
-    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 1 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
@@ -172,7 +172,7 @@ if __name__ == '__main__':
         print(x_data)
 
         # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
-        x0 = x_data[:, 0] # (rensemble_size_per_ite, T)
+        x0 = x_data[:, 0] # (ensemble_size_per_ite, T)
         print('x0:')
         print(x0)
         x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
@@ -195,11 +195,11 @@ if __name__ == '__main__':
 
         # spectral density
         for i in range(x0.shape[0]):
-            avg_psd += helpers.psd(x0[i], dt, pos_freqs, nperseg)
+            avg_psd += helpers.psd(x0[i], dt, pos_freqs)
         avg_psd /= ensemble_size_per_iter
 
         for i in range(x0.shape[0]):
-            avg_psd_at_omegas += helpers.psd(x0[i], dt, omegas / (2 * np.pi), nperseg) # in units of rad / s
+            avg_psd_at_omegas += helpers.psd(x0[i], dt, omegas / (2 * np.pi)) # in units of rad / s
         avg_psd_at_omegas /= ensemble_size_per_iter
 
         # only use the driven frequencies
@@ -207,6 +207,8 @@ if __name__ == '__main__':
 
         # linear response
         for i in range(x.shape[0]):
+            print(len(x[i, 0]))
+            print(len(f_driven[0]))
             chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
@@ -232,7 +234,7 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
-    boltzmann_rescale = 1
+    boltzmann_rescale = 1 / k_b
     #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     temp = parameters[3]
     theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale)

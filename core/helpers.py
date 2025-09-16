@@ -177,23 +177,28 @@ def auto_corr(x: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / c[0]
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, nperseg: float, welch: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = True, nperseg: float = 1) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
     :param dt: the time step
     :param ifreqs: the frequencies to interpolate the PSD with
-    :param nperseg: length of each segment
+    :param welch: whether to use Welch's method
+    :param nperseg: length of each segment if using Welch's method
     :return: the power spectral density
     """
-    fs = 1 / (0.0001 * dt)
+    fs = 1 / dt
     if welch:
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
+        psd = np.interp(ifreqs, freqs, psd)
     else:
         corr = auto_corr(x)
-        psd = sp.fft.fft(corr - np.mean(corr)) / corr.shape[0]
+        psd_gen = np.real(sp.fft.fft(corr - np.mean(corr)) / corr.shape[0])
+        psd = np.zeros(len(ifreqs), dtype=float)
         freqs = sp.fft.fftfreq(corr.shape[0], dt)
-    psd = np.interp(ifreqs, freqs, psd)
+        for i in range(len(ifreqs)):
+            index = np.argmin(np.abs(freqs - freqs[i]))
+            psd[i] = psd_gen[index]
     return psd
 
 def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
