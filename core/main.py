@@ -2,6 +2,7 @@ import os
 import re
 import sys
 from typing import Dict
+import multiprocessing as mp
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -102,10 +103,11 @@ if __name__ == '__main__':
     #t = t[steady_id:]  # take last 30% for steady state
     t = t - t[0]
     n = len(t)
+    n_steady = len(t[steady_id:])
 
     # frequency arrays
     fs = 70
-    freqs = sp.fft.fftfreq(n, dt)
+    freqs = sp.fft.fftfreq(n_steady, dt)
     if n % 2 == 0:
         upper_bound = int(n / 2)
     else:
@@ -115,7 +117,7 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_iter = 1
+    ensemble_size_per_iter = 20
     num_unique = int(helpers.BATCH_SIZE / ensemble_size_per_iter)
 
     # calculate stimulus force position (both models)
@@ -149,9 +151,10 @@ if __name__ == '__main__':
     avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
-    x0 = [0.1, 0.0] # initial conditions
-    num_iterations = 1 # total ensemble size = ensemble_size_per_iter x num_iterations
+    x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
+    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
+    omegas_driven = omegas[1:] # only use the driven frequencies
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -189,7 +192,7 @@ if __name__ == '__main__':
 
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         # calculate the autocorrelations then average it
-        for i in range(x0.shape[0]):
+        '''for i in range(x0.shape[0]):
             avg_auto_corr += helpers.auto_corr(x0[i])
         avg_auto_corr /= ensemble_size_per_iter
 
@@ -200,15 +203,15 @@ if __name__ == '__main__':
 
         for i in range(x0.shape[0]):
             avg_psd_at_omegas += helpers.psd(x0[i], dt, omegas / (2 * np.pi)) # in units of rad / s
-        avg_psd_at_omegas /= ensemble_size_per_iter
+        avg_psd_at_omegas /= ensemble_size_per_iter'''
 
-        # only use the driven frequencies
-        omegas_driven = omegas[1:]
+        with mp.Pool(processes=mp.cpu_count()) as pool:
+            avg_auto_corr = np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
+            avg_psd = np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas = np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi)) for i in range(x0.shape[0])])), axis=0)
 
         # linear response
         for i in range(x.shape[0]):
-            print(len(x[i, 0]))
-            print(len(f_driven[0]))
             chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)

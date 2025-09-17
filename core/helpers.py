@@ -21,11 +21,11 @@ K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
 SOSC_MIN_RANGE = 0.5
 
-def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time array
-    :param x0: the initial conditions of the hair bundle
+    :param x0: the initial conditions of each simulation
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
@@ -48,7 +48,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
-    x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
+    #x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
     # time array
     n = len(t)
@@ -56,7 +56,7 @@ def hb_sols(t: np.ndarray, x0: list, params: list, force_params: list) -> np.nda
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
-    hb_sol = torch.zeros((n, BATCH_SIZE, len(x0)), dtype=DTYPE, device=DEVICE)
+    hb_sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
     with torch.no_grad():
         try:
             hb_sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
@@ -197,7 +197,7 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = True, nperse
         psd = np.zeros(len(ifreqs), dtype=float)
         freqs = sp.fft.fftfreq(corr.shape[0], dt)
         for i in range(len(ifreqs)):
-            index = np.argmin(np.abs(freqs - freqs[i]))
+            index = np.argmin(np.abs(freqs - ifreqs[i]))
             psd[i] = psd_gen[index]
     return psd
 
