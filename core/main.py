@@ -117,7 +117,7 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_iter = 20
+    ensemble_size_per_iter = 50
     num_unique = int(helpers.BATCH_SIZE / ensemble_size_per_iter)
 
     # calculate stimulus force position (both models)
@@ -152,7 +152,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 15 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     omegas_driven = omegas[1:] # only use the driven frequencies
     for iteration in range(num_iterations):
@@ -167,20 +167,12 @@ if __name__ == '__main__':
         # subtract off the average
         for i in range(x_data.shape[0]):
             x_data[i] = x_data[i] - np.mean(x_data[i])
-        print('Average:')
-        print(x_data)
 
         x_data = x_data.reshape(ensemble_size_per_iter, num_unique, -1) # (ensemble_size_per_iter, num_unique, T)
-        print('Reshape:')
-        print(x_data)
 
         # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
         x0 = x_data[:, 0] # (ensemble_size_per_ite, T)
-        print('x0:')
-        print(x0)
         x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
-        print('x:')
-        print(x)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # frequency space
@@ -299,4 +291,19 @@ if __name__ == '__main__':
     plt.ylabel(r'$\theta(\omega)$')
     plt.tight_layout()
     plt.show()
+
+    y_scale_range = 0
+    while True:
+        try:
+            y_scale_range = int(input("Enter the range of y scale: "))
+        except ValueError:
+            print("Invalid input")
+            break
+        plt.scatter(omegas[1:] / (2 * np.pi), theta)
+        plt.xlabel(r'Driving Frequency (Hz)')
+        plt.ylabel(r'$\theta(\omega)$')
+        plt.hlines(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi), linestyle='--', color='r')
+        plt.ylim(-y_scale_range, y_scale_range)
+        plt.tight_layout()
+        plt.show()
     # ------------- END PLOTTING ------------- #

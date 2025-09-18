@@ -18,8 +18,8 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.5
-SOSC_MIN_RANGE = 0.5
+SOSC_MAX_RANGE = 1.3
+SOSC_MIN_RANGE = 0.7
 
 def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
     """
@@ -177,7 +177,7 @@ def auto_corr(x: np.ndarray) -> np.ndarray:
     c = c[len(c) // 2:]
     return c / c[0]
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = True, nperseg: float = 1) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
@@ -189,6 +189,8 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = True, nperse
     """
     fs = 1 / dt
     if welch:
+        if nperseg is None:
+            nperseg = len(x) // 4
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
         psd = np.interp(ifreqs, freqs, psd)
     else:
