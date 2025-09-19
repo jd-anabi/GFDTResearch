@@ -166,7 +166,7 @@ def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n
         sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
 
-def auto_corr(x: np.ndarray) -> np.ndarray:
+def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     """
     Returns the (normalized) auto-correlation function <X(t) X(0)> for the time series data
     :param x: the time series data
@@ -175,7 +175,10 @@ def auto_corr(x: np.ndarray) -> np.ndarray:
     x = x - np.mean(x)
     c = np.correlate(x, x, mode='full')
     c = c[len(c) // 2:]
-    return c / c[0]
+    if norm:
+        return c / c[0]
+    else:
+        return c
 
 def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None) -> np.ndarray:
     """
@@ -194,7 +197,7 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
         psd = np.interp(ifreqs, freqs, psd)
     else:
-        corr = auto_corr(x)
+        corr = auto_corr(x, norm=False)
         psd_gen = np.real(sp.fft.fft(corr - np.mean(corr)) / corr.shape[0])
         psd = np.zeros(len(ifreqs), dtype=float)
         freqs = sp.fft.fftfreq(corr.shape[0], dt)
