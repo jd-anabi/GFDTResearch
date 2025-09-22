@@ -214,7 +214,7 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
-    x_ft = sp.fft.fft(x - np.mean(x, axis=1, keepdims=True), axis=1) / x.shape[1]
+    x_ft = sp.fft.fft(x - np.mean(x, axis=1, keepdims=True), axis=1)
     force_ft = sp.fft.fft(force - np.mean(force, axis=1, keepdims=True), axis=1)
     chi = x_ft / force_ft # n x m array
     return chi

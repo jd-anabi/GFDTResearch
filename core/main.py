@@ -13,9 +13,10 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.03, np.sqrt(1/1), 10] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.05, 1, 5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
+    q = parameters[0] * parameters[2] / parameters[1]
     t_equilibrium = 50 / parameters[1]
     num_cycles = 100
     t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium
@@ -117,8 +118,8 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    ensemble_size_per_iter = helpers.BATCH_SIZE // 160
-    num_unique = int(helpers.BATCH_SIZE / ensemble_size_per_iter)
+    num_unique = 200
+    ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
     sf = helpers.sf(t, amp, sosc, phase, offset, num_unique)
@@ -152,7 +153,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 30 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 50 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     omegas_driven = omegas[1:] # only use the driven frequencies
     for iteration in range(num_iterations):

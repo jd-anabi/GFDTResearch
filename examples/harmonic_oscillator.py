@@ -14,7 +14,7 @@ class HarmonicOscillator(torch.nn.Module):
         self.gamma = gamma
         self.omega_0 = omega_0
         self.temp = temp
-        self.eta = np.sqrt(2 * K_B * self.gamma * self.temp / self.mass)
+        self.eta = np.sqrt(2 * self.gamma * self.temp / self.mass**2)
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
