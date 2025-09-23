@@ -15,7 +15,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.3
@@ -197,8 +197,8 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
         psd = np.interp(ifreqs, freqs, psd)
     else:
-        corr = auto_corr(x, norm=False)
-        psd_gen = np.real(sp.fft.fft(corr - np.mean(corr)) / corr.shape[0])
+        corr = auto_corr(x, norm=False) / len(x)
+        psd_gen = np.real(sp.fft.fft(corr)) * dt
         psd = np.zeros(len(ifreqs), dtype=float)
         freqs = sp.fft.fftfreq(corr.shape[0], dt)
         for i in range(len(ifreqs)):
@@ -219,7 +219,7 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     chi = x_ft / force_ft # n x m array
     return chi
 
-def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0) -> np.ndarray:
+def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, one_sided: bool = True) -> np.ndarray:
     """
     Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
     :param psd: the power spectral density
@@ -227,9 +227,11 @@ def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: f
     :param omegas: the driving frequencies (angular frequencies)
     :param temp: the temperature
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
+    :param one_sided: whether the PSD is one-sided or not
     :return: the fluctuation response function
     """
+    one_sided_factor = 1 if one_sided else 2
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = -1 * omegas[i] * psd[i] / (2 * boltzmann_scale * K_B * temp * imag_chi[i])
+        theta[i] = omegas[i] * psd[i] / (boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
     return theta

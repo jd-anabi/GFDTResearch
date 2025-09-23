@@ -13,12 +13,12 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.05, 1, 5] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.5, 1, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     q = parameters[0] * parameters[2] / parameters[1]
     t_equilibrium = 50 / parameters[1]
-    num_cycles = 100
+    num_cycles = 70
     t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
     nperseg = min(nperseg_needed, n // 4)
 
-    num_unique = 200
+    num_unique = 50
     ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
@@ -153,9 +153,10 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 50 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 3 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     omegas_driven = omegas[1:] # only use the driven frequencies
+    one_sided = False
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -166,22 +167,22 @@ if __name__ == '__main__':
         x_data = x_data[:, steady_id:]
 
         # subtract off the average
-        for i in range(x_data.shape[0]):
-            x_data[i] = x_data[i] - np.mean(x_data[i])
+        #for i in range(x_data.shape[0]):
+        #    x_data[i] = x_data[i] - np.mean(x_data[i])
 
         x_data = x_data.reshape(ensemble_size_per_iter, num_unique, -1) # (ensemble_size_per_iter, num_unique, T)
 
         # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
-        x0 = x_data[:, 0] # (ensemble_size_per_ite, T)
+        x0 = x_data[:, 0] # (ensemble_size_per_iter, T)
         x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # frequency space
-        x0_f = sp.fft.fft(x0, axis=1) / len(x0)
+        '''x0_f = sp.fft.fft(x0, axis=1) / len(x0)
         avg_x0_f = np.mean(x0_f, axis=0) # average the fourier transforms
         magnitudes = np.abs(avg_x0_f)
         pos_magnitudes = magnitudes[1:upper_bound]
-        spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]
+        spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]'''
 
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         # calculate the autocorrelations then average it
@@ -199,22 +200,25 @@ if __name__ == '__main__':
         avg_psd_at_omegas /= ensemble_size_per_iter'''
 
         with mp.Pool(processes=mp.cpu_count()) as pool:
-            avg_auto_corr = np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd = np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas = np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi)) for i in range(x0.shape[0])])), axis=0)
+            avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, one_sided, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), one_sided, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:upper_bound]
+            avg_real_chi += np.real(chis) / ensemble_size_per_iter
+            avg_imag_chi += np.imag(chis) / ensemble_size_per_iter
 
-        # linear response
+        ''''# linear response
         for i in range(x.shape[0]):
             chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
 
-        avg_real_chi /= ensemble_size_per_iter
-        avg_imag_chi /= ensemble_size_per_iter
+        avg_real_chi = np.real(chis) / ensemble_size_per_iter
+        avg_imag_chi = np.imag(chis) / ensemble_size_per_iter'''
         # ------------- END AVERAGING CALCULATIONS ------------- #
         print("Number of ensembles done: ", iteration + 1)
 
-    avg_psd_at_omegas /= num_iterations
+    avg_psd_at_omegas /= (2 * np.pi * num_iterations)
     avg_real_chi /= num_iterations
     avg_imag_chi /= num_iterations
 
@@ -233,7 +237,7 @@ if __name__ == '__main__':
     boltzmann_rescale = 1 / k_b
     #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     temp = parameters[3]
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=one_sided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
@@ -245,12 +249,12 @@ if __name__ == '__main__':
     plt.tight_layout()
     plt.show()
 
-    plt.plot(pos_freqs, pos_magnitudes)
-    plt.xlabel(r'Frequency (Hz)')
-    plt.ylabel(r'$\tilde{x}_0(\omega)$')
-    plt.xlim(0, 5)
-    plt.tight_layout()
-    plt.show()
+    #plt.plot(pos_freqs, pos_magnitudes)
+    #plt.xlabel(r'Frequency (Hz)')
+    #plt.ylabel(r'$\tilde{x}_0(\omega)$')
+    #plt.xlim(0, 5)
+    #plt.tight_layout()
+    #plt.show()
 
     # autocorrelation function
     plt.plot(t, avg_auto_corr)
@@ -296,7 +300,7 @@ if __name__ == '__main__':
     y_scale_range = 0
     while True:
         try:
-            y_scale_range = int(input("Enter the range of y scale: "))
+            y_scale_range = float(input("Enter the range of y scale: "))
         except ValueError:
             print("Invalid input")
             break
