@@ -13,7 +13,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.5, 1, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.03, 1, 5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     q = parameters[0] * parameters[2] / parameters[1]
@@ -113,10 +113,11 @@ if __name__ == '__main__':
         upper_bound = int(n / 2)
     else:
         upper_bound = int((n - 1) / 2) + 1
-    pos_freqs = freqs[1:upper_bound]
+    #pos_freqs = freqs[1:upper_bound]
+    pos_freqs = sp.fft.rfftfreq(n_steady, dt)[1:]
 
     nperseg_needed = int(1 / (dt * pos_freqs[0]))
-    nperseg = min(nperseg_needed, n // 4)
+    nperseg = min(nperseg_needed, n_steady // 4)
 
     num_unique = 50
     ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
@@ -153,10 +154,10 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 3 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     omegas_driven = omegas[1:] # only use the driven frequencies
-    one_sided = False
+    welch = False
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -200,10 +201,10 @@ if __name__ == '__main__':
         avg_psd_at_omegas /= ensemble_size_per_iter'''
 
         with mp.Pool(processes=mp.cpu_count()) as pool:
-            avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, one_sided, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), one_sided, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
-            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:upper_bound]
+            #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
             avg_real_chi += np.real(chis) / ensemble_size_per_iter
             avg_imag_chi += np.imag(chis) / ensemble_size_per_iter
 
@@ -237,7 +238,7 @@ if __name__ == '__main__':
     boltzmann_rescale = 1 / k_b
     #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     temp = parameters[3]
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=one_sided)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=False)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #

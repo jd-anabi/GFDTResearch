@@ -56,16 +56,16 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
-    hb_sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
+    sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
     with torch.no_grad():
         try:
-            hb_sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+            sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
         except (Warning, Exception) as e:
             print(e)
             exit()
 
     print("SDEs have been solved")
-    return hb_sol.cpu().detach().numpy()
+    return sol.cpu().detach().numpy()
 
 def rescale_x(nd_hb_pos: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: float) -> np.ndarray:
     """
@@ -197,10 +197,13 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
         psd = np.interp(ifreqs, freqs, psd)
     else:
-        corr = auto_corr(x, norm=False) / len(x)
-        psd_gen = np.real(sp.fft.fft(corr)) * dt
+        x_fft = sp.fft.rfft(x - np.mean(x))
+        psd_gen = np.abs(x_fft)**2 * dt / len(x)
+        psd_gen[0] /= 2
+        if len(x) % 2 == 0:
+            psd_gen[-1] /= 2
         psd = np.zeros(len(ifreqs), dtype=float)
-        freqs = sp.fft.fftfreq(corr.shape[0], dt)
+        freqs = sp.fft.rfftfreq(x.shape[0], dt)
         for i in range(len(ifreqs)):
             index = np.argmin(np.abs(freqs - ifreqs[i]))
             psd[i] = psd_gen[index]
@@ -214,8 +217,8 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     :return: the linear response function (in frequency space)
     """
     # compute the Fourier Transform
-    x_ft = sp.fft.fft(x - np.mean(x, axis=1, keepdims=True), axis=1)
-    force_ft = sp.fft.fft(force - np.mean(force, axis=1, keepdims=True), axis=1)
+    x_ft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
+    force_ft = sp.fft.rfft(force - np.mean(force, axis=1, keepdims=True), axis=1)
     chi = x_ft / force_ft # n x m array
     return chi
 
@@ -233,5 +236,5 @@ def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: f
     one_sided_factor = 1 if one_sided else 2
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = omegas[i] * psd[i] / (boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
+        theta[i] = omegas[i] * psd[i] / (one_sided_factor * boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
     return theta
