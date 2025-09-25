@@ -158,12 +158,13 @@ def sf(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n
     :param omega_0: angular frequency of spontaneous oscillations
     :param phase: phase of the stimulus force
     :param offset: offset of the stimulus force
+    :param n: number of stimulus forces
     :return: the stimulus force position
     """
     sf_batches = np.zeros((n, len(t)))
     omegas = driving_freqs(omega_0, n)
     for i in range(n):
-        sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
+        sf_batches[i] = amp * np.cos(omegas[i] * t + phase) + offset
     return sf_batches
 
 def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
@@ -198,7 +199,7 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
         psd = np.interp(ifreqs, freqs, psd)
     else:
         x_fft = sp.fft.rfft(x - np.mean(x))
-        psd_gen = np.abs(x_fft)**2 * dt / len(x)
+        psd_gen = 2 * np.abs(x_fft)**2 * dt / len(x)
         psd_gen[0] /= 2
         if len(x) % 2 == 0:
             psd_gen[-1] /= 2

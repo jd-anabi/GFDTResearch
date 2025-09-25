@@ -40,4 +40,4 @@ class HarmonicOscillator(torch.nn.Module):
 
     # stimulus force
     def __sin_sf(self, t):
-        return self.amp * torch.sin(self.omega * t + self.phase) + self.offset
+        return self.amp * torch.cos(self.omega * t + self.phase) + self.offset
