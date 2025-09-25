@@ -13,7 +13,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.03, 1, 5] # mass, gamma, omega_0, temperature
+    parameters = [1, 0.2, 1, 1] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     q = parameters[0] * parameters[2] / parameters[1]
@@ -100,7 +100,7 @@ if __name__ == '__main__':
     dt = float(t[1] - t[0]) # rescale dt
 
     steady_id = int(0.7 * len(t))
-    steady_id = int(t_equilibrium / dt)
+    #steady_id = int(t_equilibrium / dt)
     #t = t[steady_id:]  # take last 30% for steady state
     t = t - t[0]
     n = len(t)
@@ -167,10 +167,6 @@ if __name__ == '__main__':
         # get steady-state portion of data
         x_data = x_data[:, steady_id:]
 
-        # subtract off the average
-        #for i in range(x_data.shape[0]):
-        #    x_data[i] = x_data[i] - np.mean(x_data[i])
-
         x_data = x_data.reshape(ensemble_size_per_iter, num_unique, -1) # (ensemble_size_per_iter, num_unique, T)
 
         # seperate undriven and driven data (noting every num_unique of batches is a new simulation)
@@ -178,45 +174,26 @@ if __name__ == '__main__':
         x = x_data[:, 1:] # (ensemble_size_per_iter, num_unique - 1, T)
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
+        # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
+        with mp.Pool(processes=mp.cpu_count()//2) as pool:
+            #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
+            avg_real_chi += np.real(chis)
+            avg_imag_chi += np.imag(chis)
+        # ------------- END AVERAGING CALCULATIONS ------------- #
+
         # frequency space
+        # subtract off the average
+        # for i in range(x_data.shape[0]):
+        #    x_data[i] = x_data[i] - np.mean(x_data[i])
+
         '''x0_f = sp.fft.fft(x0, axis=1) / len(x0)
         avg_x0_f = np.mean(x0_f, axis=0) # average the fourier transforms
         magnitudes = np.abs(avg_x0_f)
         pos_magnitudes = magnitudes[1:upper_bound]
         spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]'''
-
-        # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
-        # calculate the autocorrelations then average it
-        '''for i in range(x0.shape[0]):
-            avg_auto_corr += helpers.auto_corr(x0[i])
-        avg_auto_corr /= ensemble_size_per_iter
-
-        # spectral density
-        for i in range(x0.shape[0]):
-            avg_psd += helpers.psd(x0[i], dt, pos_freqs)
-        avg_psd /= ensemble_size_per_iter
-
-        for i in range(x0.shape[0]):
-            avg_psd_at_omegas += helpers.psd(x0[i], dt, omegas / (2 * np.pi)) # in units of rad / s
-        avg_psd_at_omegas /= ensemble_size_per_iter'''
-
-        with mp.Pool(processes=mp.cpu_count()) as pool:
-            #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
-            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
-            avg_real_chi += np.real(chis) / ensemble_size_per_iter
-            avg_imag_chi += np.imag(chis) / ensemble_size_per_iter
-
-        ''''# linear response
-        for i in range(x.shape[0]):
-            chis = helpers.chi_ft(x[i], f_driven)[:, 1:upper_bound]
-            avg_real_chi += np.real(chis)
-            avg_imag_chi += np.imag(chis)
-
-        avg_real_chi = np.real(chis) / ensemble_size_per_iter
-        avg_imag_chi = np.imag(chis) / ensemble_size_per_iter'''
-        # ------------- END AVERAGING CALCULATIONS ------------- #
         print("Number of ensembles done: ", iteration + 1)
 
     avg_psd_at_omegas /= (2 * np.pi * num_iterations)
@@ -238,7 +215,7 @@ if __name__ == '__main__':
     boltzmann_rescale = 1 / k_b
     #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     temp = parameters[3]
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=False)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=True)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
