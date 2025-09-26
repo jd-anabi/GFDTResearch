@@ -17,9 +17,10 @@ else:
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
 BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
-K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.3
-SOSC_MIN_RANGE = 0.7
+#K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
+K_B = 1
+SOSC_MAX_RANGE = 1.9
+SOSC_MIN_RANGE = 0.1
 
 def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
     """
@@ -181,7 +182,7 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     else:
         return c
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
@@ -189,17 +190,19 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
     :param ifreqs: the frequencies to interpolate the PSD with
     :param welch: whether to use Welch's method
     :param nperseg: length of each segment if using Welch's method
+    :param onesided: whether to use one-sided PSD or not
     :return: the power spectral density
     """
     fs = 1 / dt
     if welch:
         if nperseg is None:
             nperseg = len(x) // 4
-        freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=True)
+        freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
         psd = np.interp(ifreqs, freqs, psd)
     else:
+        onesided_factor = 2 if onesided else 1
         x_fft = sp.fft.rfft(x - np.mean(x))
-        psd_gen = 2 * np.abs(x_fft)**2 * dt / x.shape[0]
+        psd_gen = onesided_factor * np.abs(x_fft)**2 * dt / x.shape[0]
         psd_gen[0] /= 2
         if len(x) % 2 == 0:
             psd_gen[-1] /= 2
@@ -223,7 +226,7 @@ def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     chi = x_ft / force_ft # n x m array
     return chi
 
-def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, one_sided: bool = True) -> np.ndarray:
+def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, onesided: bool = True) -> np.ndarray:
     """
     Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
     :param psd: the power spectral density
@@ -234,8 +237,8 @@ def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: f
     :param one_sided: whether the PSD is one-sided or not
     :return: the fluctuation response function
     """
-    one_sided_factor = 1 if one_sided else 2
+    onesided_factor = 4 if onesided else 2
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = omegas[i] * psd[i] / (one_sided_factor * boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
+        theta[i] = omegas[i] * psd[i] / (onesided_factor * boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
     return theta

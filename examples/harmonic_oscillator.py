@@ -30,7 +30,7 @@ class HarmonicOscillator(torch.nn.Module):
 
     def f(self, x, t) -> torch.Tensor:
         dx = x[:, 1]
-        dv = -1 * self.omega_0 * x[:, 0] - self.gamma / self.mass * x[:, 1] + self.__sin_sf(t) / self.mass
+        dv = -1 * self.omega_0**2 * x[:, 0] - self.gamma / self.mass * x[:, 1] + self.__sin_sf(t) / self.mass
         dx = torch.stack((dx, dv), dim=1)
         return dx
 
@@ -40,4 +40,4 @@ class HarmonicOscillator(torch.nn.Module):
 
     # stimulus force
     def __sin_sf(self, t):
-        return self.amp * torch.cos(self.omega * t + self.phase) + self.offset
+        return self.amp * torch.sin(self.omega * t + self.phase) + self.offset

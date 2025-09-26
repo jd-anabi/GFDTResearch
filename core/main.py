@@ -13,16 +13,17 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 0.2, 1, 1] # mass, gamma, omega_0, temperature
+    parameters = [1, 1, 2 * np.pi, 3] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-2
     q = parameters[0] * parameters[2] / parameters[1]
     t_equilibrium = 50 / parameters[1]
     num_cycles = 70
-    t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium
+    t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium + 2
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
-    t_nd = np.linspace(ts[0], ts[-1], n)
+    t = np.linspace(ts[0], ts[-1], n)
+    dt = t[1] - t[0]
     time_rescale = 1e-3 # ms -> s
 
     # parameters and initial conditions
@@ -91,23 +92,22 @@ if __name__ == '__main__':
 
     # ------------- BEGIN RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
     # rescale time
-    t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
-                          hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
+    #t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
+    #                      hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # rescaling time and making an array of driving frequencies
-    t = time_rescale * t # rescale from ms -> s
-    t = t_nd
-    dt = float(t[1] - t[0]) # rescale dt
+    #t = time_rescale * t # rescale from ms -> s
+    #t = t_nd
+    #dt = float(t[1] - t[0]) # rescale dt
 
     steady_id = int(0.7 * len(t))
     #steady_id = int(t_equilibrium / dt)
     #t = t[steady_id:]  # take last 30% for steady state
-    t = t - t[0]
+    #t = t - t[0]
     n = len(t)
     n_steady = len(t[steady_id:])
 
     # frequency arrays
-    fs = 70
     freqs = sp.fft.fftfreq(n_steady, dt)
     if n % 2 == 0:
         upper_bound = int(n / 2)
@@ -116,10 +116,9 @@ if __name__ == '__main__':
     #pos_freqs = freqs[1:upper_bound]
     pos_freqs = sp.fft.rfftfreq(n_steady, dt)[1:]
 
-    nperseg_needed = int(1 / (dt * pos_freqs[0]))
-    nperseg = min(nperseg_needed, n_steady // 4)
+    nperseg = min(int(1 / (dt * pos_freqs[0])), n_steady // 4)
 
-    num_unique = 50
+    num_unique = 100
     ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
@@ -141,7 +140,7 @@ if __name__ == '__main__':
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
-    # let's do ensemble size of 10 each iteration; so total batch size = num_unique x ensemble_size_per_iter = 400 x 10 = 4000
+    # let's do ensemble size of 10 each iteration; so total batch size = num_iterations x ensemble_size_per_iter = 400 x 10 = 4000
     tiled_omegas = np.tile(omegas, ensemble_size_per_iter)
 
     # instantiate needed values
@@ -153,11 +152,12 @@ if __name__ == '__main__':
     avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
-    x0 = np.random.randint(0, 4, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
+    x0 = np.random.randint(0, 5, size=(helpers.BATCH_SIZE, 2)) # initial conditions
+    num_iterations = 5 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
     omegas_driven = omegas[1:] # only use the driven frequencies
     welch = False
+    onesided = True
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -177,8 +177,8 @@ if __name__ == '__main__':
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         with mp.Pool(processes=mp.cpu_count()//2) as pool:
             #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg_needed) for i in range(x0.shape[0])])), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi)) for i in range(x0.shape[0])])), axis=0)
             chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
@@ -196,7 +196,7 @@ if __name__ == '__main__':
         spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]'''
         print("Number of ensembles done: ", iteration + 1)
 
-    avg_psd_at_omegas /= (2 * np.pi * num_iterations)
+    avg_psd_at_omegas /= num_iterations
     avg_real_chi /= num_iterations
     avg_imag_chi /= num_iterations
 
@@ -212,10 +212,9 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
-    boltzmann_rescale = 1 / k_b
     #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
     temp = parameters[3]
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_rescale, one_sided=True)
+    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
@@ -235,17 +234,17 @@ if __name__ == '__main__':
     #plt.show()
 
     # autocorrelation function
-    plt.plot(t, avg_auto_corr)
-    plt.xlabel(r'Time (s)')
-    plt.ylabel(r'Autocorrelation')
-    plt.tight_layout()
-    plt.show()
+    #plt.plot(t, avg_auto_corr)
+    #plt.xlabel(r'Time (s)')
+    #plt.ylabel(r'Autocorrelation')
+    #plt.tight_layout()
+    #plt.show()
 
     # Power spectral density
     plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 0.7)
+    plt.xlim(0, 3)
     plt.tight_layout()
     plt.show()
 
