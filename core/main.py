@@ -13,11 +13,11 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 1, 2 * np.pi, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 1/(2 * np.pi), 2 * np.pi, 3] # mass, gamma, omega_0, temperature
     # time arrays
-    dt = 1e-2
+    dt = 1e-3
     q = parameters[0] * parameters[2] / parameters[1]
-    t_equilibrium = 50 / parameters[1]
+    t_equilibrium = 5 / parameters[1]
     num_cycles = 70
     t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium + 2
     ts = (0, t_max)

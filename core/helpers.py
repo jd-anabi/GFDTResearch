@@ -60,7 +60,7 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
     with torch.no_grad():
         try:
-            sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+            sol = solver.implicit_euler(sde, x0s, ts, n) # only keep the last solution
         except (Warning, Exception) as e:
             print(e)
             exit()
@@ -182,7 +182,7 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     else:
         return c
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
@@ -191,18 +191,20 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
     :param welch: whether to use Welch's method
     :param nperseg: length of each segment if using Welch's method
     :param onesided: whether to use one-sided PSD or not
+    :param angular: whether to use angular PSD or not
     :return: the power spectral density
     """
-    fs = 1 / dt
+    angular_factor = 2 * np.pi if angular else 1
     if welch:
+        fs = 1 / dt
         if nperseg is None:
             nperseg = len(x) // 4
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
-        psd = np.interp(ifreqs, freqs, psd)
+        psd = np.interp(ifreqs, freqs, psd) / angular_factor
     else:
         onesided_factor = 2 if onesided else 1
         x_fft = sp.fft.rfft(x - np.mean(x))
-        psd_gen = onesided_factor * np.abs(x_fft)**2 * dt / x.shape[0]
+        psd_gen = onesided_factor * np.abs(x_fft)**2 * dt / (angular_factor * x.shape[0])
         psd_gen[0] /= 2
         if len(x) % 2 == 0:
             psd_gen[-1] /= 2
