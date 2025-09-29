@@ -60,7 +60,7 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
     with torch.no_grad():
         try:
-            sol = solver.implicit_euler(sde, x0s, ts, n) # only keep the last solution
+            sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
         except (Warning, Exception) as e:
             print(e)
             exit()

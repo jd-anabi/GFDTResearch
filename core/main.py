@@ -13,7 +13,7 @@ import helpers
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # damped harmonic oscillator parameters
-    parameters = [1, 1/(2 * np.pi), 2 * np.pi, 3] # mass, gamma, omega_0, temperature
+    parameters = [1, 1, 3, 5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-3
     q = parameters[0] * parameters[2] / parameters[1]
@@ -158,6 +158,7 @@ if __name__ == '__main__':
     omegas_driven = omegas[1:] # only use the driven frequencies
     welch = False
     onesided = True
+    angular = False
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
@@ -177,8 +178,8 @@ if __name__ == '__main__':
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         with mp.Pool(processes=mp.cpu_count()//2) as pool:
             #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi)) for i in range(x0.shape[0])])), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
             chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
