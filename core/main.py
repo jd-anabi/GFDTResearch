@@ -12,25 +12,21 @@ import helpers
 
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
-    # damped harmonic oscillator parameters
-    parameters = [1, 1, 3, 5] # mass, gamma, omega_0, temperature
     # time arrays
     dt = 1e-3
-    q = parameters[0] * parameters[2] / parameters[1]
-    t_equilibrium = 5 / parameters[1]
-    num_cycles = 70
-    t_max = 2 * np.pi * num_cycles / parameters[2] + t_equilibrium + 2
+    num_cycles = int(input("Number of cycles: "))
+    t_max = num_cycles
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
-    t = np.linspace(ts[0], ts[-1], n)
-    dt = t[1] - t[0]
+    t_nd = np.linspace(ts[0], ts[-1], n)
+    dt = t_nd[1] - t_nd[0]
     time_rescale = 1e-3 # ms -> s
 
     # parameters and initial conditions
     file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
     x0 = []
-    hb_rescale_arr = np.zeros(8, dtype=float)
+    rescale_file = np.zeros(8, dtype=float)
 
     # pattern matching for file reading
     pattern = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values
@@ -47,8 +43,7 @@ if __name__ == '__main__':
         force_file_path = '/Force Info/sin_force_params.txt'
 
     # hair cell parameters
-    #file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
-    file = os.getcwd() + hair_cell_file_path + '0' + '.txt'
+    file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
@@ -60,17 +55,16 @@ if __name__ == '__main__':
 
     # rescaling parameters
     line = 0
-    #file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
-    file = os.getcwd() + rescale_file_path + '1' + '.txt'
+    file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
             val = float(re.findall(pattern, row.strip())[0])
-            hb_rescale_arr[line] = val
+            rescale_file[line] = val
             line = line + 1
-    hb_rescale_params: Dict[str, float] = {'gamma': hb_rescale_arr[0].item(), 'd': hb_rescale_arr[1].item(),
-                                           'x_sp': hb_rescale_arr[2].item(), 'k_sp': hb_rescale_arr[3].item(),
-                                           'k_gs_max': hb_rescale_arr[4].item(), 's_max': hb_rescale_arr[5].item(),
-                                           't_0': hb_rescale_arr[6].item()}
+    hb_rescale_params: Dict[str, float] = {'gamma': rescale_file[0].item(), 'd': rescale_file[1].item(),
+                                           'x_sp': rescale_file[2].item(), 'k_sp': rescale_file[3].item(),
+                                           'k_gs_max': rescale_file[4].item(), 's_max': rescale_file[5].item(),
+                                           't_0': rescale_file[6].item()}
     # need to add in non-dimensional parameters for rescaling too
     hb_nd_rescale_params: Dict[str, float] = {'s_max': params[6].item(), 'chi_hb': params[12].item(), 'chi_a': params[13].item()}
 
@@ -86,24 +80,19 @@ if __name__ == '__main__':
     offset = forcing_amps[2]
 
     # read user input for spontaneous oscillation frequency
-    #sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
-    sosc = parameters[2]
+    sosc = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
     # ------------- END SETUP ------------- #
 
     # ------------- BEGIN RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
     # rescale time
-    #t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
-    #                      hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
+    t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
+                          hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # rescaling time and making an array of driving frequencies
-    #t = time_rescale * t # rescale from ms -> s
-    #t = t_nd
-    #dt = float(t[1] - t[0]) # rescale dt
+    t = time_rescale * t # rescale from ms -> s
+    dt = float(t[1] - t[0]) # rescale dt
 
     steady_id = int(0.7 * len(t))
-    #steady_id = int(t_equilibrium / dt)
-    #t = t[steady_id:]  # take last 30% for steady state
-    #t = t - t[0]
     n = len(t)
     n_steady = len(t[steady_id:])
 
@@ -113,7 +102,6 @@ if __name__ == '__main__':
         upper_bound = int(n / 2)
     else:
         upper_bound = int((n - 1) / 2) + 1
-    #pos_freqs = freqs[1:upper_bound]
     pos_freqs = sp.fft.rfftfreq(n_steady, dt)[1:]
 
     nperseg = min(int(1 / (dt * pos_freqs[0])), n_steady // 4)
@@ -122,26 +110,26 @@ if __name__ == '__main__':
     ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
-    sf = helpers.sf(t, amp, sosc, phase, offset, num_unique)
-    sf_nd = helpers.inv_rescale_f(sf, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                                  hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
-    sf = sf[:, steady_id:] # steady-state portion of force
-    f_driven = sf[1:, :] # ignore undriven force
-    #tiled_f_driven = np.tile(f_driven, (ensemble_size, 1)) # tile the driven forces for the size of the ensemble
+    f = helpers.sf(t, amp, sosc, phase, offset, num_unique)
+    f_nd = helpers.inv_rescale_f(f, hb_rescale_params['gamma'], hb_rescale_params['d'],
+                                 hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
+    f = f[:, steady_id:] # steady-state portion of force
+    f_driven = f[1:, :] # ignore undriven force
 
     # find which index in the array of driving frequencies corresponds to sosc
     omegas = helpers.driving_freqs(sosc, num_unique)
     sosc_index = np.argmax(omegas == sosc)
-    force_params_nd = helpers.rescale_force_params(amp, omegas, phase, offset,
+    force_params_nd = helpers.rescale_force_params(omegas, amp, phase, offset,
                                                    hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
                                                    hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
                                                    hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
-    amp_nd, omegas_nd, phases_nd, offset_nd = force_params_nd[0], force_params_nd[1], force_params_nd[2], force_params_nd[3]
+    omegas_nd, amp_nd, phases_nd, offset_nd = force_params_nd[0], force_params_nd[1], force_params_nd[2], force_params_nd[3]
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
 
     # let's do ensemble size of 10 each iteration; so total batch size = num_iterations x ensemble_size_per_iter = 400 x 10 = 4000
-    tiled_omegas = np.tile(omegas, ensemble_size_per_iter)
+    tiled_phases = np.tile(phases_nd, ensemble_size_per_iter)
+    tiled_omegas = np.tile(omegas_nd, ensemble_size_per_iter)
 
     # instantiate needed values
     avg_psd = np.zeros(pos_freqs.shape[0])
@@ -149,13 +137,12 @@ if __name__ == '__main__':
     avg_real_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
     avg_imag_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
     pos_magnitudes = np.zeros(pos_freqs.shape[0])
-    avg_auto_corr = np.zeros(t[steady_id:].shape[0])
+    #avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
-    x0 = np.random.randint(0, 5, size=(helpers.BATCH_SIZE, 2)) # initial conditions
-    num_iterations = 5 # total ensemble size = ensemble_size_per_iter x num_iterations
-    args_list = (t, x0, list(parameters), [tiled_omegas, amp, phase, offset]) # parameters
-    omegas_driven = omegas[1:] # only use the driven frequencies
+    x0 = np.random.randint(0, 1, size=(helpers.BATCH_SIZE, 5)) # initial conditions
+    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
+    args_list = (t_nd, x0, list(params), [tiled_omegas, amp_nd, tiled_phases, offset_nd]) # parameters
     welch = False
     onesided = True
     angular = False
@@ -164,6 +151,7 @@ if __name__ == '__main__':
         results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
+        x_data = helpers.rescale_x(x_data, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
 
         # get steady-state portion of data
         x_data = x_data[:, steady_id:]
@@ -213,8 +201,8 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
-    #temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    temp = parameters[3]
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
+    #temp = parameters[3]
     theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 

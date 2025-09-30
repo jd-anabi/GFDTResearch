@@ -10,17 +10,16 @@ import examples.harmonic_oscillator as harmonic_oscillator
 if torch.cuda.is_available():
     DEVICE = torch.device('cuda')
 elif torch.backends.mps.is_available():
-    DEVICE = torch.device('cpu')
+    DEVICE = torch.device('mps')
 else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2500 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
-#K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-K_B = 1
-SOSC_MAX_RANGE = 1.9
-SOSC_MIN_RANGE = 0.1
+K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
+SOSC_MAX_RANGE = 1.3
+SOSC_MIN_RANGE = 0.7
 
 def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
     """
@@ -38,13 +37,14 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
 
     # check if we are using the steady-state solution
     if params[3] == 0:
-        sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        #x0 = x0[:4]
-        #sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        #sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        x0 = x0[:, :4]
+        sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
+        print("Hair bundle model has been set up")
     else:
-        sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        #sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        #sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Hair bundle model has been set up")
 
     # setting up initial conditions
@@ -68,18 +68,18 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     print("SDEs have been solved")
     return sol.cpu().detach().numpy()
 
-def rescale_x(nd_hb_pos: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: float) -> np.ndarray:
+def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: float) -> np.ndarray:
     """
     Rescaling the hair-bundle displacement
-    :param nd_hb_pos: the hair bundle position
+    :param x_nd: the hair bundle position
     :param gamma: geometric conversion factor
     :param d: distance of gating spring relaxation on channel opening
     :param x_sp: resting deflection of stereociliary pivots
     :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
     :return: the rescaled hair-bundle displacement
     """
-    hb_pos = chi_hb * d / gamma * nd_hb_pos + x_sp
-    return hb_pos
+    x = chi_hb * d / gamma * x_nd + x_sp
+    return x
 
 def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:
     """
@@ -108,9 +108,9 @@ def inv_rescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb
     force_nd = gamma / (chi_hb * k_sp * d) * force
     return force_nd
 
-def rescale_force_params(amp: float, omegas: np.ndarray, phase: float, offset: float,
+def rescale_force_params(omegas: np.ndarray, amp: float, phase: float, offset: float,
                          gamma: float, d: float, k_sp: float, chi_hb: float,
-                         k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[float, np.ndarray, np.ndarray, float]:
+                         k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
     """
     Rescale the stimulus force parameters from dimensional -> non-dimensional
     :param amp: amplitude
@@ -134,7 +134,7 @@ def rescale_force_params(amp: float, omegas: np.ndarray, phase: float, offset: f
     offset_nd = alpha * offset
     omega_nd = t_prime * omegas
     phases_nd = phase - t_0 * omegas
-    return amp_nd, omega_nd, phases_nd, offset_nd
+    return omega_nd, amp_nd, phases_nd, offset_nd
 
 def driving_freqs(omega_0: float, nfreqs: int = BATCH_SIZE) -> np.ndarray:
     """
