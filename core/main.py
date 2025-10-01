@@ -8,19 +8,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
 
-import helpers
+import fdt_helpers as fh
+import hair_model_helpers as hmh
 
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
-    num_cycles = int(input("Number of cycles: "))
-    t_max = num_cycles
+    t_max = int(input("Number of cycles: "))
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     dt = t_nd[1] - t_nd[0]
-    time_rescale = 1e-3 # ms -> s
 
     # parameters and initial conditions
     file_str = 'Non-dimensional'
@@ -85,14 +84,16 @@ if __name__ == '__main__':
 
     # ------------- BEGIN RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
     # rescale time
-    t = helpers.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
+    t = hmh.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # rescaling time and making an array of driving frequencies
-    t = time_rescale * t # rescale from ms -> s
-    dt = float(t[1] - t[0]) # rescale dt
+    time_rescale = 1e-3 # ms -> ms
+    t_s = time_rescale * t # rescale from ms -> s
+    dt_s = float(t[1] - t[0]) # rescale dt
+    fs = 1 / dt_s
 
-    steady_id = int(0.7 * len(t))
+    steady_id = int(0.3 * len(t))
     n = len(t)
     n_steady = len(t[steady_id:])
 
@@ -106,20 +107,20 @@ if __name__ == '__main__':
 
     nperseg = min(int(1 / (dt * pos_freqs[0])), n_steady // 4)
 
-    num_unique = 100
-    ensemble_size_per_iter = helpers.BATCH_SIZE // num_unique
+    num_unique = 40
+    ensemble_size_per_iter = fh.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
-    f = helpers.sf(t, amp, sosc, phase, offset, num_unique)
-    f_nd = helpers.inv_rescale_f(f, hb_rescale_params['gamma'], hb_rescale_params['d'],
+    f = fh.sf(t, amp, sosc, phase, offset, num_unique)
+    f_nd = hmh.inv_rescale_f(f, hb_rescale_params['gamma'], hb_rescale_params['d'],
                                  hb_rescale_params['k_sp'], hb_nd_rescale_params['chi_hb'])
     f = f[:, steady_id:] # steady-state portion of force
     f_driven = f[1:, :] # ignore undriven force
 
     # find which index in the array of driving frequencies corresponds to sosc
-    omegas = helpers.driving_freqs(sosc, num_unique)
+    omegas = fh.driving_freqs(sosc, num_unique)
     sosc_index = np.argmax(omegas == sosc)
-    force_params_nd = helpers.rescale_force_params(omegas, amp, phase, offset,
+    force_params_nd = hmh.rescale_force_params(omegas / time_rescale, amp, phase, offset,
                                                    hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
                                                    hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
                                                    hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
@@ -140,18 +141,18 @@ if __name__ == '__main__':
     #avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
-    x0 = np.random.randint(0, 1, size=(helpers.BATCH_SIZE, 5)) # initial conditions
-    num_iterations = 10 # total ensemble size = ensemble_size_per_iter x num_iterations
+    x0 = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 5)) # initial conditions
+    num_iterations = 5 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t_nd, x0, list(params), [tiled_omegas, amp_nd, tiled_phases, offset_nd]) # parameters
     welch = False
     onesided = True
     angular = False
     for iteration in range(num_iterations):
         # ------------- BEGIN SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
-        results = helpers.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
+        results = fh.hb_sols(*args_list) # shape: (T, BATCH_SIZE, d)
 
         x_data = results[:, :, 0].T # (BATCH_SIZE, T)
-        x_data = helpers.rescale_x(x_data, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
+        x_data = hmh.rescale_x(x_data, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_nd_rescale_params['chi_hb'])
 
         # get steady-state portion of data
         x_data = x_data[:, steady_id:]
@@ -166,9 +167,9 @@ if __name__ == '__main__':
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         with mp.Pool(processes=mp.cpu_count()//2) as pool:
             #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(helpers.psd, [(x0[i], dt, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
-            chis = np.mean(np.array(pool.starmap(helpers.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
+            avg_psd += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
+            chis = np.mean(np.array(pool.starmap(fh.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
         # ------------- END AVERAGING CALCULATIONS ------------- #
@@ -177,12 +178,6 @@ if __name__ == '__main__':
         # subtract off the average
         # for i in range(x_data.shape[0]):
         #    x_data[i] = x_data[i] - np.mean(x_data[i])
-
-        '''x0_f = sp.fft.fft(x0, axis=1) / len(x0)
-        avg_x0_f = np.mean(x0_f, axis=0) # average the fourier transforms
-        magnitudes = np.abs(avg_x0_f)
-        pos_magnitudes = magnitudes[1:upper_bound]
-        spon_osc_freq = pos_freqs[np.argmax(pos_magnitudes)]'''
         print("Number of ensembles done: ", iteration + 1)
 
     avg_psd_at_omegas /= num_iterations
@@ -200,10 +195,9 @@ if __name__ == '__main__':
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    boltzmann_rescale = 1e18 # nm^2 mg ms^-2 K^-1
+    boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
-    #temp = parameters[3]
-    theta = helpers.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
+    theta = fh.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #

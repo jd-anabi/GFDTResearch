@@ -5,7 +5,6 @@ import numpy as np
 import sdeint as sdeint
 import nondimensional_model as nd_model
 import steady_nondimensional_model as steady_nd_model
-import examples.harmonic_oscillator as harmonic_oscillator
 
 if torch.cuda.is_available():
     DEVICE = torch.device('cuda')
@@ -15,7 +14,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2500 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.3
@@ -68,74 +67,6 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     print("SDEs have been solved")
     return sol.cpu().detach().numpy()
 
-def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: float) -> np.ndarray:
-    """
-    Rescaling the hair-bundle displacement
-    :param x_nd: the hair bundle position
-    :param gamma: geometric conversion factor
-    :param d: distance of gating spring relaxation on channel opening
-    :param x_sp: resting deflection of stereociliary pivots
-    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
-    :return: the rescaled hair-bundle displacement
-    """
-    x = chi_hb * d / gamma * x_nd + x_sp
-    return x
-
-def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:
-    """
-    Rescaling the time array
-    :param nd_t: the time array
-    :param k_gs_max: maximum stiffness of gating spring
-    :param s_max: maximum slipping rate
-    :param t_0: time offset
-    :param s_max_nd: non-dimensional maximum slipping rate
-    :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
-    :return:  the rescaled time
-    """
-    t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
-    return t
-
-def inv_rescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb: float) -> np.ndarray:
-    """
-    Rescaling the stimulus force from dimensional -> non-dimensional
-    :param force: the stimulus force position
-    :param gamma: geometric conversion factor
-    :param d: distance of gating spring relaxation on channel opening
-    :param k_sp: stiffness of stereociliary pivots
-    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
-    :return: the rescaled stimulus force
-    """
-    force_nd = gamma / (chi_hb * k_sp * d) * force
-    return force_nd
-
-def rescale_force_params(omegas: np.ndarray, amp: float, phase: float, offset: float,
-                         gamma: float, d: float, k_sp: float, chi_hb: float,
-                         k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
-    """
-    Rescale the stimulus force parameters from dimensional -> non-dimensional
-    :param amp: amplitude
-    :param omegas: frequencies
-    :param phase: phase
-    :param offset: offset
-    :param gamma: geometric conversion factor
-    :param d: distance of gating spring relaxation on channel opening
-    :param k_sp: stiffness of stereociliary pivots
-    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
-    :param k_gs_max: maximum stiffness of gating spring
-    :param s_max: maximum slipping rate
-    :param s_max_nd: non-dimensional maximum slipping rate
-    :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
-    :param t_0: time offset
-    :return: the rescaled stimulus force parameters
-    """
-    alpha = gamma / (chi_hb * k_sp * d)
-    t_prime = chi_a * s_max_nd / (k_gs_max * s_max)
-    amp_nd = alpha * amp
-    offset_nd = alpha * offset
-    omega_nd = t_prime * omegas
-    phases_nd = phase - t_0 * omegas
-    return omega_nd, amp_nd, phases_nd, offset_nd
-
 def driving_freqs(omega_0: float, nfreqs: int = BATCH_SIZE) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
@@ -182,11 +113,13 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     else:
         return c
 
-def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, n: int, dt: float, fs: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
+    :param n: the number of sampling points
     :param dt: the time step
+    :param fs: frequency spacing
     :param ifreqs: the frequencies to interpolate the PSD with
     :param welch: whether to use Welch's method
     :param nperseg: length of each segment if using Welch's method
@@ -196,7 +129,6 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
     """
     angular_factor = 2 * np.pi if angular else 1
     if welch:
-        fs = 1 / dt
         if nperseg is None:
             nperseg = len(x) // 4
         freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
@@ -208,11 +140,12 @@ def psd(x: np.ndarray, dt: float, ifreqs: np.ndarray, welch: bool = False, npers
         psd_gen[0] /= 2
         if len(x) % 2 == 0:
             psd_gen[-1] /= 2
-        psd = np.zeros(len(ifreqs), dtype=float)
-        freqs = sp.fft.rfftfreq(x.shape[0], dt)
-        for i in range(len(ifreqs)):
+        #psd = np.zeros(len(ifreqs), dtype=float)
+        freqs = sp.fft.rfftfreq(n, 1 / fs)
+        psd = np.interp(ifreqs, freqs, psd_gen) / angular_factor
+        '''for i in range(len(ifreqs)):
             index = np.argmin(np.abs(freqs - ifreqs[i]))
-            psd[i] = psd_gen[index]
+            psd[i] = psd_gen[index]'''
     return psd
 
 def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
