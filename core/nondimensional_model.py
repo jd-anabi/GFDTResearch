@@ -30,7 +30,7 @@ class HairBundleSDE(torch.nn.Module):
 
         # force parameters
         self.amp = amp  # amplitude of stimulus force
-        self.phase = phase  # phase of the stimulus force
+        self.phase = torch.tensor(phase, dtype=dtype, device=device) # phase of the stimulus force
         self.offset = offset  # stimulus force offset
         self.omega = torch.tensor(omega, dtype=dtype, device=device)
 
@@ -93,7 +93,7 @@ class HairBundleSDE(torch.nn.Module):
 
     # stimulus force
     def __sin_sf(self, t):
-        return -1 * self.amp * torch.sin(self.omega * t + self.phase) + self.offset
+        return self.amp * torch.sin(self.omega * t + self.phase) + self.offset
     # noise
     def __hb_noise(self) -> float:
         return self.eta_hb / self.tau_hb

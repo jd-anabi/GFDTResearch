@@ -14,7 +14,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 2000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.3
@@ -36,19 +36,16 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
 
     # check if we are using the steady-state solution
     if params[3] == 0:
-        #sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         x0 = x0[:, :4]
         sde = steady_nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
         print("Hair bundle model has been set up")
     else:
-        #sde = harmonic_oscillator.HarmonicOscillator(*params, *force_params, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         sde = nd_model.HairBundleSDE(*params, *force_params, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Hair bundle model has been set up")
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
-    #x0s = torch.tile(x0s, (BATCH_SIZE, 1)) # size: (BATCH_SIZE, len(x0))
 
     # time array
     n = len(t)
@@ -67,13 +64,14 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     print("SDEs have been solved")
     return sol.cpu().detach().numpy()
 
-def driving_freqs(omega_0: float, nfreqs: int = BATCH_SIZE) -> np.ndarray:
+def driving_freqs(omega_0: float, n: int = BATCH_SIZE) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
     :param omega_0: the frequency to generate the array around
+    :param n: number of frequencies to generate
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, nfreqs - 2)
+    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, n - 2)
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
@@ -103,6 +101,7 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     """
     Returns the (normalized) auto-correlation function <X(t) X(0)> for the time series data
     :param x: the time series data
+    :param norm: whether to normalize the auto-correlation function
     :return: the auto-correlation function
     """
     x = x - np.mean(x)
@@ -113,14 +112,14 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     else:
         return c
 
-def psd(x: np.ndarray, n: int, dt: float, fs: float, ifreqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, n: int, dt: float, fs: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
     :param n: the number of sampling points
     :param dt: the time step
     :param fs: frequency spacing
-    :param ifreqs: the frequencies to interpolate the PSD with
+    :param int_freqs: the frequencies to interpolate the PSD with
     :param welch: whether to use Welch's method
     :param nperseg: length of each segment if using Welch's method
     :param onesided: whether to use one-sided PSD or not
@@ -131,22 +130,22 @@ def psd(x: np.ndarray, n: int, dt: float, fs: float, ifreqs: np.ndarray, welch: 
     if welch:
         if nperseg is None:
             nperseg = len(x) // 4
-        freqs, psd = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
-        psd = np.interp(ifreqs, freqs, psd) / angular_factor
+        freqs, s = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
+        s = np.interp(int_freqs, freqs, s) / angular_factor
     else:
         onesided_factor = 2 if onesided else 1
         x_fft = sp.fft.rfft(x - np.mean(x))
-        psd_gen = onesided_factor * np.abs(x_fft)**2 * dt / (angular_factor * x.shape[0])
-        psd_gen[0] /= 2
+        s_gen = onesided_factor * np.abs(x_fft)**2 * dt / (angular_factor * x.shape[0])
+        s_gen[0] /= 2
         if len(x) % 2 == 0:
-            psd_gen[-1] /= 2
-        #psd = np.zeros(len(ifreqs), dtype=float)
+            s_gen[-1] /= 2
+        s = np.zeros(len(int_freqs), dtype=float)
         freqs = sp.fft.rfftfreq(n, 1 / fs)
-        psd = np.interp(ifreqs, freqs, psd_gen) / angular_factor
-        '''for i in range(len(ifreqs)):
-            index = np.argmin(np.abs(freqs - ifreqs[i]))
-            psd[i] = psd_gen[index]'''
-    return psd
+        #psd = np.interp(ifreqs, freqs, psd_gen) / angular_factor
+        for i in range(len(int_freqs)):
+            index = np.argmin(np.abs(freqs - int_freqs[i]))
+            s[i] = s_gen[index]
+    return s
 
 def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
@@ -169,7 +168,7 @@ def fluc_resp(psd: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: f
     :param omegas: the driving frequencies (angular frequencies)
     :param temp: the temperature
     :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
-    :param one_sided: whether the PSD is one-sided or not
+    :param onesided: whether the PSD is one-sided or not
     :return: the fluctuation response function
     """
     onesided_factor = 4 if onesided else 2

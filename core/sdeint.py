@@ -40,6 +40,7 @@ class Solver:
                 dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1)  # batch matrix multiplication; shape: (batch_size, d)
                 # update solution
+                a = sde.f(x_curr, t_curr) * dt
                 xs[i + 1] = x_curr + sde.f(x_curr, t_curr) * dt + eta
 
             return xs

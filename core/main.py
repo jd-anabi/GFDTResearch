@@ -142,7 +142,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 5)) # initial conditions
-    num_iterations = 5 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 3 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t_nd, x0, list(params), [tiled_omegas, amp_nd, tiled_phases, offset_nd]) # parameters
     welch = False
     onesided = True
@@ -194,9 +194,10 @@ if __name__ == '__main__':
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
+    print(omegas[1:])
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item())
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * time_rescale**2)
     theta = fh.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
@@ -228,6 +229,13 @@ if __name__ == '__main__':
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
     plt.xlim(0, 3)
+    plt.tight_layout()
+    plt.show()
+
+    plt.plot(omegas, avg_psd_at_omegas)
+    plt.xlabel(r'Angular frequency (rad/s)')
+    plt.ylabel(r'Power spectral density')
+    plt.xlim(0, 5)
     plt.tight_layout()
     plt.show()
 
