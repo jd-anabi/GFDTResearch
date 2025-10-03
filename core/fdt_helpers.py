@@ -1,6 +1,6 @@
 import scipy as sp
-import torch
 import numpy as np
+import torch
 
 import sdeint as sdeint
 import nondimensional_model as nd_model
@@ -17,8 +17,8 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.3
-SOSC_MIN_RANGE = 0.7
+SOSC_MAX_RANGE = 1.7
+SOSC_MIN_RANGE = 0.3
 
 def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
     """
@@ -105,12 +105,9 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     :return: the auto-correlation function
     """
     x = x - np.mean(x)
-    c = np.correlate(x, x, mode='full')
-    c = c[len(c) // 2:]
-    if norm:
-        return c / c[0]
-    else:
-        return c
+    xf = sp.fft.rfft(x, n=2*len(x))
+    acf = sp.fft.irfft(np.abs(xf)**2)[:len(x)]
+    return acf / acf[0]
 
 def psd(x: np.ndarray, n: int, dt: float, fs: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """

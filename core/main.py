@@ -15,7 +15,7 @@ if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
     dt = 1e-3
-    t_max = int(input("Number of cycles: "))
+    t_max = int(input("Max time: "))
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
@@ -107,7 +107,7 @@ if __name__ == '__main__':
 
     nperseg = min(int(1 / (dt * pos_freqs[0])), n_steady // 4)
 
-    num_unique = 40
+    num_unique = 100
     ensemble_size_per_iter = fh.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
@@ -138,11 +138,11 @@ if __name__ == '__main__':
     avg_real_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
     avg_imag_chi = np.zeros((num_unique - 1, pos_freqs.shape[0]))
     pos_magnitudes = np.zeros(pos_freqs.shape[0])
-    #avg_auto_corr = np.zeros(t[steady_id:].shape[0])
+    avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 5)) # initial conditions
-    num_iterations = 3 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 30 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t_nd, x0, list(params), [tiled_omegas, amp_nd, tiled_phases, offset_nd]) # parameters
     welch = False
     onesided = True
@@ -165,8 +165,8 @@ if __name__ == '__main__':
         # ------------- END SDE SOLVING AND RETRIEVING NEEDED DATA ------------- #
 
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
-        with mp.Pool(processes=mp.cpu_count()//2) as pool:
-            #avg_auto_corr += np.mean(np.array(pool.starmap(helpers.auto_corr, zip(x0))), axis=0)
+        with mp.Pool(processes=int(0.75 * mp.cpu_count())) as pool:
+            avg_auto_corr += np.mean(np.array(pool.starmap(fh.auto_corr, zip(x0))), axis=0)
             avg_psd += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
             avg_psd_at_omegas += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
             chis = np.mean(np.array(pool.starmap(fh.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
@@ -180,6 +180,7 @@ if __name__ == '__main__':
         #    x_data[i] = x_data[i] - np.mean(x_data[i])
         print("Number of ensembles done: ", iteration + 1)
 
+    avg_auto_corr /= num_iterations
     avg_psd_at_omegas /= num_iterations
     avg_real_chi /= num_iterations
     avg_imag_chi /= num_iterations
@@ -198,7 +199,7 @@ if __name__ == '__main__':
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
     temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * time_rescale**2)
-    theta = fh.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, onesided=onesided)
+    theta = fh.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_scale=boltzmann_rescale, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
@@ -218,11 +219,11 @@ if __name__ == '__main__':
     #plt.show()
 
     # autocorrelation function
-    #plt.plot(t, avg_auto_corr)
-    #plt.xlabel(r'Time (s)')
-    #plt.ylabel(r'Autocorrelation')
-    #plt.tight_layout()
-    #plt.show()
+    plt.plot(t, avg_auto_corr)
+    plt.xlabel(r'Time (s)')
+    plt.ylabel(r'Autocorrelation')
+    plt.tight_layout()
+    plt.show()
 
     # Power spectral density
     plt.plot(pos_freqs, avg_psd)
