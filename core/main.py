@@ -11,6 +11,8 @@ import scipy as sp
 import fdt_helpers as fh
 import hair_model_helpers as hmh
 
+TIME_RS = 1e-3  # ms -> s
+
 if __name__ == '__main__':
     # ------------- BEGIN SETUP ------------- #
     # time arrays
@@ -88,8 +90,7 @@ if __name__ == '__main__':
                           hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'])
 
     # rescaling time and making an array of driving frequencies
-    time_rescale = 1e-3 # ms -> ms
-    t_s = time_rescale * t # rescale from ms -> s
+    t_s = TIME_RS * t # rescale from ms -> s
     dt_s = float(t[1] - t[0]) # rescale dt
     fs = 1 / dt_s
 
@@ -107,7 +108,7 @@ if __name__ == '__main__':
 
     nperseg = min(int(1 / (dt * pos_freqs[0])), n_steady // 4)
 
-    num_unique = 100
+    num_unique = 50
     ensemble_size_per_iter = fh.BATCH_SIZE // num_unique
 
     # calculate stimulus force position (both models)
@@ -120,10 +121,10 @@ if __name__ == '__main__':
     # find which index in the array of driving frequencies corresponds to sosc
     omegas = fh.driving_freqs(sosc, num_unique)
     sosc_index = np.argmax(omegas == sosc)
-    force_params_nd = hmh.rescale_force_params(omegas / time_rescale, amp, phase, offset,
-                                                   hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
-                                                   hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
-                                                   hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
+    force_params_nd = hmh.rescale_force_params(omegas / TIME_RS, amp, phase, offset,
+                                               hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['k_sp'],
+                                               hb_nd_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'],
+                                               hb_nd_rescale_params['s_max'], hb_nd_rescale_params['chi_a'], hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = force_params_nd[0], force_params_nd[1], force_params_nd[2], force_params_nd[3]
 
     # ------------- END RESCALING AND DIMENSIONAL FORCE CALCULATIONS ------------- #
@@ -142,7 +143,7 @@ if __name__ == '__main__':
 
     # solve ensemble of SDEs
     x0 = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 5)) # initial conditions
-    num_iterations = 30 # total ensemble size = ensemble_size_per_iter x num_iterations
+    num_iterations = 1 # total ensemble size = ensemble_size_per_iter x num_iterations
     args_list = (t_nd, x0, list(params), [tiled_omegas, amp_nd, tiled_phases, offset_nd]) # parameters
     welch = False
     onesided = True
@@ -167,8 +168,8 @@ if __name__ == '__main__':
         # ------------- BEGIN AVERAGING CALCULATIONS ------------- #
         with mp.Pool(processes=int(0.75 * mp.cpu_count())) as pool:
             avg_auto_corr += np.mean(np.array(pool.starmap(fh.auto_corr, zip(x0))), axis=0)
-            avg_psd += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
-            avg_psd_at_omegas += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, fs, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
+            avg_psd += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, pos_freqs, welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
+            avg_psd_at_omegas += np.mean(np.array(pool.starmap(fh.psd, [(x0[i], n_steady, dt_s, omegas / (2 * np.pi), welch, nperseg, onesided, angular) for i in range(x0.shape[0])])), axis=0)
             chis = np.mean(np.array(pool.starmap(fh.chi_ft, [(x[i], f_driven) for i in range(x.shape[0])])), axis=0)[:, 1:]
             avg_real_chi += np.real(chis)
             avg_imag_chi += np.imag(chis)
@@ -195,10 +196,9 @@ if __name__ == '__main__':
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
-    print(omegas[1:])
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * time_rescale**2)
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * TIME_RS ** 2)
     theta = fh.fluc_resp(avg_psd_at_omegas[1:], imag_chi_at_omegas, omegas[1:], temp, boltzmann_scale=boltzmann_rescale, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 

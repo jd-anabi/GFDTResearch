@@ -14,19 +14,20 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 4000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 1000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.7
-SOSC_MIN_RANGE = 0.3
+SOSC_MAX_RANGE = 1.1
+SOSC_MIN_RANGE = 0.9
 
-def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> np.ndarray:
+def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list, explicit: bool = True) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time array
     :param x0: the initial conditions of each simulation
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
     :param force_params: the parameters to use in the stimulus force
+    :param explicit: whether to use the explicit Euler-Maruyama method
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     if DEVICE.type == 'cuda' or DEVICE.type == 'mps':
@@ -56,7 +57,10 @@ def hb_sols(t: np.ndarray, x0: np.ndarray, params: list, force_params: list) -> 
     sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
     with torch.no_grad():
         try:
-            sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+            if explicit:
+                sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+            else:
+                sol = solver.implicit_euler(sde, x0s, ts, n)
         except (Warning, Exception) as e:
             print(e)
             exit()
@@ -109,7 +113,7 @@ def auto_corr(x: np.ndarray, norm: bool = True) -> np.ndarray:
     acf = sp.fft.irfft(np.abs(xf)**2)[:len(x)]
     return acf / acf[0]
 
-def psd(x: np.ndarray, n: int, dt: float, fs: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
@@ -124,6 +128,7 @@ def psd(x: np.ndarray, n: int, dt: float, fs: float, int_freqs: np.ndarray, welc
     :return: the power spectral density
     """
     angular_factor = 2 * np.pi if angular else 1
+    fs = 1 / dt
     if welch:
         if nperseg is None:
             nperseg = len(x) // 4
@@ -137,7 +142,7 @@ def psd(x: np.ndarray, n: int, dt: float, fs: float, int_freqs: np.ndarray, welc
         if len(x) % 2 == 0:
             s_gen[-1] /= 2
         s = np.zeros(len(int_freqs), dtype=float)
-        freqs = sp.fft.rfftfreq(n, 1 / fs)
+        freqs = sp.fft.rfftfreq(n, dt)
         #psd = np.interp(ifreqs, freqs, psd_gen) / angular_factor
         for i in range(len(int_freqs)):
             index = np.argmin(np.abs(freqs - int_freqs[i]))
