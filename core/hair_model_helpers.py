@@ -13,6 +13,19 @@ def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: flo
     x = chi_hb * d / gamma * x_nd + x_sp
     return x
 
+def irescale_x(x: float, gamma: float, d: float, x_sp: float, chi_hb: float) -> float:
+    """
+    Rescaling the hair-bundle displacement from dimensional -> non-dimensional
+    :param x: the hair bundle position
+    :param gamma: geometric conversion factor
+    :param d: distance of gating spring relaxation on channel opening
+    :param x_sp: resting deflection of stereociliary pivots
+    :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
+    :return: the rescaled hair-bundle displacement
+    """
+    x_nd = gamma * (x - x_sp) / (chi_hb * d)
+    return x_nd
+
 def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:
     """
     Rescaling the time array
@@ -27,7 +40,7 @@ def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max
     t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
     return t
 
-def inv_rescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb: float) -> np.ndarray:
+def irescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb: float) -> np.ndarray:
     """
     Rescaling the stimulus force from dimensional -> non-dimensional
     :param force: the stimulus force position
@@ -40,9 +53,9 @@ def inv_rescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb
     force_nd = gamma / (chi_hb * k_sp * d) * force
     return force_nd
 
-def rescale_force_params(omegas: np.ndarray, amp: float, phase: float, offset: float,
-                         gamma: float, d: float, k_sp: float, chi_hb: float,
-                         k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
+def irescale_f_params(omegas: np.ndarray, amp: float, phase: float, offset: float,
+                      gamma: float, d: float, k_sp: float, chi_hb: float,
+                      k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
     """
     Rescale the stimulus force parameters from dimensional -> non-dimensional
     :param amp: amplitude
