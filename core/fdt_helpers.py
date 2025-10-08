@@ -1,3 +1,5 @@
+from typing import Union
+
 import scipy as sp
 import numpy as np
 import torch
@@ -106,24 +108,62 @@ def force(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float
         sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
     return sf_batches
 
-def auto_corr(x: np.ndarray) -> np.ndarray:
+def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
     """
     Returns the (normalized) auto-correlation function <X(t) X(0)> for the time series data
     :param x: the time series data
+    :param d: the dimension of the time series data; if d > 1, returns the average auto-correlation function
     :return: the auto-correlation function
     """
-    x = x - np.mean(x)
-    xf = sp.fft.rfft(x, n=2*len(x))
-    acf = sp.fft.irfft(np.abs(xf)**2)[:len(x)]
+    if d == 1:
+        xf = sp.fft.rfft(x - np.mean(x), n=2*len(x))
+        acf = sp.fft.irfft(np.abs(xf)**2)[:len(x)]
+    else:
+        xf = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), n=2*len(x), axis=1)
+        acf = sp.fft.irfft(np.abs(xf)**2, axis=1)[:len(x)]
+        acf = np.mean(acf, axis=0)
     return acf / acf[0]
 
-def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
+def psd(x: np.ndarray, int_freqs: np.ndarray, n: int, dt: float, d: int = 1, onesided: bool = True, angular: bool = False) -> np.ndarray:
+    """
+    Returns the power spectral density (PSD) of the input signal x; if d > 1 then returns the average PSD
+    :param x: the input signal (shape = (n, d))
+    :param int_freqs: the interpolation frequencies
+    :param n: number of sampling points (i.e. len(x))
+    :param dt: the time step
+    :param d: the number of input signals
+    :param onesided: whether to return onesided PSD
+    :param angular: whether to return angular PSD
+    :return: the PSD
+    """
+    angular_factor = 2 * np.pi if angular else 1
+    onesided_factor = 2 if onesided else 1
+    if d == 1:
+        x_fft = sp.fft.rfft(x - np.mean(x))
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[0])
+        s_gen[0] /= 2
+        if len(x) % 2 == 0:
+            s_gen[-1] /= 2
+    else:
+        x_fft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[0])
+        s_gen[0] /= 2
+        if len(x) % 2 == 0:
+            s_gen[-1] /= 2
+        s_gen = np.mean(s_gen, axis=0)
+    s = np.zeros(len(int_freqs), dtype=float)
+    freqs = sp.fft.rfftfreq(n, dt)
+    for i in range(len(int_freqs)):
+        index = np.argmin(np.abs(freqs - int_freqs[i]))
+        s[i] = s_gen[index]
+    return s
+
+'''def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x
     :param x: the time series input signal
     :param n: the number of sampling points
     :param dt: the time step
-    :param fs: frequency spacing
     :param int_freqs: the frequencies to interpolate the PSD with
     :param welch: whether to use Welch's method
     :param nperseg: length of each segment if using Welch's method
@@ -151,19 +191,35 @@ def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray, welch: bool = F
         for i in range(len(int_freqs)):
             index = np.argmin(np.abs(freqs - int_freqs[i]))
             s[i] = s_gen[index]
-    return s
+    return s'''
 
-def chi_ft(x: np.ndarray, force: np.ndarray) -> np.ndarray:
+def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: float = None) -> Union[np.ndarray, complex]:
     """
-    Returns the linear response function (in frequency space) for the time series data in response to a stimulus force at different frequencies
-    :param x: the time series data; n x m array: n = number of simulations, m = number of time steps
-    :param force: the stimulus forces; n x m array: n = number of simulations, m = number of time steps
-    :return: the linear response function (in frequency space)
+    Returns the linear response function for an input signal x in response to a stimulus force f
+    :param x: input signal
+    :param f: the stimulus forces
+    :param d: the number of input signals
+    :param omega: the frequency to evaluate chi at
+    :param dt: the time step (needed if omega is not None)
+    :return: the linear response function
     """
-    # compute the Fourier Transform
-    x_ft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
-    force_ft = sp.fft.rfft(force - np.mean(force, axis=1, keepdims=True), axis=1)
-    chi = x_ft / force_ft # n x m array
+    if x.shape != f.shape:
+        raise ValueError('x and f must have the same shape')
+    if d == 1:
+        x_ft = sp.fft.rfft(x - np.mean(x))
+        force_ft = sp.fft.rfft(f - np.mean(f))
+        chi = x_ft / force_ft
+    else:
+        x_ft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
+        force_ft = sp.fft.rfft(f - np.mean(f), axis=1)
+        chi = x_ft / force_ft
+        chi = np.mean(chi, axis=0)
+    if omega is not None:
+        if dt is None:
+            raise ValueError('must provide a time step if provided a frequency to evaluate at')
+        freqs = sp.fft.rfftfreq(x.shape[-1], dt)
+        index = np.argmin(np.abs(2 * np.pi * freqs - omega))
+        return chi[index]
     return chi
 
 def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, onesided: bool = True) -> np.ndarray:
