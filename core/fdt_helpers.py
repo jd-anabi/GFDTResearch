@@ -203,8 +203,8 @@ def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: fl
     :param dt: the time step (needed if omega is not None)
     :return: the linear response function
     """
-    if x.shape != f.shape:
-        raise ValueError('x and f must have the same shape')
+    if f.shape != 1:
+        raise ValueError('f must be a 1D array')
     if d == 1:
         x_ft = sp.fft.rfft(x - np.mean(x))
         force_ft = sp.fft.rfft(f - np.mean(f))

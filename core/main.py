@@ -109,7 +109,7 @@ if __name__ == '__main__':
 
     # ------------- BEGIN FORCE AND FREQUENCY CALCULATIONS ------------- #
     num_uniq_freqs = 100 # number of unique frequencies
-    freqs_per_batch = 20 # frequencies per batch
+    freqs_per_batch = 100 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
     ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
@@ -132,7 +132,7 @@ if __name__ == '__main__':
                                         hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = nd_f_params[0], nd_f_params[1], nd_f_params[2], nd_f_params[3]
     # ------------- END FORCE AND FREQUENCY CALCULATIONS ------------- #
-    time_seg_ids = gh.get_even_ids(len(t_nd), 30)
+    time_seg_ids = gh.get_even_ids(len(t_nd), 15)
     welch = False # don't use Welch's method for the PSD calculations
     onesided = True # use the one-sided PSD
     angular = False # don't divide the PSD by 2 pi
@@ -174,15 +174,15 @@ if __name__ == '__main__':
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
         x = hmh.rescale_x(x, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb'])
+        x = x[:, :, steady_id:]  # only want to use the steady-state solution
         if iteration == 0:
-            x = x[:, :, steady_id:] # only want to use the steady-state solution
             avg_auto_corr = fh.auto_corr(x[0, :, :], d=ensemble_size)
             avg_psd = fh.psd(x[0, :, :], pos_freqs, n_steady, dt, d=ensemble_size)
             avg_psd_at_omegas = fh.psd(x[0, :, :], omegas, n_steady, dt, d=ensemble_size)
             low_freq = 1
         for freq in range(1, freqs_per_batch):
             abs_driven_freq_id = iteration * freqs_per_batch + freq - 1
-            chi_freq = fh.chi_ft(x[freq, :, :], f_driven[abs_driven_freq_id], d=ensemble_size, omega=omegas[abs_driven_freq_id].item(), dt=dt)
+            chi_freq = fh.chi_ft(x[freq, :, :], f_driven[abs_driven_freq_id, :], d=ensemble_size, omega=omegas[abs_driven_freq_id].item(), dt=dt)
             avg_real_chi[abs_driven_freq_id] = np.real(chi_freq)
             avg_imag_chi[abs_driven_freq_id] = np.imag(chi_freq)
         inits = gh.concat(init_pos, init_probs)
