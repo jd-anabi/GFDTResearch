@@ -132,16 +132,17 @@ if __name__ == '__main__':
                                         hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = nd_f_params[0], nd_f_params[1], nd_f_params[2], nd_f_params[3]
     # ------------- END FORCE AND FREQUENCY CALCULATIONS ------------- #
-    time_seg_ids = gh.get_even_ids(len(t_nd), 15)
+    time_seg_ids = gh.get_even_ids(len(t_nd), 5)
     welch = False # don't use Welch's method for the PSD calculations
     onesided = True # use the one-sided PSD
     angular = False # don't divide the PSD by 2 pi
 
     # instantiate needed values
+    x0 = np.zeros(t[steady_id:].shape[0])
     avg_psd = np.zeros(pos_freqs.shape[0])
     avg_psd_at_omegas = np.zeros(omegas.shape[0])
-    avg_real_chi = np.zeros((num_uniq_freqs - 1, omegas[1:].shape[0]))
-    avg_imag_chi = np.zeros((num_uniq_freqs - 1, omegas[1:].shape[0]))
+    avg_real_chi = np.zeros(num_uniq_freqs - 1)
+    avg_imag_chi = np.zeros(num_uniq_freqs - 1)
     avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
     tiled_phases = np.tile(phases_nd, fh.BATCH_SIZE)  # set up array of phases for each simulation (tiled since total batch size = ensemble size x freqs per batch)
@@ -157,6 +158,7 @@ if __name__ == '__main__':
 
     for iteration in range(iterations):
         low_freq = 0
+        chi_id_offset = -1
         x = np.zeros((fh.BATCH_SIZE, len(t_nd)))
         curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, fh.BATCH_SIZE)
         curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, fh.BATCH_SIZE)
@@ -176,15 +178,20 @@ if __name__ == '__main__':
         x = hmh.rescale_x(x, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb'])
         x = x[:, :, steady_id:]  # only want to use the steady-state solution
         if iteration == 0:
-            avg_auto_corr = fh.auto_corr(x[0, :, :], d=ensemble_size)
-            avg_psd = fh.psd(x[0, :, :], pos_freqs, n_steady, dt, d=ensemble_size)
-            avg_psd_at_omegas = fh.psd(x[0, :, :], omegas, n_steady, dt, d=ensemble_size)
+            x0 = x[0, :, :]
+            avg_auto_corr = fh.auto_corr(x0, d=ensemble_size)
+            avg_psd = fh.psd(x0, pos_freqs, n_steady, dt, d=ensemble_size)
+            avg_psd_at_omegas = fh.psd(x0, omegas, n_steady, dt, d=ensemble_size)
             low_freq = 1
-        for freq in range(1, freqs_per_batch):
-            abs_driven_freq_id = iteration * freqs_per_batch + freq - 1
-            chi_freq = fh.chi_ft(x[freq, :, :], f_driven[abs_driven_freq_id, :], d=ensemble_size, omega=omegas[abs_driven_freq_id].item(), dt=dt)
-            avg_real_chi[abs_driven_freq_id] = np.real(chi_freq)
-            avg_imag_chi[abs_driven_freq_id] = np.imag(chi_freq)
+            chi_id_offset = 0
+        # arguments needed for multiprocessing
+        chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt) for freq in range(low_freq, freqs_per_batch)]
+        with mp.Pool(int(0.75 * mp.cpu_count())) as pool:
+            chis = pool.starmap(fh.chi_ft, chi_args)
+        chi_id_start = iteration * len(chis) + chi_id_offset
+        for chi_id in range(len(chis)):
+            avg_real_chi[chi_id_start + chi_id] = np.real(chis[chi_id])
+            avg_imag_chi[chi_id_start + chi_id] = np.imag(chis[chi_id])
         inits = gh.concat(init_pos, init_probs)
         print(f'Iterations done: {iteration + 1}')
 
@@ -192,14 +199,14 @@ if __name__ == '__main__':
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
     boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * TIME_RS ** 2)
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * TIME_RS**2)
     theta = fh.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, boltzmann_scale=boltzmann_rescale, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
     t = t[steady_id:]
     # preliminary plotting
-    plt.plot(t, x0[0])
+    plt.plot(t, x0[0, :])
     plt.xlabel(r'Time (s)')
     plt.ylabel(r'$x_{0}$ (nm)')
     plt.tight_layout()

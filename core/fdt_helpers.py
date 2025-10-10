@@ -19,8 +19,8 @@ DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torc
 BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.1
-SOSC_MIN_RANGE = 0.9
+SOSC_MAX_RANGE = 1.3
+SOSC_MIN_RANGE = 0.7
 
 def sols(t: np.ndarray, x0: np.ndarray, params: list,
          omegas: np.ndarray, amp: float, phases: np.ndarray, offset: float,
@@ -47,10 +47,8 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list,
         x0 = x0[:, :4]
         sde = steady_nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
         print("Using the steady-state solution for the open-channel probability")
-        print("Hair bundle model has been set up")
     else:
         sde = nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        print("Hair bundle model has been set up")
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
@@ -72,7 +70,6 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list,
             print(e)
             exit()
 
-    print("SDEs have been solved")
     return sol.cpu().detach().numpy()
 
 def gen_freqs(omega_0: float, n: int = BATCH_SIZE) -> np.ndarray:
@@ -116,11 +113,11 @@ def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
     :return: the auto-correlation function
     """
     if d == 1:
-        xf = sp.fft.rfft(x - np.mean(x), n=2*len(x))
-        acf = sp.fft.irfft(np.abs(xf)**2)[:len(x)]
+        xf = sp.fft.rfft(x - np.mean(x), n=2*x.shape[1])
+        acf = sp.fft.irfft(np.abs(xf)**2)[:x.shape[1]]
     else:
-        xf = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), n=2*len(x), axis=1)
-        acf = sp.fft.irfft(np.abs(xf)**2, axis=1)[:len(x)]
+        xf = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), n=2*x.shape[1], axis=1)
+        acf = sp.fft.irfft(np.abs(xf)**2, axis=1)[:x.shape[1]]
         acf = np.mean(acf, axis=0)
     return acf / acf[0]
 
@@ -140,13 +137,13 @@ def psd(x: np.ndarray, int_freqs: np.ndarray, n: int, dt: float, d: int = 1, one
     onesided_factor = 2 if onesided else 1
     if d == 1:
         x_fft = sp.fft.rfft(x - np.mean(x))
-        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[0])
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[1])
         s_gen[0] /= 2
         if len(x) % 2 == 0:
             s_gen[-1] /= 2
     else:
         x_fft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
-        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[0])
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[1])
         s_gen[0] /= 2
         if len(x) % 2 == 0:
             s_gen[-1] /= 2
@@ -158,41 +155,6 @@ def psd(x: np.ndarray, int_freqs: np.ndarray, n: int, dt: float, d: int = 1, one
         s[i] = s_gen[index]
     return s
 
-'''def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray, welch: bool = False, nperseg: float = None, onesided: bool = True, angular: bool = True) -> np.ndarray:
-    """
-    Returns the power spectral density (PSD) of the input signal x
-    :param x: the time series input signal
-    :param n: the number of sampling points
-    :param dt: the time step
-    :param int_freqs: the frequencies to interpolate the PSD with
-    :param welch: whether to use Welch's method
-    :param nperseg: length of each segment if using Welch's method
-    :param onesided: whether to use one-sided PSD or not
-    :param angular: whether to use angular PSD or not
-    :return: the power spectral density
-    """
-    angular_factor = 2 * np.pi if angular else 1
-    fs = 1 / dt
-    if welch:
-        if nperseg is None:
-            nperseg = len(x) // 4
-        freqs, s = sp.signal.welch(x, fs=fs, nperseg=nperseg, scaling='density', return_onesided=onesided)
-        s = np.interp(int_freqs, freqs, s) / angular_factor
-    else:
-        onesided_factor = 2 if onesided else 1
-        x_fft = sp.fft.rfft(x - np.mean(x))
-        s_gen = onesided_factor * np.abs(x_fft)**2 * dt / (angular_factor * x.shape[0])
-        s_gen[0] /= 2
-        if len(x) % 2 == 0:
-            s_gen[-1] /= 2
-        s = np.zeros(len(int_freqs), dtype=float)
-        freqs = sp.fft.rfftfreq(n, dt)
-        #psd = np.interp(ifreqs, freqs, psd_gen) / angular_factor
-        for i in range(len(int_freqs)):
-            index = np.argmin(np.abs(freqs - int_freqs[i]))
-            s[i] = s_gen[index]
-    return s'''
-
 def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: float = None) -> Union[np.ndarray, complex]:
     """
     Returns the linear response function for an input signal x in response to a stimulus force f
@@ -203,7 +165,7 @@ def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: fl
     :param dt: the time step (needed if omega is not None)
     :return: the linear response function
     """
-    if f.shape != 1:
+    if f.ndim != 1:
         raise ValueError('f must be a 1D array')
     if d == 1:
         x_ft = sp.fft.rfft(x - np.mean(x))
@@ -211,7 +173,7 @@ def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: fl
         chi = x_ft / force_ft
     else:
         x_ft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
-        force_ft = sp.fft.rfft(f - np.mean(f), axis=1)
+        force_ft = sp.fft.rfft(f - np.mean(f))
         chi = x_ft / force_ft
         chi = np.mean(chi, axis=0)
     if omega is not None:
