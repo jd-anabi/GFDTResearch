@@ -7,6 +7,7 @@ import torch
 import sdeint as sdeint
 import nondimensional_model as nd_model
 import steady_nondimensional_model as steady_nd_model
+import hair_model_helpers as hmh
 
 if torch.cuda.is_available():
     DEVICE = torch.device('cuda')
@@ -72,6 +73,62 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list,
 
     return sol.cpu().detach().numpy()
 
+def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
+                  x_rescale_params: list, t_rescale_params: list,
+                  steady_id: float, explicit: bool = True) -> float:
+    """
+    Finds the frequency of spontaneous oscillations for an undriven hair bundle given a set of parameters and initial conditions
+    :param t: time array
+    :param x0: the initial conditions of each simulation
+    :param params: the parameters to use in the for the non-dimensional hair bundle constructor
+    :param x_rescale_params: the parameters to use for scaling the data
+    :param t_rescale_params: the parameters to use for scaling the time
+    :param steady_id: the index of the steady-state solution slice
+    :param explicit: whether to use the explicit Euler-Maruyama method
+    :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
+    """
+    device = torch.device('cpu')
+
+    # check if we are using the steady-state solution
+    if params[3] == 0:
+        x0 = x0[:, :4]
+        sde = steady_nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, sde_type=SDE_TYPES[0], batch_size=1, device=device, dtype=DTYPE).to(device)
+        print("Using the steady-state solution for the open-channel probability")
+    else:
+        sde = nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, sde_type=SDE_TYPES[0], batch_size=1, device=device, dtype=DTYPE).to(device)
+
+    # setting up initial conditions
+    x0s = torch.tensor(x0, dtype=DTYPE, device=device)
+
+    # time array
+    n = len(t)
+    ts = [t[0], t[-1]]
+
+    # solving a system of SDEs and implementing a progress bar (this is cool fyi)
+    solver = sdeint.Solver()
+    sol = torch.zeros((n, 1, x0.shape[1]), dtype=DTYPE, device=device)
+    with torch.no_grad():
+        try:
+            if explicit:
+                sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
+            else:
+                sol = solver.implicit_euler(sde, x0s, ts, n)
+        except (Warning, Exception) as e:
+            print(e)
+            exit()
+
+    result = sol.cpu().detach().numpy() # shape: (len(t), 1, x0.shape[1])
+    x = result[:, 0, 0]
+    x = hmh.rescale_x(x, *x_rescale_params)
+    t = hmh.rescale_t(t, *t_rescale_params)
+    x = x[steady_id:]
+    t = t[steady_id:]
+    dt = t[1] - t[0] if t.shape[0] != 1 else 0
+    freqs = sp.fft.rfftfreq(x.shape[0], dt)
+    xf = sp.fft.rfft(x - np.mean(x), x.shape[0])
+    sosc_id = np.argmax(xf)
+    return freqs[sosc_id]
+
 def gen_freqs(omega_0: float, n: int = BATCH_SIZE) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
@@ -117,11 +174,11 @@ def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
         acf = sp.fft.irfft(np.abs(xf)**2)[:x.shape[1]]
     else:
         xf = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), n=2*x.shape[1], axis=1)
-        acf = sp.fft.irfft(np.abs(xf)**2, axis=1)[:x.shape[1]]
+        acf = sp.fft.irfft(np.abs(xf)**2, axis=1)[:, :x.shape[1]]
         acf = np.mean(acf, axis=0)
     return acf / acf[0]
 
-def psd(x: np.ndarray, int_freqs: np.ndarray, n: int, dt: float, d: int = 1, onesided: bool = True, angular: bool = False) -> np.ndarray:
+def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray = None, d: int = 1, onesided: bool = True, angular: bool = False) -> np.ndarray:
     """
     Returns the power spectral density (PSD) of the input signal x; if d > 1 then returns the average PSD
     :param x: the input signal (shape = (n, d))
@@ -137,13 +194,13 @@ def psd(x: np.ndarray, int_freqs: np.ndarray, n: int, dt: float, d: int = 1, one
     onesided_factor = 2 if onesided else 1
     if d == 1:
         x_fft = sp.fft.rfft(x - np.mean(x))
-        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[1])
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[-1])
         s_gen[0] /= 2
         if len(x) % 2 == 0:
             s_gen[-1] /= 2
     else:
         x_fft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
-        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[1])
+        s_gen = onesided_factor * np.abs(x_fft) ** 2 * dt / (angular_factor * x.shape[-1])
         s_gen[0] /= 2
         if len(x) % 2 == 0:
             s_gen[-1] /= 2

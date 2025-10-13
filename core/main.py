@@ -71,8 +71,6 @@ if __name__ == '__main__':
     phase = forcing_amps[1]
     offset = forcing_amps[2]
 
-    # read user input for driving frequency center
-    omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
     # -------------------------- END SETUP -------------------------- #
 
     # ------------- BEGIN RESCALING CALCULATIONS ------------- #
@@ -82,10 +80,15 @@ if __name__ == '__main__':
     ts = (0, t_max_nd)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
+    time_seg_ids = gh.get_even_ids(len(t_nd), 10)
+
+    # recaling parameters needed for time and data
+    t_rescale_params = [hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
+                        hb_rescale_params['s_max_nd'], hb_rescale_params['chi_a']]
+    x_rescale_params = hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb']
 
     # rescale time to dimensional
-    t = hmh.rescale_t(t_nd, hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
-                          hb_rescale_params['s_max_nd'], hb_rescale_params['chi_a'])
+    t = hmh.rescale_t(t_nd, *t_rescale_params)
 
     # rescale time from ms -> s
     t_s = TIME_RS * t # rescale from ms -> s
@@ -108,8 +111,25 @@ if __name__ == '__main__':
     # ------------- END RESCALING CALCULATIONS ------------- #
 
     # ------------- BEGIN FORCE AND FREQUENCY CALCULATIONS ------------- #
+    # get frequency of spontaneous oscillation
+    low_pos = hmh.irescale_x(0, *x_rescale_params)
+    high_pos = hmh.irescale_x(10, *x_rescale_params)
+    init_pos = np.random.randint(0, 10, size=(1, 2))
+    init_probs = np.random.randint(0, 1, size=(1, 3))
+    inits = gh.concat(init_pos, init_probs)  # size: (1, 5)
+
+    dt_0 = 1e-3
+    n_0 = int((ts[-1] - ts[0]) / dt_0)
+    t_0 = np.linspace(ts[0], ts[-1], n_0)
+    steady_id_0 = int(0.7 * len(t_0))
+    args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, n_steady)
+    omega_center = 2 * np.pi * fh.get_sosc_freq(*args_list)
+    print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi)} Hz')
+    #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
+
+    # ensemble variables needed
     num_uniq_freqs = 100 # number of unique frequencies
-    freqs_per_batch = 100 # frequencies per batch
+    freqs_per_batch = 50 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
     ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
@@ -132,7 +152,6 @@ if __name__ == '__main__':
                                         hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = nd_f_params[0], nd_f_params[1], nd_f_params[2], nd_f_params[3]
     # ------------- END FORCE AND FREQUENCY CALCULATIONS ------------- #
-    time_seg_ids = gh.get_even_ids(len(t_nd), 5)
     welch = False # don't use Welch's method for the PSD calculations
     onesided = True # use the one-sided PSD
     angular = False # don't divide the PSD by 2 pi
@@ -150,8 +169,6 @@ if __name__ == '__main__':
     args_list = (t_nd, x0, list(params), tiled_omegas, amp_nd, tiled_phases, offset_nd)  # parameters
 
     # initial conditions for first batch
-    low_pos = hmh.irescale_x(0, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb'])
-    high_pos = hmh.irescale_x(10, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb'])
     init_pos = np.random.randint(0, 10, size=(fh.BATCH_SIZE, 2))
     init_probs = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 3))
     inits = gh.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
@@ -175,13 +192,13 @@ if __name__ == '__main__':
             print(f"Time segment {tid + 1} for iteration {iteration + 1} done")
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
-        x = hmh.rescale_x(x, hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb'])
+        x = hmh.rescale_x(x, *x_rescale_params)
         x = x[:, :, steady_id:]  # only want to use the steady-state solution
         if iteration == 0:
             x0 = x[0, :, :]
             avg_auto_corr = fh.auto_corr(x0, d=ensemble_size)
-            avg_psd = fh.psd(x0, pos_freqs, n_steady, dt, d=ensemble_size)
-            avg_psd_at_omegas = fh.psd(x0, omegas, n_steady, dt, d=ensemble_size)
+            avg_psd = fh.psd(x0, n_steady, dt, int_freqs=pos_freqs, d=ensemble_size)
+            avg_psd_at_omegas = fh.psd(x0, n_steady, dt, int_freqs=(omegas / (2 * np.pi)), d=ensemble_size)
             low_freq = 1
             chi_id_offset = 0
         # arguments needed for multiprocessing
