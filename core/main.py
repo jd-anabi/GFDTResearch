@@ -129,7 +129,7 @@ if __name__ == '__main__':
 
     # ensemble variables needed
     num_uniq_freqs = 100 # number of unique frequencies
-    freqs_per_batch = 50 # frequencies per batch
+    freqs_per_batch = 100 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
     ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
@@ -203,8 +203,10 @@ if __name__ == '__main__':
             chi_id_offset = 0
         # arguments needed for multiprocessing
         chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt) for freq in range(low_freq, freqs_per_batch)]
+        #chi_args = [(np.max(x[freq, :, :], axis=1, keepdims=True) - np.mean(x[freq, :, :], axis=1, keepdims=True), amp) for freq in range(low_freq, freqs_per_batch)]
+        #chi_args = [(t, x[freq, :, :], f[iteration * freqs_per_batch + freq, :], omegas[iteration * freqs_per_batch + freq - 1].item(), t[-1]) for freq in range(low_freq, freqs_per_batch)]
         with mp.Pool(int(0.75 * mp.cpu_count())) as pool:
-            chis = pool.starmap(fh.chi_ft, chi_args)
+            chis = pool.starmap(fh.chi, chi_args)
         chi_id_start = iteration * len(chis) + chi_id_offset
         for chi_id in range(len(chis)):
             avg_real_chi[chi_id_start + chi_id] = np.real(chis[chi_id])
@@ -247,7 +249,7 @@ if __name__ == '__main__':
     plt.plot(omegas, avg_psd_at_omegas)
     plt.xlabel(r'Angular frequency (rad/s)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 5)
+    plt.xlim(0, omegas[-1])
     plt.tight_layout()
     plt.show()
 

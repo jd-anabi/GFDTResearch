@@ -212,7 +212,7 @@ def psd(x: np.ndarray, n: int, dt: float, int_freqs: np.ndarray = None, d: int =
         s[i] = s_gen[index]
     return s
 
-def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: float = None) -> Union[np.ndarray, complex]:
+def chi(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: float = None) -> Union[np.ndarray, complex]:
     """
     Returns the linear response function for an input signal x in response to a stimulus force f
     :param x: input signal
@@ -227,19 +227,55 @@ def chi_ft(x: np.ndarray, f: np.ndarray, d: int = 1, omega: float = None, dt: fl
     if d == 1:
         x_ft = sp.fft.rfft(x - np.mean(x))
         force_ft = sp.fft.rfft(f - np.mean(f))
-        chi = x_ft / force_ft
+        chi_ft = x_ft / force_ft
     else:
         x_ft = sp.fft.rfft(x - np.mean(x, axis=1, keepdims=True), axis=1)
         force_ft = sp.fft.rfft(f - np.mean(f))
-        chi = x_ft / force_ft
-        chi = np.mean(chi, axis=0)
+        chi_ft = x_ft / force_ft
+        chi_ft = np.mean(chi_ft, axis=0)
     if omega is not None:
         if dt is None:
             raise ValueError('must provide a time step if provided a frequency to evaluate at')
         freqs = sp.fft.rfftfreq(x.shape[-1], dt)
         index = np.argmin(np.abs(2 * np.pi * freqs - omega))
-        return chi[index]
-    return chi
+        return chi_ft[index]
+    return chi_ft
+
+def chi_theory(x_amp: np.ndarray, f_amp: float) -> complex:
+    """
+    Returns the theoretical linear response function for an input signal x in response to a stimulus force f
+    :param x_amp: the amplitude of the input signal; if x_amp.shape[0] > 0, this is an array of the amplitudes for each signal in the ensemble
+    :param f_amp: the amplitude of the stimulus force
+    :return: the theoretical linear response function; averaged if x_amp.shape[0] > 1
+    """
+    chi_val = np.mean(np.array([-1j * x_amp[i] / f_amp for i in range(x_amp.shape[0])], dtype=complex), dtype=complex)
+    return chi_val
+
+def chi_lock(t: np.ndarray, x: np.ndarray, f: np.ndarray, omega: float, t_max: float) -> complex:
+    """
+    Returns the linear response function for an input signal x in response to a stimulus force f using the lock-in method
+    :param t: time
+    :param x: input signal
+    :param f: the stimulus forces
+    :param omega: the frequency to evaluate chi at
+    :param t_max: the simulation time
+    :return: the linear response function evaluated at omega
+    """
+    delta_t = t[1] - t[0]
+    delta_x = x - np.mean(x, axis=-1, keepdims=True)
+    delta_f = f - np.mean(f)
+    f_0 = np.max(delta_f)
+    chi_real = np.zeros(x.shape[0], dtype=float)
+    chi_imag = np.zeros(x.shape[0], dtype=float)
+    for i in range(x.shape[0]):
+        for j in range(t.shape[0]):
+            chi_real[i] += delta_x[j, i] * np.cos(omega * t[i]) * delta_t
+            chi_imag[i] += delta_x[j, i] * np.sin(omega * t[i]) * delta_t
+    chi_real *= 2 / (f_0 * t_max)
+    chi_imag *= 2 / (f_0 * t_max)
+    chi_real = np.mean(chi_real, dtype=float)
+    chi_imag = np.mean(chi_imag, dtype=float)
+    return chi_real + 1j * chi_imag
 
 def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, onesided: bool = True) -> np.ndarray:
     """

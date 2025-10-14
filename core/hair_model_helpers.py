@@ -57,7 +57,7 @@ def irescale_f_params(omegas: np.ndarray, amp: float, phase: float, offset: floa
                       gamma: float, d: float, k_sp: float, chi_hb: float,
                       k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
     """
-    Rescale the stimulus force parameters from dimensional -> non-dimensional
+    Rescale the stimulus force (sinusoidal force)  parameters from dimensional -> non-dimensional
     :param amp: amplitude
     :param omegas: frequencies
     :param phase: phase
