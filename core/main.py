@@ -89,11 +89,8 @@ if __name__ == '__main__':
 
     # rescale time to dimensional
     t = hmh.rescale_t(t_nd, *t_rescale_params)
-
-    # rescale time from ms -> s
-    t_s = TIME_RS * t # rescale from ms -> s
+    t_s = TIME_RS * t  # rescale from ms -> s
     dt = float(t[1] - t[0]) # rescale dt
-    fs = 1 / dt
 
     # steady-state index for analysis later
     steady_id = int(0.7 * len(t))
@@ -121,15 +118,15 @@ if __name__ == '__main__':
     dt_0 = 1e-3
     n_0 = int((ts[-1] - ts[0]) / dt_0)
     t_0 = np.linspace(ts[0], ts[-1], n_0)
-    steady_id_0 = int(0.7 * len(t_0))
-    args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, n_steady)
+    #steady_id_0 = int(0.7 * len(t_0))
+    args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, steady_id)
     omega_center = 2 * np.pi * fh.get_sosc_freq(*args_list)
     print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi)} Hz')
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 100 # number of unique frequencies
-    freqs_per_batch = 100 # frequencies per batch
+    num_uniq_freqs = 500 # number of unique frequencies
+    freqs_per_batch = 50 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
     ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
@@ -143,7 +140,7 @@ if __name__ == '__main__':
     # find which index in the array of driving frequencies corresponds to omega_center
     omegas = fh.gen_freqs(omega_center, num_uniq_freqs) # generate frequencies
     omega_center_id = np.argmax(omegas == omega_center)
-    nd_f_params = hmh.irescale_f_params(omegas / TIME_RS, amp, phase, offset,
+    nd_f_params = hmh.irescale_f_params(omegas, amp, phase, offset,
                                         hb_rescale_params['gamma'], hb_rescale_params['d'],
                                         hb_rescale_params['k_sp'],
                                         hb_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'],
@@ -242,7 +239,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 3)
+    plt.xlim(0, 1.1 * omega_center / (2 * np.pi))
     plt.tight_layout()
     plt.show()
 
