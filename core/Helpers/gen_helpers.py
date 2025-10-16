@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def get_even_ids(l: int, n: int) -> list:
     """
     Get evenly spaced indices from an array

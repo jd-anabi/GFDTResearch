@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import scipy as sp
 
 from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
+from core.Simulator import simulator
 
 TIME_RS = 1e-3  # ms -> s
 PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
@@ -123,10 +124,10 @@ if __name__ == '__main__':
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 500 # number of unique frequencies
-    freqs_per_batch = 10 # frequencies per batch
+    num_uniq_freqs = 100 # number of unique frequencies
+    freqs_per_batch = 50 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
-    ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
+    ensemble_size = simulator.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
     # calculate stimulus force position (both models)
     f = fh.force(t, amp, omega_center, phase, offset, num_uniq_freqs)
@@ -159,22 +160,25 @@ if __name__ == '__main__':
     avg_imag_chi = np.zeros(num_uniq_freqs - 1)
     avg_auto_corr = np.zeros(t[steady_id:].shape[0])
 
-    tiled_phases = np.tile(phases_nd, fh.BATCH_SIZE)  # set up array of phases for each simulation (tiled since total batch size = ensemble size x freqs per batch)
-    tiled_omegas = np.tile(omegas_nd, fh.BATCH_SIZE)  # set up array of omegas for each simulation
+    tiled_phases = np.tile(phases_nd, simulator.BATCH_SIZE)  # set up array of phases for each simulation (tiled since total batch size = ensemble size x freqs per batch)
+    tiled_omegas = np.tile(omegas_nd, simulator.BATCH_SIZE)  # set up array of omegas for each simulation
     args_list = (t_nd, x0, list(params), tiled_omegas, amp_nd, tiled_phases, offset_nd)  # parameters
 
     # initial conditions for first batch
-    init_pos = np.random.randint(0, 10, size=(fh.BATCH_SIZE, 2))
-    init_probs = np.random.randint(0, 1, size=(fh.BATCH_SIZE, 3))
+    init_pos = np.random.randint(0, 10, size=(simulator.BATCH_SIZE, 2))
+    init_probs = np.random.randint(0, 1, size=(simulator.BATCH_SIZE, 3))
     inits = gh.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
 
     for iteration in range(iterations):
+        print(f"Iteration: {iteration + 1}")
         low_freq = 0
         chi_id_offset = -1
-        x = np.zeros((fh.BATCH_SIZE, len(t_nd)))
-        curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, fh.BATCH_SIZE)
-        curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, fh.BATCH_SIZE)
-        for tid in range(len(time_seg_ids) - 1):
+        #x = np.zeros((fh.BATCH_SIZE, len(t_nd)))
+        curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
+        curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
+        force_params = [curr_batch_omegas, curr_batch_phases, amp_nd, offset_nd]
+        x = simulator.sim(t_nd, inits, list(params), force_params, 1, simulator.BATCH_SIZE, freqs_per_batch)[0]
+        '''for tid in range(len(time_seg_ids) - 1):
             curr_time = t_nd[time_seg_ids[tid]:time_seg_ids[tid + 1]]
             args_list = (curr_time, inits, list(params), curr_batch_omegas, amp_nd, curr_batch_phases, offset_nd)
             results = fh.sols(*args_list) # shape: (len(curr_time), BATCH_SIZE, number of variables)
@@ -184,7 +188,7 @@ if __name__ == '__main__':
 
             # extract position data
             x[:, time_seg_ids[tid]:time_seg_ids[tid + 1]] = results[:, :, 0].T # shape: (BATCH_SIZE, len(curr_time))
-            print(f"Time segment {tid + 1} for iteration {iteration + 1} done")
+            print(f"Time segment {tid + 1} for iteration {iteration + 1} done")'''
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
         x = hmh.rescale_x(x, *x_rescale_params)
@@ -207,7 +211,6 @@ if __name__ == '__main__':
             avg_real_chi[chi_id_start + chi_id] = np.real(chis[chi_id])
             avg_imag_chi[chi_id_start + chi_id] = np.imag(chis[chi_id])
         inits = gh.concat(init_pos, init_probs)
-        print(f'Iterations done: {iteration + 1}')
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response

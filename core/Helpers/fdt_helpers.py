@@ -4,73 +4,13 @@ import scipy as sp
 import numpy as np
 import torch
 
-import sdeint as sdeint
+from core.Solvers import sdeint
 from core.Models import nondimensional_model as nd_model, steady_nondimensional_model as steady_nd_model
-import hair_model_helpers as hmh
+from core.Helpers import hair_model_helpers as hmh
 
-if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
-elif torch.backends.mps.is_available():
-    DEVICE = torch.device('mps')
-else:
-    DEVICE = torch.device('cpu')
-
-DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
-SDE_TYPES = ['ito', 'stratonovich']
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.3
 SOSC_MIN_RANGE = 0.7
-
-def sols(t: np.ndarray, x0: np.ndarray, params: list,
-         omegas: np.ndarray, amp: float, phases: np.ndarray, offset: float,
-         explicit: bool = True) -> np.ndarray:
-    """
-    Returns sde solution for a hair bundle given a set of parameters and initial conditions
-    :param t: time array
-    :param x0: the initial conditions of each simulation
-    :param params: the parameters to use in the for the non-dimensional hair bundle constructor
-    :param omegas: the frequencies to drive the simulations at
-    :param amp: the amplitude to drive the simulations at
-    :param phases: the phases to drive the simulations at
-    :param offset: the offset to drive the simulations at
-    :param explicit: whether to use the explicit Euler-Maruyama method
-    :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
-    """
-    if DEVICE.type == 'cuda' or DEVICE.type == 'mps':
-        print("Using GPU")
-    else:
-        print("Using CPU")
-
-    # check if we are using the steady-state solution
-    if params[3] == 0:
-        x0 = x0[:, :4]
-        sde = steady_nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        print("Using the steady-state solution for the open-channel probability")
-    else:
-        sde = nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-
-    # setting up initial conditions
-    x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
-
-    # time array
-    n = len(t)
-    ts = [t[0], t[-1]]
-
-    # solving a system of SDEs and implementing a progress bar (this is cool fyi)
-    solver = sdeint.Solver()
-    sol = torch.zeros((n, BATCH_SIZE, x0.shape[1]), dtype=DTYPE, device=DEVICE)
-    with torch.no_grad():
-        try:
-            if explicit:
-                sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
-            else:
-                sol = solver.implicit_euler(sde, x0s, ts, n)
-        except (Warning, Exception) as e:
-            print(e)
-            exit()
-
-    return sol.cpu().detach().numpy()
 
 def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
                   x_rescale_params: list, t_rescale_params: list,
@@ -87,17 +27,18 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     device = torch.device('cpu')
+    dtype = torch.float64 if device.type == 'cuda' or device.type == 'cpu' else torch.float32
 
     # check if we are using the steady-state solution
     if params[3] == 0:
         x0 = x0[:, :4]
-        sde = steady_nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, sde_type=SDE_TYPES[0], batch_size=1, device=device, dtype=DTYPE).to(device)
+        sde = steady_nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
         print("Using the steady-state solution for the open-channel probability")
     else:
-        sde = nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, sde_type=SDE_TYPES[0], batch_size=1, device=device, dtype=DTYPE).to(device)
+        sde = nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
 
     # setting up initial conditions
-    x0s = torch.tensor(x0, dtype=DTYPE, device=device)
+    x0s = torch.tensor(x0, dtype=dtype, device=device)
 
     # time array
     n = len(t)
@@ -105,7 +46,7 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
 
     # solving a system of SDEs and implementing a progress bar (this is cool fyi)
     solver = sdeint.Solver()
-    sol = torch.zeros((n, 1, x0.shape[1]), dtype=DTYPE, device=device)
+    sol = torch.zeros((n, 1, x0.shape[1]), dtype=dtype, device=device)
     with torch.no_grad():
         try:
             if explicit:
@@ -128,7 +69,7 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     sosc_id = np.argmax(xf)
     return freqs[sosc_id]
 
-def gen_freqs(omega_0: float, n: int = BATCH_SIZE) -> np.ndarray:
+def gen_freqs(omega_0: float, n: int = 5000) -> np.ndarray:
     """
     Returns an array of driving frequencies around omega_0
     :param omega_0: the frequency to generate the array around
@@ -144,7 +85,7 @@ def gen_freqs(omega_0: float, n: int = BATCH_SIZE) -> np.ndarray:
     omegas = np.sort(omegas)
     return np.unique(omegas)
 
-def force(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n: int = BATCH_SIZE) -> np.ndarray:
+def force(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n: int = 5000) -> np.ndarray:
     """
     Returns the stimulus force position at times t
     :param t: time
