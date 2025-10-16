@@ -8,9 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
 
-import fdt_helpers as fh
-import hair_model_helpers as hmh
-import gen_helpers as gh
+from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
 
 TIME_RS = 1e-3  # ms -> s
 PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
@@ -126,7 +124,7 @@ if __name__ == '__main__':
 
     # ensemble variables needed
     num_uniq_freqs = 500 # number of unique frequencies
-    freqs_per_batch = 50 # frequencies per batch
+    freqs_per_batch = 10 # frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
     ensemble_size = fh.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 

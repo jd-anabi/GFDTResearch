@@ -5,8 +5,7 @@ import numpy as np
 import torch
 
 import sdeint as sdeint
-import nondimensional_model as nd_model
-import steady_nondimensional_model as steady_nd_model
+from core.Models import nondimensional_model as nd_model, steady_nondimensional_model as steady_nd_model
 import hair_model_helpers as hmh
 
 if torch.cuda.is_available():
