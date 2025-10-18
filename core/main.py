@@ -4,6 +4,8 @@ import sys
 from typing import Dict
 import multiprocessing as mp
 
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
@@ -79,7 +81,8 @@ if __name__ == '__main__':
     ts = (0, t_max_nd)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
-    time_seg_ids = gh.get_even_ids(len(t_nd), 10)
+    n_time_segs = 4
+    time_seg_ids = gh.get_even_ids(len(t_nd), n_time_segs + 1)
 
     # recaling parameters needed for time and data
     t_rescale_params = [hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
@@ -124,10 +127,10 @@ if __name__ == '__main__':
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 100 # number of unique frequencies
-    freqs_per_batch = 50 # frequencies per batch
+    num_uniq_freqs = 1000 # number of unique frequencies
+    ensemble_size = 100 # ensemble size for each frequency
+    freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
-    ensemble_size = simulator.BATCH_SIZE // freqs_per_batch # ensemble size for each frequency
 
     # calculate stimulus force position (both models)
     f = fh.force(t, amp, omega_center, phase, offset, num_uniq_freqs)
@@ -177,7 +180,7 @@ if __name__ == '__main__':
         curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
         curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
         force_params = [curr_batch_omegas, curr_batch_phases, amp_nd, offset_nd]
-        x = simulator.sim(t_nd, inits, list(params), force_params, 1, simulator.BATCH_SIZE, freqs_per_batch)[0]
+        x = simulator.sim(t_nd, inits, list(params), force_params, n_time_segs, simulator.BATCH_SIZE, freqs_per_batch)[0]
         '''for tid in range(len(time_seg_ids) - 1):
             curr_time = t_nd[time_seg_ids[tid]:time_seg_ids[tid + 1]]
             args_list = (curr_time, inits, list(params), curr_batch_omegas, amp_nd, curr_batch_phases, offset_nd)

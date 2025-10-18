@@ -1,6 +1,6 @@
-numpy==2.3.4
-torch==2.7.1+cu128
-scipy==1.16.2
-sdeint==0.3.0
-matplotlib==3.10.7
+numpy==2.0.1
+scipy==1.16.0
+matplotlib==3.10.6
 tqdm==4.67.1
+sympy==1.14.0
+pytorch==2.5.1
