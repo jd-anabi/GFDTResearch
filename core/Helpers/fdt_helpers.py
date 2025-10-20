@@ -9,8 +9,8 @@ from core.Models import nondimensional_model as nd_model, steady_nondimensional_
 from core.Helpers import hair_model_helpers as hmh
 
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.3
-SOSC_MIN_RANGE = 0.7
+SOSC_MAX_RANGE = 1.15
+SOSC_MIN_RANGE = 0.85
 
 def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
                   x_rescale_params: list, t_rescale_params: list,

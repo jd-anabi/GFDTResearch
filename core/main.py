@@ -81,7 +81,7 @@ if __name__ == '__main__':
     ts = (0, t_max_nd)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
-    n_time_segs = 4
+    n_time_segs = 9
     time_seg_ids = gh.get_even_ids(len(t_nd), n_time_segs + 1)
 
     # recaling parameters needed for time and data
@@ -127,7 +127,7 @@ if __name__ == '__main__':
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 1000 # number of unique frequencies
+    num_uniq_freqs = 200 # number of unique frequencies
     ensemble_size = 100 # ensemble size for each frequency
     freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)

@@ -13,7 +13,7 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 5000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2000 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 
 def sols(t: np.ndarray, x0: np.ndarray, params: list,
