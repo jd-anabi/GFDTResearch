@@ -35,7 +35,6 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list,
     if params[3] == 0:
         x0 = x0[:, :4]
         sde = steady_nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
-        print("Using the steady-state solution for the open-channel probability")
     else:
         sde = nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
 
@@ -73,6 +72,7 @@ def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force_params: list,
     curr_batch_phases = gh.sde_tile(phases[:freqs_per_batch], ensemble_size, BATCH_SIZE)
     curr_batch_omegas = gh.sde_tile(omegas[freqs_per_batch:freqs_per_batch], ensemble_size, BATCH_SIZE)
     for tid in range(len(time_seg_ids) - 1):
+        print(f"Time segment {tid + 1}:")
         curr_time = t[time_seg_ids[tid]:time_seg_ids[tid + 1]]
         args_list = (curr_time, inits, list(params), curr_batch_omegas, amp, curr_batch_phases, offset)
         results = sols(*args_list) # shape: (len(curr_time), BATCH_SIZE, number of variables)
@@ -82,7 +82,6 @@ def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force_params: list,
 
         # extract position data
         sol[:, :, time_seg_ids[tid]:time_seg_ids[tid + 1]] = results.T # shape: (number of variables, BATCH_SIZE, len(curr_time))
-        print(f"Time segment {tid + 1} done")
     # rescale position data for later
     sol = sol.reshape(inits.shape[1], freqs_per_batch, ensemble_size, len(t)) # shape: (number of variables, freqs_per_batch, ensemble_size, len(curr_time))
     return sol

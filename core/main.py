@@ -13,7 +13,7 @@ import scipy as sp
 from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
 from core.Simulator import simulator
 
-TIME_RS = 1e-3  # ms -> s
+TIME_RS = 1  # s -> s
 PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
 
 if __name__ == '__main__':
@@ -81,7 +81,7 @@ if __name__ == '__main__':
     ts = (0, t_max_nd)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
-    n_time_segs = 9
+    n_time_segs = 5
     time_seg_ids = gh.get_even_ids(len(t_nd), n_time_segs + 1)
 
     # recaling parameters needed for time and data
@@ -91,7 +91,7 @@ if __name__ == '__main__':
 
     # rescale time to dimensional
     t = hmh.rescale_t(t_nd, *t_rescale_params)
-    t_s = TIME_RS * t  # rescale from ms -> s
+    t_s = TIME_RS * t  # rescale time
     dt = float(t[1] - t[0]) # rescale dt
 
     # steady-state index for analysis later
@@ -127,8 +127,8 @@ if __name__ == '__main__':
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 200 # number of unique frequencies
-    ensemble_size = 100 # ensemble size for each frequency
+    num_uniq_freqs = 50 # number of unique frequencies
+    ensemble_size = 200 # ensemble size for each frequency
     freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
 
@@ -173,7 +173,7 @@ if __name__ == '__main__':
     inits = gh.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
 
     for iteration in range(iterations):
-        print(f"Iteration: {iteration + 1}")
+        print(f"\nIteration: {iteration + 1}")
         low_freq = 0
         chi_id_offset = -1
         #x = np.zeros((fh.BATCH_SIZE, len(t_nd)))
@@ -242,14 +242,14 @@ if __name__ == '__main__':
     # Power spectral density
     plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
-    plt.ylabel(r'Power spectral density')
-    plt.xlim(0, 1.1 * omega_center / (2 * np.pi))
+    plt.ylabel(r'Power spectral density ($\frac{\text{nm}^2}{Hz}$)')
+    plt.xlim(0.25 * omega_center / (2 * np.pi), 2 * omega_center / (2 * np.pi))
     plt.tight_layout()
     plt.show()
 
     plt.plot(omegas, avg_psd_at_omegas)
     plt.xlabel(r'Angular frequency (rad/s)')
-    plt.ylabel(r'Power spectral density')
+    plt.ylabel(r'Power spectral density ($\frac{\text{nm}^2}{rad/s}$)')
     plt.xlim(0, omegas[-1])
     plt.tight_layout()
     plt.show()

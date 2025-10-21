@@ -9,8 +9,8 @@ from core.Models import nondimensional_model as nd_model, steady_nondimensional_
 from core.Helpers import hair_model_helpers as hmh
 
 K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
-SOSC_MAX_RANGE = 1.15
-SOSC_MIN_RANGE = 0.85
+SOSC_MAX_RANGE = 1.5
+SOSC_MIN_RANGE = 0.5
 
 def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
                   x_rescale_params: list, t_rescale_params: list,
@@ -33,7 +33,6 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     if params[3] == 0:
         x0 = x0[:, :4]
         sde = steady_nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
-        print("Using the steady-state solution for the open-channel probability")
     else:
         sde = nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
 
@@ -99,7 +98,7 @@ def force(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float
     sf_batches = np.zeros((n, len(t)))
     omegas = gen_freqs(omega_0, n)
     for i in range(n):
-        sf_batches[i] = amp * np.sin(omegas[i] * t + phase) + offset
+        sf_batches[i] = amp * np.cos(omegas[i] * t + phase) + offset
     return sf_batches
 
 def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
