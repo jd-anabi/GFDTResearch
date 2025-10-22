@@ -1,11 +1,13 @@
 import os
 import re
 import sys
+import math
 from typing import Dict
 import multiprocessing as mp
 
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
+import pint
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
@@ -13,16 +15,18 @@ import scipy as sp
 from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
 from core.Simulator import simulator
 
-TIME_RS = 1  # s -> s
-PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
+SN_PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
+PAR_PATTERN = re.compile(r'\((.*?)\)') # use pattern matching to extract value within parentheses
+UNIT_PATTERN = re.compile(r'[a-zA-Z]+') # use pattern matching to extract units within parentheses
 
 if __name__ == '__main__':
     # -------------------------- BEGIN SETUP -------------------------- #
     # parameters and initial conditions
     file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
-    x0 = []
     rescale_file = np.zeros(8, dtype=float)
+    units = []
+    x0 = []
 
     # read hair cell,  force info, and rescaling parameters from txt files
     line = 0
@@ -39,25 +43,42 @@ if __name__ == '__main__':
     file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
-            val = float(re.findall(PATTERN, row.strip())[0])
+            val = float(re.findall(SN_PATTERN, row.strip())[0])
             if line < 5:
                 x0.append(val)
             else:
                 params[line - 5] = val
             line = line + 1
+    parameters: Dict[str, float] = {'tau_hb': params[0].item(), 'tau_m': params[1].item(), 'tau_gs': params[2].item(), 'tau_t': params[3].item(),
+                                    'c_min': params[4].item(), 's_min': params[5].item(), 's_max': params[6].item(), 'ca2_m': params[7].item(),
+                                    'ca2_gs': params[8].item(), 'u_gs_max': params[9].item(), 'delta_e': params[10].item(), 'k_gs_ratio': params[11].item(),
+                                    'chi_hb': params[12].item(), 'chi_a': params[13].item(), 'x_c': params[14].item(), 'eta_hb': params[15].item(),
+                                    'eta_a': params[16].item()}
 
     # rescaling parameters
     line = 0
     file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
     with open(file, mode='r') as txtfile:
         for row in txtfile:
-            val = float(re.findall(PATTERN, row.strip())[0])
+            val = float(re.findall(SN_PATTERN, row.strip())[0])
+            curr_units = [unit for par in re.findall(PAR_PATTERN, row.strip()) for unit in re.findall(UNIT_PATTERN, par)]
             rescale_file[line] = val
+            for unit in curr_units:
+                if unit not in units:
+                    units.append(unit)
             line = line + 1
     hb_rescale_params: Dict[str, float] = {'gamma': rescale_file[0].item(), 'd': rescale_file[1].item(),
                                            'x_sp': rescale_file[2].item(), 'k_sp': rescale_file[3].item(),
                                            'k_gs_max': rescale_file[4].item(), 's_max': rescale_file[5].item(),
                                            't_0': rescale_file[6].item()}
+    # need to construct dictionary now that converts current units to SI units
+    ureg = pint.UnitRegistry()
+    try:
+        factors = [ureg(unit).to_base_units().magnitude for unit in units]
+        rescale_factors: Dict[str, float] = {'distance': factors[0], 'mass': factors[1], 'time': factors[2]}
+    except pint.UndefinedUnitError as e:
+        print(f'Error: {e}. Unrecognized units.')
+        exit()
     # need to add in non-dimensional parameters for rescaling too
     hb_rescale_params.update({'s_max_nd': params[6].item(), 'chi_hb': params[12].item(), 'chi_a': params[13].item()})
 
@@ -66,7 +87,7 @@ if __name__ == '__main__':
     forcing_amps = []
     with open(file, mode='r') as txtfile:
         for row in txtfile:
-            val = float(re.findall(PATTERN, row.strip())[0])
+            val = float(re.findall(SN_PATTERN, row.strip())[0])
             forcing_amps.append(val)
     amp = forcing_amps[0]
     phase = forcing_amps[1]
@@ -81,7 +102,7 @@ if __name__ == '__main__':
     ts = (0, t_max_nd)
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
-    n_time_segs = 5
+    n_time_segs = math.ceil(t_max_nd / 200)
     time_seg_ids = gh.get_even_ids(len(t_nd), n_time_segs + 1)
 
     # recaling parameters needed for time and data
@@ -91,7 +112,6 @@ if __name__ == '__main__':
 
     # rescale time to dimensional
     t = hmh.rescale_t(t_nd, *t_rescale_params)
-    t_s = TIME_RS * t  # rescale time
     dt = float(t[1] - t[0]) # rescale dt
 
     # steady-state index for analysis later
@@ -123,12 +143,12 @@ if __name__ == '__main__':
     #steady_id_0 = int(0.7 * len(t_0))
     args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, steady_id)
     omega_center = 2 * np.pi * fh.get_sosc_freq(*args_list)
-    print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi)} Hz')
+    print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi * rescale_factors['time'])} Hz')
     #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 50 # number of unique frequencies
-    ensemble_size = 200 # ensemble size for each frequency
+    num_uniq_freqs = 30 # number of unique frequencies
+    ensemble_size = 100 # ensemble size for each frequency
     freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
 
@@ -173,25 +193,14 @@ if __name__ == '__main__':
     inits = gh.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
 
     for iteration in range(iterations):
-        print(f"\nIteration: {iteration + 1}")
+        print(f"\nIteration {iteration + 1}: ")
         low_freq = 0
         chi_id_offset = -1
-        #x = np.zeros((fh.BATCH_SIZE, len(t_nd)))
         curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
         curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
         force_params = [curr_batch_omegas, curr_batch_phases, amp_nd, offset_nd]
         x = simulator.sim(t_nd, inits, list(params), force_params, n_time_segs, simulator.BATCH_SIZE, freqs_per_batch)[0]
-        '''for tid in range(len(time_seg_ids) - 1):
-            curr_time = t_nd[time_seg_ids[tid]:time_seg_ids[tid + 1]]
-            args_list = (curr_time, inits, list(params), curr_batch_omegas, amp_nd, curr_batch_phases, offset_nd)
-            results = fh.sols(*args_list) # shape: (len(curr_time), BATCH_SIZE, number of variables)
 
-            # update initial conditions
-            inits = results[-1, :, :]
-
-            # extract position data
-            x[:, time_seg_ids[tid]:time_seg_ids[tid + 1]] = results[:, :, 0].T # shape: (BATCH_SIZE, len(curr_time))
-            print(f"Time segment {tid + 1} for iteration {iteration + 1} done")'''
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
         x = hmh.rescale_x(x, *x_rescale_params)
@@ -203,6 +212,7 @@ if __name__ == '__main__':
             avg_psd_at_omegas = fh.psd(x0, n_steady, dt, int_freqs=(omegas / (2 * np.pi)), d=ensemble_size)
             low_freq = 1
             chi_id_offset = 0
+
         # arguments needed for multiprocessing
         chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt) for freq in range(low_freq, freqs_per_batch)]
         #chi_args = [(np.max(x[freq, :, :], axis=1, keepdims=True) - np.mean(x[freq, :, :], axis=1, keepdims=True), amp) for freq in range(low_freq, freqs_per_batch)]
@@ -215,12 +225,21 @@ if __name__ == '__main__':
             avg_imag_chi[chi_id_start + chi_id] = np.imag(chis[chi_id])
         inits = gh.concat(init_pos, init_probs)
 
+    # rescale everything to SI units
+    t = rescale_factors['time'] * t
+    pos_freqs = pos_freqs / rescale_factors['time']
+    omegas = omegas / rescale_factors['time']
+    x0 = rescale_factors['distance'] * x0
+    avg_psd = rescale_factors['distance']**2 * rescale_factors['time']**2 * avg_psd
+    avg_psd_at_omegas = rescale_factors['distance']**2 * rescale_factors['time']**2 * avg_psd_at_omegas
+    avg_real_chi = rescale_factors['time'] / rescale_factors['mass'] * avg_real_chi
+    avg_imag_chi = rescale_factors['time'] / rescale_factors['mass'] * avg_imag_chi
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    boltzmann_rescale = 1e24 # nm^2 mg s^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (boltzmann_rescale * k_b * params[9].item() * TIME_RS**2)
-    theta = fh.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, boltzmann_scale=boltzmann_rescale, onesided=onesided)
+    temp =  hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (k_b * parameters['u_gs_max'])
+    temp = (rescale_factors['distance'] * rescale_factors['mass'] / rescale_factors['time']**2) * temp
+    theta = fh.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
@@ -228,7 +247,7 @@ if __name__ == '__main__':
     # preliminary plotting
     plt.plot(t, x0[0, :])
     plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{0}$ (nm)')
+    plt.ylabel(r'$x_{0}$ (m)')
     plt.tight_layout()
     plt.show()
 
@@ -242,14 +261,14 @@ if __name__ == '__main__':
     # Power spectral density
     plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
-    plt.ylabel(r'Power spectral density ($\frac{\text{nm}^2}{Hz}$)')
+    plt.ylabel(r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$')
     plt.xlim(0.25 * omega_center / (2 * np.pi), 2 * omega_center / (2 * np.pi))
     plt.tight_layout()
     plt.show()
 
-    plt.plot(omegas, avg_psd_at_omegas)
+    plt.scatter(omegas, avg_psd_at_omegas)
     plt.xlabel(r'Angular frequency (rad/s)')
-    plt.ylabel(r'Power spectral density ($\frac{\text{nm}^2}{rad/s}$)')
+    plt.ylabel(r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$')
     plt.xlim(0, omegas[-1])
     plt.tight_layout()
     plt.show()

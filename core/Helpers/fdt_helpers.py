@@ -216,19 +216,18 @@ def chi_lock(t: np.ndarray, x: np.ndarray, f: np.ndarray, omega: float, t_max: f
     chi_imag = np.mean(chi_imag, dtype=float)
     return chi_real + 1j * chi_imag
 
-def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, boltzmann_scale: float = 1.0, onesided: bool = True) -> np.ndarray:
+def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: float, onesided: bool = True) -> np.ndarray:
     """
     Returns the fluctuation response (theta(omega) = omega C(omega) / [2 k_B T chi_I(omega)]) at different driving frequencies omega
     :param s: the power spectral density
     :param imag_chi: the linear response function (imaginary component) in frequency space (specifically at the driving frequencies)
     :param omegas: the driving frequencies (angular frequencies)
     :param temp: the temperature
-    :param boltzmann_scale: the scale factor to apply in front of the boltzmann constant to ensure consistent units
     :param onesided: whether the PSD is one-sided or not
     :return: the fluctuation response function
     """
     onesided_factor = 4 if onesided else 2
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = omegas[i] * s[i] / (onesided_factor * boltzmann_scale * K_B * temp * np.abs(imag_chi[i]))
+        theta[i] = omegas[i] * s[i] / (onesided_factor * K_B * temp * np.abs(imag_chi[i]))
     return theta

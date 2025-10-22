@@ -5,3 +5,4 @@ tqdm==4.67.1
 sympy==1.14.0
 torch==2.9.0+cu130
 torchvision==0.24.0+cu130
+pint==0.25
