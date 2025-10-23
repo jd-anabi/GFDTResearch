@@ -13,30 +13,25 @@ else:
     DEVICE = torch.device('cpu')
 
 DTYPE = torch.float64 if DEVICE.type == 'cuda' or DEVICE.type == 'cpu' else torch.float32
-BATCH_SIZE = 3000 if DEVICE.type == 'cuda' else 64
+BATCH_SIZE = 2048 if DEVICE.type == 'cuda' else 64
 SDE_TYPES = ['ito', 'stratonovich']
 
-def sols(t: np.ndarray, x0: np.ndarray, params: list,
-         omegas: np.ndarray, amp: float, phases: np.ndarray, offset: float,
-         explicit: bool = True) -> np.ndarray:
+def sols(t: np.ndarray, x0: np.ndarray, params: list, force: np.ndarray, explicit: bool = True) -> np.ndarray:
     """
     Returns sde solution for a hair bundle given a set of parameters and initial conditions
     :param t: time array
     :param x0: the initial conditions of each simulation
     :param params: the parameters to use in the for the non-dimensional hair bundle constructor
-    :param omegas: the frequencies to drive the simulations at
-    :param amp: the amplitude to drive the simulations at
-    :param phases: the phases to drive the simulations at
-    :param offset: the offset to drive the simulations at
+    :param force: the force to use in the non-dimensional hair bundle constructor
     :param explicit: whether to use the explicit Euler-Maruyama method
     :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
     """
     # check if we are using the steady-state solution
     if params[3] == 0:
         x0 = x0[:, :4]
-        sde = steady_nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = steady_nd_model.HairBundleSDE(*params, force, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
     else:
-        sde = nd_model.HairBundleSDE(*params, omegas, amp, phases, offset, sde_type=SDE_TYPES[0], batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
+        sde = nd_model.HairBundleSDE(*params, force, batch_size=BATCH_SIZE, device=DEVICE, dtype=DTYPE).to(DEVICE)
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=DTYPE, device=DEVICE)
@@ -60,21 +55,21 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list,
 
     return sol.cpu().detach().numpy()
 
-def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force_params: list,
+def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force: np.ndarray,
               n_time_segs: int, batch_size: int, freqs_per_batch: int) -> np.ndarray:
     ensemble_size = batch_size // freqs_per_batch
-    omegas, phases, amp, offset = force_params
     time_seg_ids = gh.get_even_ids(len(t), n_time_segs + 1)
 
     inits = init_conds
     n_vars = inits.shape[1] if params[3] != 0 else inits.shape[1] - 1
     sol = np.zeros((n_vars, BATCH_SIZE, len(t)))
-    curr_batch_phases = gh.sde_tile(phases[:freqs_per_batch], ensemble_size, BATCH_SIZE)
-    curr_batch_omegas = gh.sde_tile(omegas[freqs_per_batch:freqs_per_batch], ensemble_size, BATCH_SIZE)
+    #curr_force_batch = gh.repeat1d(force[freqs_per_batch:freqs_per_batch, :], ensemble_size, BATCH_SIZE)
+    #curr_batch_phases = gh.sde_tile1d(phases[:freqs_per_batch], ensemble_size, BATCH_SIZE)
+    #curr_batch_omegas = gh.sde_tile1d(omegas[freqs_per_batch:freqs_per_batch], ensemble_size, BATCH_SIZE)
     for tid in range(len(time_seg_ids) - 1):
         print(f"Time segment {tid + 1}:")
         curr_time = t[time_seg_ids[tid]:time_seg_ids[tid + 1]]
-        args_list = (curr_time, inits, list(params), curr_batch_omegas, amp, curr_batch_phases, offset)
+        args_list = (curr_time, inits, list(params), force)
         results = sols(*args_list) # shape: (len(curr_time), BATCH_SIZE, number of variables)
 
         # update initial conditions

@@ -140,15 +140,13 @@ if __name__ == '__main__':
     dt_0 = 1e-3
     n_0 = int((ts[-1] - ts[0]) / dt_0)
     t_0 = np.linspace(ts[0], ts[-1], n_0)
-    #steady_id_0 = int(0.7 * len(t_0))
     args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, steady_id)
     omega_center = 2 * np.pi * fh.get_sosc_freq(*args_list)
     print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi * rescale_factors['time'])} Hz')
-    #omega_center = 2 * np.pi * float(input("Frequency to center driving at (Hz): "))
 
     # ensemble variables needed
-    num_uniq_freqs = 30 # number of unique frequencies
-    ensemble_size = 100 # ensemble size for each frequency
+    num_uniq_freqs = 64 # number of unique frequencies
+    ensemble_size = 128 # ensemble size for each frequency
     freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
 
@@ -196,10 +194,8 @@ if __name__ == '__main__':
         print(f"\nIteration {iteration + 1}: ")
         low_freq = 0
         chi_id_offset = -1
-        curr_batch_phases = gh.sde_tile(phases_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
-        curr_batch_omegas = gh.sde_tile(omegas_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch], ensemble_size, simulator.BATCH_SIZE)
-        force_params = [curr_batch_omegas, curr_batch_phases, amp_nd, offset_nd]
-        x = simulator.sim(t_nd, inits, list(params), force_params, n_time_segs, simulator.BATCH_SIZE, freqs_per_batch)[0]
+        curr_f_batch = gh.repeat2d_r(f_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch, :], ensemble_size, simulator.BATCH_SIZE)
+        x = simulator.sim(t_nd, inits, list(params), curr_f_batch, n_time_segs, simulator.BATCH_SIZE, freqs_per_batch)[0]
 
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
@@ -230,15 +226,16 @@ if __name__ == '__main__':
     pos_freqs = pos_freqs / rescale_factors['time']
     omegas = omegas / rescale_factors['time']
     x0 = rescale_factors['distance'] * x0
-    avg_psd = rescale_factors['distance']**2 * rescale_factors['time']**2 * avg_psd
-    avg_psd_at_omegas = rescale_factors['distance']**2 * rescale_factors['time']**2 * avg_psd_at_omegas
-    avg_real_chi = rescale_factors['time'] / rescale_factors['mass'] * avg_real_chi
-    avg_imag_chi = rescale_factors['time'] / rescale_factors['mass'] * avg_imag_chi
+    avg_psd = rescale_factors['distance']**2 * rescale_factors['time'] * avg_psd
+    avg_psd_at_omegas = rescale_factors['distance']**2 * rescale_factors['time'] * avg_psd_at_omegas
+    avg_real_chi = rescale_factors['time']**2 / rescale_factors['mass'] * avg_real_chi
+    avg_imag_chi = rescale_factors['time']**2 / rescale_factors['mass'] * avg_imag_chi
+
     # ------------- BEGIN FDT CALCULATIONS ------------- #
     # calculate fluctuation response
     k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    temp =  hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (k_b * parameters['u_gs_max'])
-    temp = (rescale_factors['distance'] * rescale_factors['mass'] / rescale_factors['time']**2) * temp
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (k_b * parameters['u_gs_max'])
+    temp = (rescale_factors['mass'] * rescale_factors['distance']**3 / rescale_factors['time']**2) * temp
     theta = fh.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
@@ -262,7 +259,7 @@ if __name__ == '__main__':
     plt.plot(pos_freqs, avg_psd)
     plt.xlabel(r'Frequency (Hz)')
     plt.ylabel(r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$')
-    plt.xlim(0.25 * omega_center / (2 * np.pi), 2 * omega_center / (2 * np.pi))
+    plt.xlim(pos_freqs[0], pos_freqs[len(pos_freqs)//2])
     plt.tight_layout()
     plt.show()
 

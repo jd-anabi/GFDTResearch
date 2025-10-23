@@ -5,9 +5,8 @@ class HairBundleSDE(torch.nn.Module):
     def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
                  c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
                  u_gs_max: float, delta_e: float, k_gs_ratio: float, chi_hb: float, chi_a: float,
-                 x_c: float, eta_hb: float, eta_a: float, omega: np.ndarray, amp: float, phase: np.ndarray, offset: float,
-                 batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64,
-                 noise_type: str = 'general', sde_type: str = 'ito'):
+                 x_c: float, eta_hb: float, eta_a: float, force: np.ndarray,
+                 batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
         super().__init__()
         # parameters
         self.tau_hb = tau_hb  # finite time constant for hair-bundle
@@ -29,14 +28,9 @@ class HairBundleSDE(torch.nn.Module):
         self.eta_a = eta_a  # adaptation motor diffusion constant
 
         # force parameters
-        self.amp = amp  # amplitude of stimulus force
-        self.phase = torch.tensor(phase, dtype=dtype, device=device) # phase of the stimulus force
-        self.offset = offset # stimulus force offset
-        self.omega = torch.tensor(omega, dtype=dtype, device=device)
+        self.force = torch.tensor(force, dtype=dtype, device=device)
 
         # sde model parameters
-        self.noise_type = noise_type
-        self.sde_type = sde_type
         self.batch_size = batch_size
         self.device = device
         self.dtype = dtype
@@ -48,17 +42,17 @@ class HairBundleSDE(torch.nn.Module):
         self.k_gs_offset = 1 - self.k_gs_ratio
         self.E_exp = torch.exp(self.u_gs_max * self.delta_e * torch.ones(self.batch_size, dtype=self.dtype, device=self.device))
 
-    def f(self, x, t) -> torch.Tensor:
+    def f(self, x, t, t_id: int = 0) -> torch.Tensor:
         p_t0 = self.__p_t0(x[:, 0], x[:, 1], x[:, 3])
         dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], p_t0)
         dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], p_t0)
         dp_m = self.__p_m_dot(x[:, 2], p_t0)
         dp_gs = self.__p_gs_dot(x[:, 3], p_t0)
-        dx_hb = dx_hb + self.__sin_sf(t) / self.tau_hb
+        dx_hb = dx_hb + self.force[:, t_id] / self.tau_hb
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs), dim=1)
         return dx
 
-    def g(self, x: torch.tensor = None, t: torch.tensor = None) -> torch.Tensor:
+    def g(self, x = None, t = None) -> torch.Tensor:
         dsigma = torch.tensor([self.__hb_noise(), self.__a_noise(), 0, 0], dtype=self.dtype, device=self.device)
         return torch.tile(torch.diag(dsigma), (self.batch_size, 1, 1))
 
@@ -89,9 +83,6 @@ class HairBundleSDE(torch.nn.Module):
         arg = -1 * self.u_gs_max * k_gs * (x_gs - 0.5)
         return 1 / (1 + self.E_exp * torch.exp(arg))
 
-    # stimulus force
-    def __sin_sf(self, t):
-        return self.amp * torch.cos(self.omega * t + self.phase) + self.offset
     # noise
     def __hb_noise(self) -> float:
         return self.eta_hb / self.tau_hb

@@ -32,9 +32,9 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     # check if we are using the steady-state solution
     if params[3] == 0:
         x0 = x0[:, :4]
-        sde = steady_nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
+        sde = steady_nd_model.HairBundleSDE(*params, np.zeros((1, len(t))), batch_size=1, device=device, dtype=dtype).to(device)
     else:
-        sde = nd_model.HairBundleSDE(*params, np.zeros(1), 0, np.zeros(1), 0, batch_size=1, device=device, dtype=dtype).to(device)
+        sde = nd_model.HairBundleSDE(*params, np.zeros((1, len(t))), batch_size=1, device=device, dtype=dtype).to(device)
 
     # setting up initial conditions
     x0s = torch.tensor(x0, dtype=dtype, device=device)

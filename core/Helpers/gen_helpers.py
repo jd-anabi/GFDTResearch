@@ -27,17 +27,20 @@ def concat(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         raise ValueError('Both arrays must have same number of rows')
     return np.concatenate((x, y), axis=1)
 
-def sde_tile(x: np.ndarray, ensemble_size: int, batch_size: int) -> np.ndarray:
+def repeat2d_r(x: np.ndarray, ensemble_size: int, batch_size: int) -> np.ndarray:
     """
-    Tile an array appropriately for internal SDE solver
-    :param x: array to tile
+    Repeat a 2D array (n, m) to a new array (n * ensemble_size, m)
+    :param x: array to repeat
     :param ensemble_size: number of times to tile each element
     :param batch_size: total batch size
-    :return: tiled array (size: batch_size)
+    :return: read-only repeated array
     """
     if x.shape[0] > batch_size:
         raise ValueError('Array length cannot be greater than batch size')
-    tiled_x = np.zeros(batch_size, dtype=x.dtype)
-    for i in range(len(x)):
-        tiled_x[i * ensemble_size:(i + 1) * ensemble_size] = np.tile(x[i], ensemble_size)
-    return tiled_x
+    elif batch_size % ensemble_size != 0:
+        raise ValueError('Batch size must be divisible by ensemble size')
+    expanded_x = x[:, np.newaxis, :]
+    tiled_x_r = np.broadcast_to(expanded_x, (x.shape[0], ensemble_size, x.shape[1]))
+    #repeated_x = np.zeros((batch_size, x.shape[1]), dtype=x.dtype)
+    #repeated_x = np.repeat(x, ensemble_size, axis=0)
+    return tiled_x_r.reshape(x.shape[0] * ensemble_size, x.shape[1])

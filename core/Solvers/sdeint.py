@@ -40,8 +40,7 @@ class Solver:
                 dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1)  # batch matrix multiplication; shape: (batch_size, d)
                 # update solution
-                a = sde.f(x_curr, t_curr) * dt
-                xs[i + 1] = x_curr + sde.f(x_curr, t_curr) * dt + eta
+                xs[i + 1] = x_curr + sde.f(x_curr, t_curr, i) * dt + eta
 
             return xs
 
@@ -81,7 +80,7 @@ class Solver:
                 # recursive iteration
                 x_next = x_curr.clone() # possible candidate for the solution at next time step
                 for _ in range(max_iter):
-                    x_temp = x_curr + sde.f(x_next, t_next) * dt + eta
+                    x_temp = x_curr + sde.f(x_next, t_next, i) * dt + eta
                     if torch.norm(x_temp - x_next) < tol:
                         break # convergence check
                     x_next = x_temp
