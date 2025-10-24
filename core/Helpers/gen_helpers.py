@@ -1,4 +1,5 @@
 import numpy as np
+from matplotlib import pyplot as plt
 
 def get_even_ids(l: int, n: int) -> list:
     """
@@ -44,3 +45,29 @@ def repeat2d_r(x: np.ndarray, ensemble_size: int, batch_size: int) -> np.ndarray
     #repeated_x = np.zeros((batch_size, x.shape[1]), dtype=x.dtype)
     #repeated_x = np.repeat(x, ensemble_size, axis=0)
     return tiled_x_r.reshape(x.shape[0] * ensemble_size, x.shape[1])
+
+def plot(x: np.ndarray, y: np.ndarray, scatter: bool = False, title: str = None, labels: tuple = None, lims: list = None, hlines: tuple = None, tight: bool = True) -> None:
+    if scatter:
+        plt.scatter(x, y)
+    else:
+        plt.plot(x, y)
+
+    if title is not None:
+        plt.title(title)
+
+    if labels is not None:
+        plt.xlabel(labels[0])
+        if len(labels) > 1:
+            plt.ylabel(labels[1])
+
+    if lims is not None:
+        plt.xlim(*lims[0])
+        if len(lims) > 1:
+            plt.ylim(*lims[1])
+
+    if hlines is not None:
+        plt.hlines(*hlines, linestyle='--', color='r')
+
+    if tight:
+        plt.tight_layout()
+    plt.show()

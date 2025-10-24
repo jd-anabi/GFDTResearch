@@ -56,16 +56,13 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list, force: np.ndarray, explici
     return sol.cpu().detach().numpy()
 
 def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force: np.ndarray,
-              n_time_segs: int, batch_size: int, freqs_per_batch: int) -> np.ndarray:
+        n_time_segs: int, batch_size: int, freqs_per_batch: int) -> np.ndarray:
     ensemble_size = batch_size // freqs_per_batch
     time_seg_ids = gh.get_even_ids(len(t), n_time_segs + 1)
 
     inits = init_conds
     n_vars = inits.shape[1] if params[3] != 0 else inits.shape[1] - 1
     sol = np.zeros((n_vars, BATCH_SIZE, len(t)))
-    #curr_force_batch = gh.repeat1d(force[freqs_per_batch:freqs_per_batch, :], ensemble_size, BATCH_SIZE)
-    #curr_batch_phases = gh.sde_tile1d(phases[:freqs_per_batch], ensemble_size, BATCH_SIZE)
-    #curr_batch_omegas = gh.sde_tile1d(omegas[freqs_per_batch:freqs_per_batch], ensemble_size, BATCH_SIZE)
     for tid in range(len(time_seg_ids) - 1):
         print(f"Time segment {tid + 1}:")
         curr_time = t[time_seg_ids[tid]:time_seg_ids[tid + 1]]

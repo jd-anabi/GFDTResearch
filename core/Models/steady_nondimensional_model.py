@@ -1,31 +1,34 @@
+from typing import Union
+
 import numpy as np
 import torch
 
+
 class HairBundleSDE(torch.nn.Module):
-    def __init__(self, tau_hb: float, tau_m: float, tau_gs: float, tau_t: float,
-                 c_min: float, s_min: float, s_max: float, ca2_m: float, ca2_gs: float,
-                 u_gs_max: float, delta_e: float, k_gs_ratio: float, chi_hb: float, chi_a: float,
-                 x_c: float, eta_hb: float, eta_a: float, force: np.ndarray,
-                 batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
+    def __init__(self, tau_hb: Union[float, np.ndarray], tau_m: Union[float, np.ndarray], tau_gs: Union[float, np.ndarray], tau_t: Union[float, np.ndarray],
+                 c_min: Union[float, np.ndarray], s_min: Union[float, np.ndarray], s_max: Union[float, np.ndarray], ca2_m: Union[float, np.ndarray],
+                 ca2_gs: Union[float, np.ndarray], u_gs_max: Union[float, np.ndarray], delta_e: Union[float, np.ndarray], k_gs_ratio: Union[float, np.ndarray],
+                 chi_hb: Union[float, np.ndarray], chi_a: Union[float, np.ndarray], x_c: Union[float, np.ndarray], eta_hb: Union[float, np.ndarray],
+                 eta_a: Union[float, np.ndarray], force: np.ndarray, batch_size: int, device: torch.device = 'cuda', dtype: torch.dtype = torch.float64):
         super().__init__()
         # parameters
-        self.tau_hb = tau_hb  # finite time constant for hair-bundle
-        self.tau_m = tau_m  # finite time constant for adaptation motor
-        self.tau_gs = tau_gs  # finite time constant for gating spring
-        self.tau_t = tau_t  # finite time constant for open channel probability
-        self.c_min = c_min  # min climbing rate
-        self.s_min = s_min  # min slipping rate
-        self.s_max = s_max  # max slipping rate
-        self.ca2_m = ca2_m  # calcium ion concentration near adaptation motor
-        self.ca2_gs = ca2_gs  # calcium ion concentration near gating spring
-        self.u_gs_max = u_gs_max  # max gating spring potential
-        self.delta_e = delta_e  # intrinsic energy difference between the transduction channel's two states
-        self.k_gs_ratio = k_gs_ratio  # gating spring stiffness ratio
-        self.chi_hb = chi_hb  # hair bundle conversion factor
-        self.chi_a = chi_a  # adaptation motor conversion factor
-        self.x_c = x_c  # average equilibrium position of the adaptation motors
-        self.eta_hb = eta_hb  # hair bundle diffusion constant
-        self.eta_a = eta_a  # adaptation motor diffusion constant
+        self.tau_hb = torch.tensor(tau_hb, dtype=dtype, device=device)  # finite time constant for hair-bundle
+        self.tau_m = torch.tensor(tau_m, dtype=dtype, device=device)  # finite time constant for adaptation motor
+        self.tau_gs = torch.tensor(tau_gs, dtype=dtype, device=device)  # finite time constant for gating spring
+        self.tau_t = torch.tensor(tau_t, dtype=dtype, device=device)  # finite time constant for open channel probability
+        self.c_min = torch.tensor(c_min, dtype=dtype, device=device)  # min climbing rate
+        self.s_min = torch.tensor(s_min, dtype=dtype, device=device)  # min slipping rate
+        self.s_max = torch.tensor(s_max, dtype=dtype, device=device)  # max slipping rate
+        self.ca2_m = torch.tensor(ca2_m, dtype=dtype, device=device)  # calcium ion concentration near adaptation motor
+        self.ca2_gs = torch.tensor(ca2_gs, dtype=dtype, device=device)  # calcium ion concentration near gating spring
+        self.u_gs_max = torch.tensor(u_gs_max, dtype=dtype, device=device)  # max gating spring potential
+        self.delta_e = torch.tensor(delta_e, dtype=dtype, device=device)  # intrinsic energy difference between the transduction channel's two states
+        self.k_gs_ratio = torch.tensor(k_gs_ratio, dtype=dtype, device=device)  # gating spring stiffness ratio
+        self.chi_hb = torch.tensor(chi_hb, dtype=dtype, device=device)  # hair bundle conversion factor
+        self.chi_a = torch.tensor(chi_a, dtype=dtype, device=device)  # adaptation motor conversion factor
+        self.x_c = torch.tensor(x_c, dtype=dtype, device=device)  # average equilibrium position of the adaptation motors
+        self.eta_hb = torch.tensor(eta_hb, dtype=dtype, device=device)  # hair bundle diffusion constant
+        self.eta_a = torch.tensor(eta_a, dtype=dtype, device=device)  # adaptation motor diffusion constant
 
         # force parameters
         self.force = torch.tensor(force, dtype=dtype, device=device)

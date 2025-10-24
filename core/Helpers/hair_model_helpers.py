@@ -1,29 +1,35 @@
 import numpy as np
+from sympy.abc import alpha
 
-def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, chi_hb: float) -> np.ndarray:
+
+def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> np.ndarray:
     """
     Rescaling the hair-bundle displacement
     :param x_nd: the hair bundle position
     :param gamma: geometric conversion factor
     :param d: distance of gating spring relaxation on channel opening
     :param x_sp: resting deflection of stereociliary pivots
+    :param k_sp: stiffness of stereociliary pivots
+    :param alpha: stimulus force stiffness (if used)
     :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
     :return: the rescaled hair-bundle displacement
     """
-    x = chi_hb * d / gamma * x_nd + x_sp
+    x = chi_hb * d / gamma * x_nd + k_sp * x_sp / (k_sp + alpha)
     return x
 
-def irescale_x(x: float, gamma: float, d: float, x_sp: float, chi_hb: float) -> float:
+def irescale_x(x: float, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> float:
     """
     Rescaling the hair-bundle displacement from dimensional -> non-dimensional
     :param x: the hair bundle position
     :param gamma: geometric conversion factor
     :param d: distance of gating spring relaxation on channel opening
     :param x_sp: resting deflection of stereociliary pivots
+    :param k_sp: stiffness of stereociliary pivots
+    :param alpha: stimulus force stiffness (if used)
     :param chi_hb: non-dimensional parameter for non-dimensional hair bundle displacement
     :return: the rescaled hair-bundle displacement
     """
-    x_nd = gamma * (x - x_sp) / (chi_hb * d)
+    x_nd = gamma * (x - k_sp * x_sp / (k_sp + alpha)) / (chi_hb * d)
     return x_nd
 
 def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:

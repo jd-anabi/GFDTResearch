@@ -24,7 +24,7 @@ class Solver:
 
             # initialize solution array
             xs = torch.zeros((n, batch_size, d), dtype=x0.dtype, device=x0.device)
-            xs[0] = x0
+            xs[0, :, :] = x0
 
             # drift
             g = sde.g()
@@ -35,12 +35,12 @@ class Solver:
             # recursively define x_{n+1}
             for i in tqdm(range(0, n - 1),  desc=f"Simulating {batch_size} batches of hair-bundles", mininterval=0.1):
                 t_curr, t_next = t[i], t[i + 1]
-                x_curr = xs[i]
+                x_curr = xs[i, :, :]
                 # Wiener process
                 dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1)  # batch matrix multiplication; shape: (batch_size, d)
                 # update solution
-                xs[i + 1] = x_curr + sde.f(x_curr, t_curr, i) * dt + eta
+                xs[i + 1, :, :] = x_curr + sde.f(x_curr, t_curr, i) * dt + eta
 
             return xs
 
@@ -62,7 +62,7 @@ class Solver:
             # create tensor of the solution
             batch_size, d = x0.shape
             xs = torch.zeros((n, batch_size, d), dtype=x0.dtype, device=x0.device)
-            xs[0] = x0
+            xs[0, :, :] = x0
 
             # time and state independent drift
             g = sde.g()
@@ -73,7 +73,7 @@ class Solver:
             # recursively define x_{n+1}
             for i in tqdm(range(0, n - 1),  desc=f"Simulating {batch_size} batches of hair-bundles", mininterval=0.1):
                 t_curr, t_next = t[i], t[i+1]
-                x_curr = xs[i]
+                x_curr = xs[i, :, :]
                 # Wiener process
                 dW = torch.randn_like(x_curr) * sqrt_dt
                 eta = torch.bmm(g, dW.unsqueeze(-1)).squeeze(-1) # batch matrix multiplication; shape: (batch_size, d)
@@ -85,7 +85,7 @@ class Solver:
                         break # convergence check
                     x_next = x_temp
                 # update solution
-                xs[i+1] = x_next
+                xs[i + 1, :, :] = x_next
 
             return xs
 

@@ -8,8 +8,8 @@ import multiprocessing as mp
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 import pint
+import torch
 import numpy as np
-import matplotlib.pyplot as plt
 import scipy as sp
 
 from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
@@ -17,14 +17,14 @@ from core.Simulator import simulator
 
 SN_PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
 PAR_PATTERN = re.compile(r'\((.*?)\)') # use pattern matching to extract value within parentheses
-UNIT_PATTERN = re.compile(r'[a-zA-Z]+') # use pattern matching to extract units within parentheses
+UNIT_PATTERN = re.compile(r'[a-zA-Z]+') # use pattern matching to extract units
 
 if __name__ == '__main__':
     # -------------------------- BEGIN SETUP -------------------------- #
     # parameters and initial conditions
     file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
-    rescale_file = np.zeros(8, dtype=float)
+    rescale_file = np.zeros(9, dtype=float)
     units = []
     x0 = []
 
@@ -70,7 +70,7 @@ if __name__ == '__main__':
     hb_rescale_params: Dict[str, float] = {'gamma': rescale_file[0].item(), 'd': rescale_file[1].item(),
                                            'x_sp': rescale_file[2].item(), 'k_sp': rescale_file[3].item(),
                                            'k_gs_max': rescale_file[4].item(), 's_max': rescale_file[5].item(),
-                                           't_0': rescale_file[6].item()}
+                                           't_0': rescale_file[6].item(), 'alpha': rescale_file[7].item()}
     # need to construct dictionary now that converts current units to SI units
     ureg = pint.UnitRegistry()
     try:
@@ -108,14 +108,15 @@ if __name__ == '__main__':
     # recaling parameters needed for time and data
     t_rescale_params = [hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
                         hb_rescale_params['s_max_nd'], hb_rescale_params['chi_a']]
-    x_rescale_params = hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'], hb_rescale_params['chi_hb']
+    x_rescale_params = [hb_rescale_params['gamma'], hb_rescale_params['d'], hb_rescale_params['x_sp'],
+                        hb_rescale_params['k_sp'], hb_rescale_params['alpha'], hb_rescale_params['chi_hb']]
 
     # rescale time to dimensional
     t = hmh.rescale_t(t_nd, *t_rescale_params)
     dt = float(t[1] - t[0]) # rescale dt
 
     # steady-state index for analysis later
-    steady_id = int(0.7 * len(t))
+    steady_id = int(0.4 * len(t))
     n = len(t)
     n_steady = len(t[steady_id:])
 
@@ -210,9 +211,8 @@ if __name__ == '__main__':
             chi_id_offset = 0
 
         # arguments needed for multiprocessing
-        chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt) for freq in range(low_freq, freqs_per_batch)]
-        #chi_args = [(np.max(x[freq, :, :], axis=1, keepdims=True) - np.mean(x[freq, :, :], axis=1, keepdims=True), amp) for freq in range(low_freq, freqs_per_batch)]
-        #chi_args = [(t, x[freq, :, :], f[iteration * freqs_per_batch + freq, :], omegas[iteration * freqs_per_batch + freq - 1].item(), t[-1]) for freq in range(low_freq, freqs_per_batch)]
+        chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt)
+                    for freq in range(low_freq, freqs_per_batch)]
         with mp.Pool(int(0.75 * mp.cpu_count())) as pool:
             chis = pool.starmap(fh.chi, chi_args)
         chi_id_start = iteration * len(chis) + chi_id_offset
@@ -242,59 +242,18 @@ if __name__ == '__main__':
     # ------------- BEGIN PLOTTING ------------- #
     t = t[steady_id:]
     # preliminary plotting
-    plt.plot(t, x0[0, :])
-    plt.xlabel(r'Time (s)')
-    plt.ylabel(r'$x_{0}$ (m)')
-    plt.tight_layout()
-    plt.show()
-
+    gh.plot(t, x0[0, :], labels=(r'Time (s)', r'$x_{0}$ (m)'))
     # autocorrelation function
-    plt.plot(t, avg_auto_corr)
-    plt.xlabel(r'Time (s)')
-    plt.ylabel(r'Autocorrelation')
-    plt.tight_layout()
-    plt.show()
-
+    gh.plot(t, avg_auto_corr, labels=(r'Time (s)', r'$\langle \frac{C(t)}{C(0)} \rangle \text{m}^2$'))
     # Power spectral density
-    plt.plot(pos_freqs, avg_psd)
-    plt.xlabel(r'Frequency (Hz)')
-    plt.ylabel(r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$')
-    plt.xlim(pos_freqs[0], pos_freqs[len(pos_freqs)//2])
-    plt.tight_layout()
-    plt.show()
-
-    plt.scatter(omegas, avg_psd_at_omegas)
-    plt.xlabel(r'Angular frequency (rad/s)')
-    plt.ylabel(r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$')
-    plt.xlim(0, omegas[-1])
-    plt.tight_layout()
-    plt.show()
-
+    gh.plot(pos_freqs, avg_psd, labels=(r'Frequency (Hz)', r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$'), lims=[(pos_freqs[0], pos_freqs[len(pos_freqs)//2])])
+    gh.plot(omegas, avg_psd_at_omegas, labels=(r'Angular frequency (rad/s)', r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$'), lims=[(0, omegas[-1])])
     # linear response function
-    plt.scatter(omegas[1:] / (2 * np.pi), avg_real_chi)
-    plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Re\{\chi_x\}$')
-    plt.tight_layout()
-    plt.show()
-
-    plt.scatter(omegas[1:] / (2 * np.pi), avg_imag_chi)
-    plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\Im\{\chi_x\}$')
-    plt.tight_layout()
-    plt.show()
-
-    plt.scatter(omegas[1:] / (2 * np.pi), theta)
-    plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\theta(\omega)$')
-    plt.hlines(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi), linestyle='--', color='r')
-    plt.tight_layout()
-    plt.show()
-
-    plt.scatter(omegas[1:] / (2 * np.pi), theta)
-    plt.xlabel(r'Driving Frequency (Hz)')
-    plt.ylabel(r'$\theta(\omega)$')
-    plt.tight_layout()
-    plt.show()
+    gh.plot(omegas[1:] / (2 * np.pi), avg_real_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Re\{\chi_x\}$'))
+    gh.plot(omegas[1:] / (2 * np.pi), avg_imag_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Im\{\chi_x\}$'))
+    # theta
+    gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'), hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
+    gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'))
 
     y_scale_range = 0
     while True:
@@ -303,11 +262,6 @@ if __name__ == '__main__':
         except ValueError:
             print("Invalid input")
             break
-        plt.scatter(omegas[1:] / (2 * np.pi), theta)
-        plt.xlabel(r'Driving Frequency (Hz)')
-        plt.ylabel(r'$\theta(\omega)$')
-        plt.hlines(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi), linestyle='--', color='r')
-        plt.ylim(-y_scale_range, y_scale_range)
-        plt.tight_layout()
-        plt.show()
+        gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'),
+                lims=[(omegas[1], omegas[-1]), (-y_scale_range, y_scale_range)], hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
     # ------------- END PLOTTING ------------- #
