@@ -1,0 +1,38 @@
+# Non-dimensional Parameters
+xhb_init = 0.1
+xa_init = 1
+pm_init = 0.5
+pgs_init = 0.5
+pt_init = 0.5
+tau_hb = 1
+tau_m = 5.158849376957278
+tau_gs = 1
+tau_t = 0
+c_min = 1
+s_min = 1e-9
+s_max = 0.8535403153475086
+ca2_m = 1
+ca2_gs = 1000
+u_gs_max = 26.372563002269686
+delta_e = 0.11822429415603053
+k_gs_min = 0.8446290946640642
+chi_hb = 1
+chi_a = 1.1549428868706748
+x_c = 1e-9
+eta_hb = 0.03
+eta_a = 0.05
+
+# Dimensional Parameters
+gamma = 0.14
+d (nm) = 7
+x_sp (nm) = 246
+k_sp (mg nm^2 ms^-2) = 0.2e-3
+k_gs_max (mg ms^-2) = 1.6e-3
+s_max (ms / mg) = 0.1e3
+t_0 (ms) = 0
+alpha (mg nm^2 ms^-2) = 0
+
+# Forcing Parameters
+amp (mg nm ms^-2) = 100e-6
+phase = 0
+offset (mg nm ms^-2) = 0

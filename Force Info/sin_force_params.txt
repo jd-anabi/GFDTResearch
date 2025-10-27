@@ -1,3 +1,0 @@
-amp (mg nm ms^-2) = 100e-6
-phase = 0
-offset = 0

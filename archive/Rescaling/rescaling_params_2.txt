@@ -5,4 +5,4 @@ k_sp (mg nm^2 s^-2) = 0.2e3
 k_gs_max (mg s^-2) = 1.6e3
 s_max (s / mg) = 0.61
 t_0 = 0
-alpha (mg nm^2 ms^-2) = 0
+alpha (mg nm^2 s^-2) = 0

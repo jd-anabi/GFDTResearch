@@ -22,55 +22,78 @@ UNIT_PATTERN = re.compile(r'[a-zA-Z]+') # use pattern matching to extract units
 if __name__ == '__main__':
     # -------------------------- BEGIN SETUP -------------------------- #
     # parameters and initial conditions
-    file_str = 'Non-dimensional'
     params = np.zeros(17, dtype=float)
-    rescale_file = np.zeros(9, dtype=float)
+    rescale_file = np.zeros(8, dtype=float)
+    forcing_params = np.zeros(3, dtype=float)
     units = []
     x0 = []
 
-    # read hair cell,  force info, and rescaling parameters from txt files
-    line = 0
+    # construct OS dependent directory for model parameters directory
     if sys.platform == 'win32':
-        hair_cell_file_path = '\\Hair Cells\\' + file_str + '\\hair_cell_'
-        rescale_file_path = '\\Rescaling\\rescaling_params_'
-        force_file_path = '\\Force Info\\sin_force_params.txt'
+        model_params_dir = '\\Model Parameters\\'
     else:
-        hair_cell_file_path = '/Hair Cells/' + file_str + '/hair_cell_'
-        rescale_file_path = '/Rescaling/rescaling_params_'
-        force_file_path = '/Force Info/sin_force_params.txt'
+        model_params_dir = '/Model Parameters/'
 
-    # hair cell parameters
-    file = os.getcwd() + hair_cell_file_path + input('Hair cell file number: ') + '.txt'
+    # list files in directory
+    model_files = ['']
+    file_num = 1
+    direct = os.getcwd() + '\\Model Parameters' if sys.platform == 'win32' else os.getcwd() + '/Model Parameters'
+    for root, dirs, files in os.walk(direct):
+        level = root.replace(direct, '').count(os.sep)
+        indent = ' ' * 2 * level
+        print(f"{indent}{os.path.basename(root)}/")
+        subindent = ' ' * 2 * (level + 1)
+        for file in files:
+            model_files.append(file)
+            print(f"{subindent}({file_num}) {file}")
+            file_num += 1
+    model_files.pop(0)
+
+    # read in model parameters
+    line = 0
+    invalid_lines = (0, 23, 24, 33, 34)
+    file_num = int(input('File number for model parameters: '))
+    file = os.getcwd() + model_params_dir + model_files[file_num - 1]
     with open(file, mode='r') as txtfile:
         for row in txtfile:
-            val = float(re.findall(SN_PATTERN, row.strip())[0])
-            if line < 5:
-                x0.append(val)
-            else:
-                params[line - 5] = val
+            if line not in invalid_lines:
+                # non-dimensional parameters
+                if line <= 22:
+                    val = float(re.findall(SN_PATTERN, row.strip())[0])
+                    if line <= 5:
+                        x0.append(val)
+                    else:
+                        params[line - 6] = val
+                # dimensional parameters
+                elif line <= 32:
+                    val = float(re.findall(SN_PATTERN, row.strip())[0])
+                    curr_units = [unit for par in re.findall(PAR_PATTERN, row.strip()) for unit in
+                                  re.findall(UNIT_PATTERN, par)]
+                    rescale_file[line - 25] = val
+                    for unit in curr_units:
+                        if unit not in units:
+                            units.append(unit)
+                # forcing parameters
+                else:
+                    val = float(re.findall(SN_PATTERN, row.strip())[0])
+                    forcing_params[line - 35] = val
             line = line + 1
+    amp = forcing_params[0]
+    phase = forcing_params[1]
+    offset = forcing_params[2]
+
+    # set up dictionary for model parameters and rescaling parameters
     parameters: Dict[str, float] = {'tau_hb': params[0].item(), 'tau_m': params[1].item(), 'tau_gs': params[2].item(), 'tau_t': params[3].item(),
                                     'c_min': params[4].item(), 's_min': params[5].item(), 's_max': params[6].item(), 'ca2_m': params[7].item(),
                                     'ca2_gs': params[8].item(), 'u_gs_max': params[9].item(), 'delta_e': params[10].item(), 'k_gs_ratio': params[11].item(),
                                     'chi_hb': params[12].item(), 'chi_a': params[13].item(), 'x_c': params[14].item(), 'eta_hb': params[15].item(),
                                     'eta_a': params[16].item()}
-
-    # rescaling parameters
-    line = 0
-    file = os.getcwd() + rescale_file_path + input('Rescaling file number: ') + '.txt'
-    with open(file, mode='r') as txtfile:
-        for row in txtfile:
-            val = float(re.findall(SN_PATTERN, row.strip())[0])
-            curr_units = [unit for par in re.findall(PAR_PATTERN, row.strip()) for unit in re.findall(UNIT_PATTERN, par)]
-            rescale_file[line] = val
-            for unit in curr_units:
-                if unit not in units:
-                    units.append(unit)
-            line = line + 1
     hb_rescale_params: Dict[str, float] = {'gamma': rescale_file[0].item(), 'd': rescale_file[1].item(),
                                            'x_sp': rescale_file[2].item(), 'k_sp': rescale_file[3].item(),
                                            'k_gs_max': rescale_file[4].item(), 's_max': rescale_file[5].item(),
                                            't_0': rescale_file[6].item(), 'alpha': rescale_file[7].item()}
+    hb_rescale_params.update({'s_max_nd': params[6].item(), 'chi_hb': params[12].item(), 'chi_a': params[13].item()}) # need to add in non-dimensional parameters for rescaling too
+
     # need to construct dictionary now that converts current units to SI units
     ureg = pint.UnitRegistry()
     try:
@@ -79,20 +102,6 @@ if __name__ == '__main__':
     except pint.UndefinedUnitError as e:
         print(f'Error: {e}. Unrecognized units.')
         exit()
-    # need to add in non-dimensional parameters for rescaling too
-    hb_rescale_params.update({'s_max_nd': params[6].item(), 'chi_hb': params[12].item(), 'chi_a': params[13].item()})
-
-    # set up forcing params
-    file = os.getcwd() + force_file_path
-    forcing_amps = []
-    with open(file, mode='r') as txtfile:
-        for row in txtfile:
-            val = float(re.findall(SN_PATTERN, row.strip())[0])
-            forcing_amps.append(val)
-    amp = forcing_amps[0]
-    phase = forcing_amps[1]
-    offset = forcing_amps[2]
-
     # -------------------------- END SETUP -------------------------- #
 
     # ------------- BEGIN RESCALING CALCULATIONS ------------- #
@@ -170,6 +179,7 @@ if __name__ == '__main__':
                                         hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = nd_f_params[0], nd_f_params[1], nd_f_params[2], nd_f_params[3]
     # ------------- END FORCE AND FREQUENCY CALCULATIONS ------------- #
+
     welch = False # don't use Welch's method for the PSD calculations
     onesided = True # use the one-sided PSD
     angular = False # don't divide the PSD by 2 pi
@@ -241,16 +251,21 @@ if __name__ == '__main__':
 
     # ------------- BEGIN PLOTTING ------------- #
     t = t[steady_id:]
+
     # preliminary plotting
     gh.plot(t, x0[0, :], labels=(r'Time (s)', r'$x_{0}$ (m)'))
+
     # autocorrelation function
     gh.plot(t, avg_auto_corr, labels=(r'Time (s)', r'$\langle \frac{C(t)}{C(0)} \rangle \text{m}^2$'))
+
     # Power spectral density
     gh.plot(pos_freqs, avg_psd, labels=(r'Frequency (Hz)', r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$'), lims=[(pos_freqs[0], pos_freqs[len(pos_freqs)//2])])
     gh.plot(omegas, avg_psd_at_omegas, labels=(r'Angular frequency (rad/s)', r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$'), lims=[(0, omegas[-1])])
+
     # linear response function
     gh.plot(omegas[1:] / (2 * np.pi), avg_real_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Re\{\chi_x\}$'))
     gh.plot(omegas[1:] / (2 * np.pi), avg_imag_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Im\{\chi_x\}$'))
+
     # theta
     gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'), hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
     gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'))
