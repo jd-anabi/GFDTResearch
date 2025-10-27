@@ -55,25 +55,25 @@ def sols(t: np.ndarray, x0: np.ndarray, params: list, force: np.ndarray, explici
 
     return sol.cpu().detach().numpy()
 
-def sim(t: np.ndarray, init_conds: np.ndarray, params: list, force: np.ndarray,
+def sim(t: np.ndarray, inits: np.ndarray, params: list, force: np.ndarray,
         n_time_segs: int, batch_size: int, freqs_per_batch: int) -> np.ndarray:
     ensemble_size = batch_size // freqs_per_batch
     time_seg_ids = gh.get_even_ids(len(t), n_time_segs + 1)
 
-    inits = init_conds
-    n_vars = inits.shape[1] if params[3] != 0 else inits.shape[1] - 1
-    sol = np.zeros((n_vars, BATCH_SIZE, len(t)))
+    init = inits
+    n_vars = init.shape[1] if params[3] != 0 else init.shape[1] - 1
+    sol = np.zeros((n_vars, batch_size, len(t)))
     for tid in range(len(time_seg_ids) - 1):
         print(f"Time segment {tid + 1}:")
         curr_time = t[time_seg_ids[tid]:time_seg_ids[tid + 1]]
-        args_list = (curr_time, inits, list(params), force)
+        args_list = (curr_time, init, list(params), force)
         results = sols(*args_list) # shape: (len(curr_time), BATCH_SIZE, number of variables)
 
         # update initial conditions
-        inits = results[-1, :, :]
+        init = results[-1, :, :]
 
         # extract position data
         sol[:, :, time_seg_ids[tid]:time_seg_ids[tid + 1]] = results.T # shape: (number of variables, BATCH_SIZE, len(curr_time))
     # rescale position data for later
-    sol = sol.reshape(inits.shape[1], freqs_per_batch, ensemble_size, len(t)) # shape: (number of variables, freqs_per_batch, ensemble_size, len(curr_time))
+    sol = sol.reshape(init.shape[1], freqs_per_batch, ensemble_size, len(t)) # shape: (number of variables, freqs_per_batch, ensemble_size, len(curr_time))
     return sol

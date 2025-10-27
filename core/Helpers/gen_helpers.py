@@ -42,8 +42,6 @@ def repeat2d_r(x: np.ndarray, ensemble_size: int, batch_size: int) -> np.ndarray
         raise ValueError('Batch size must be divisible by ensemble size')
     expanded_x = x[:, np.newaxis, :]
     tiled_x_r = np.broadcast_to(expanded_x, (x.shape[0], ensemble_size, x.shape[1]))
-    #repeated_x = np.zeros((batch_size, x.shape[1]), dtype=x.dtype)
-    #repeated_x = np.repeat(x, ensemble_size, axis=0)
     return tiled_x_r.reshape(x.shape[0] * ensemble_size, x.shape[1])
 
 def plot(x: np.ndarray, y: np.ndarray, scatter: bool = False, title: str = None, labels: tuple = None, lims: list = None, hlines: tuple = None, tight: bool = True) -> None:
