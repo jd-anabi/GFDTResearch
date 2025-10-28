@@ -5,19 +5,24 @@ import math
 from typing import Dict
 import multiprocessing as mp
 
+import torch
+
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 import pint
-import torch
+from sbi import utils
+from sbi.inference import SNPE
+from sbi.analysis import pairplot
 import numpy as np
 import scipy as sp
 
-from core.Helpers import fdt_helpers as fh, gen_helpers as gh, hair_model_helpers as hmh
+from core.Helpers import fdt_helpers as fdt, gen_helpers as helpers, hair_model_helpers as model_helpers
 from core.Simulator import simulator
 
 SN_PATTERN = re.compile(r'[\s=]+([+-]?(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+\-]?\d+)?)$')  # use pattern matching to extract values (scientific notation)
 PAR_PATTERN = re.compile(r'\((.*?)\)') # use pattern matching to extract value within parentheses
 UNIT_PATTERN = re.compile(r'[a-zA-Z]+') # use pattern matching to extract units
+K_B = 1.380649e-23  # m^2 kg s^-2 K^-1
 
 if __name__ == '__main__':
     # -------------------------- BEGIN SETUP -------------------------- #
@@ -112,7 +117,7 @@ if __name__ == '__main__':
     n = int((ts[-1] - ts[0]) / dt)
     t_nd = np.linspace(ts[0], ts[-1], n)
     n_time_segs = math.ceil(t_max_nd / 200)
-    time_seg_ids = gh.get_even_ids(len(t_nd), n_time_segs + 1)
+    time_seg_ids = helpers.get_even_ids(len(t_nd), n_time_segs + 1)
 
     # recaling parameters needed for time and data
     t_rescale_params = [hb_rescale_params['k_gs_max'], hb_rescale_params['s_max'], hb_rescale_params['t_0'],
@@ -121,7 +126,7 @@ if __name__ == '__main__':
                         hb_rescale_params['k_sp'], hb_rescale_params['alpha'], hb_rescale_params['chi_hb']]
 
     # rescale time to dimensional
-    t = hmh.rescale_t(t_nd, *t_rescale_params)
+    t = model_helpers.rescale_t(t_nd, *t_rescale_params)
     dt = float(t[1] - t[0]) # rescale dt
 
     # steady-state index for analysis later
@@ -141,42 +146,55 @@ if __name__ == '__main__':
 
     # ------------- BEGIN FORCE AND FREQUENCY CALCULATIONS ------------- #
     # get frequency of spontaneous oscillation
-    low_pos = hmh.irescale_x(0, *x_rescale_params)
-    high_pos = hmh.irescale_x(10, *x_rescale_params)
+    low_pos = model_helpers.irescale_x(0, *x_rescale_params)
+    high_pos = model_helpers.irescale_x(10, *x_rescale_params)
     init_pos = np.random.randint(0, 10, size=(1, 2))
     init_probs = np.random.randint(0, 1, size=(1, 3))
-    inits = gh.concat(init_pos, init_probs)  # size: (1, 5)
+    inits = helpers.concat(init_pos, init_probs)  # size: (1, 5)
 
     dt_0 = 1e-3
     n_0 = int((ts[-1] - ts[0]) / dt_0)
     t_0 = np.linspace(ts[0], ts[-1], n_0)
     args_list = (t_0, inits, list(params), x_rescale_params, t_rescale_params, steady_id)
-    omega_center = 2 * np.pi * fh.get_sosc_freq(*args_list)
+    x_obs, omega_center = fdt.get_sosc_freq(*args_list)
+    omega_center = 2 * np.pi * omega_center
     print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi * rescale_factors['time'])} Hz')
 
+    # preliminary sbi testing
+    prior = utils.BoxUniform(torch.ones(25, device=simulator.DEVICE) * 0.001, torch.ones(25, device=simulator.DEVICE) * 1000)
+    inference_engine = SNPE(prior=prior, device=simulator.DEVICE)
+    nsims = 10000
+    thetas = prior.sample((nsims,))
+    context = np.zeros((nsims, len(t)))
+    x = simulator.sim_wrapper(thetas, context)
+    posterior_net = inference_engine.append_simulations(thetas, x).train()
+    posterior = inference_engine.build_posterior()
+    posterior_sample = posterior.sample((nsims,), x=simulator.get_moments(x_obs))
+    pairplot(posterior_sample)
+
     # ensemble variables needed
-    num_uniq_freqs = 64 # number of unique frequencies
-    ensemble_size = 128 # ensemble size for each frequency
+    num_uniq_freqs = 2**6 # number of unique frequencies
+    ensemble_size = 2**7 if simulator.BATCH_SIZE > 2**7 else 2**5 # ensemble size for each frequency
     freqs_per_batch = simulator.BATCH_SIZE // ensemble_size # number of frequencies per batch
     iterations = int(num_uniq_freqs / freqs_per_batch)
 
     # calculate stimulus force position (both models)
-    f = fh.force(t, amp, omega_center, phase, offset, num_uniq_freqs)
-    f_nd = hmh.irescale_f(f, hb_rescale_params['gamma'], hb_rescale_params['d'],
-                          hb_rescale_params['k_sp'], hb_rescale_params['chi_hb'])
+    f = fdt.force(t, amp, omega_center, phase, offset, num_uniq_freqs)
+    f_nd = model_helpers.irescale_f(f, hb_rescale_params['gamma'], hb_rescale_params['d'],
+                                    hb_rescale_params['k_sp'], hb_rescale_params['chi_hb'])
     f = f[:, steady_id:]  # steady-state portion of force
     f_driven = f[1:, :]  # ignore undriven force
 
     # find which index in the array of driving frequencies corresponds to omega_center
-    omegas = fh.gen_freqs(omega_center, num_uniq_freqs) # generate frequencies
+    omegas = fdt.gen_freqs(omega_center, num_uniq_freqs) # generate frequencies
     omega_center_id = np.argmax(omegas == omega_center)
-    nd_f_params = hmh.irescale_f_params(omegas, amp, phase, offset,
-                                        hb_rescale_params['gamma'], hb_rescale_params['d'],
-                                        hb_rescale_params['k_sp'],
-                                        hb_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'],
-                                        hb_rescale_params['s_max'],
-                                        hb_rescale_params['s_max_nd'], hb_rescale_params['chi_a'],
-                                        hb_rescale_params['t_0'])
+    nd_f_params = model_helpers.irescale_f_params(omegas, amp, phase, offset,
+                                                  hb_rescale_params['gamma'], hb_rescale_params['d'],
+                                                  hb_rescale_params['k_sp'],
+                                                  hb_rescale_params['chi_hb'], hb_rescale_params['k_gs_max'],
+                                                  hb_rescale_params['s_max'],
+                                                  hb_rescale_params['s_max_nd'], hb_rescale_params['chi_a'],
+                                                  hb_rescale_params['t_0'])
     omegas_nd, amp_nd, phases_nd, offset_nd = nd_f_params[0], nd_f_params[1], nd_f_params[2], nd_f_params[3]
     # ------------- END FORCE AND FREQUENCY CALCULATIONS ------------- #
 
@@ -199,37 +217,37 @@ if __name__ == '__main__':
     # initial conditions for first batch
     init_pos = np.random.randint(0, 10, size=(simulator.BATCH_SIZE, 2))
     init_probs = np.random.randint(0, 1, size=(simulator.BATCH_SIZE, 3))
-    inits = gh.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
+    inits = helpers.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
 
     for iteration in range(iterations):
         print(f"\nIteration {iteration + 1}: ")
         low_freq = 0
         chi_id_offset = -1
-        curr_f_batch = gh.repeat2d_r(f_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch, :], ensemble_size, simulator.BATCH_SIZE)
+        curr_f_batch = helpers.repeat2d_r(f_nd[iteration * freqs_per_batch:(iteration + 1) * freqs_per_batch, :], ensemble_size, simulator.BATCH_SIZE)
         x = simulator.sim(t_nd, inits, list(params), curr_f_batch, n_time_segs, simulator.BATCH_SIZE, freqs_per_batch)[0]
 
         # rescale position data for later
         x = x.reshape(freqs_per_batch, ensemble_size, len(t_nd)) # shape: (freqs_per_batch, ensemble_size, len(curr_time))
-        x = hmh.rescale_x(x, *x_rescale_params)
+        x = model_helpers.rescale_x(x, *x_rescale_params)
         x = x[:, :, steady_id:]  # only want to use the steady-state solution
         if iteration == 0:
             x0 = x[0, :, :]
-            avg_auto_corr = fh.auto_corr(x0, d=ensemble_size)
-            avg_psd = fh.psd(x0, n_steady, dt, int_freqs=pos_freqs, d=ensemble_size)
-            avg_psd_at_omegas = fh.psd(x0, n_steady, dt, int_freqs=(omegas / (2 * np.pi)), d=ensemble_size)
+            avg_auto_corr = fdt.auto_corr(x0, d=ensemble_size)
+            avg_psd = fdt.psd(x0, n_steady, dt, int_freqs=pos_freqs, d=ensemble_size)
+            avg_psd_at_omegas = fdt.psd(x0, n_steady, dt, int_freqs=(omegas / (2 * np.pi)), d=ensemble_size)
             low_freq = 1
             chi_id_offset = 0
 
         # arguments needed for multiprocessing
         chi_args = [(x[freq, :, :], f[iteration * freqs_per_batch + freq, :], ensemble_size, omegas[iteration * freqs_per_batch + freq - 1].item(), dt)
                     for freq in range(low_freq, freqs_per_batch)]
-        with mp.Pool(int(0.75 * mp.cpu_count())) as pool:
-            chis = pool.starmap(fh.chi, chi_args)
+        with mp.Pool(int(0.9 * mp.cpu_count())) as pool:
+            chis = pool.starmap(fdt.chi, chi_args)
         chi_id_start = iteration * len(chis) + chi_id_offset
         for chi_id in range(len(chis)):
             avg_real_chi[chi_id_start + chi_id] = np.real(chis[chi_id])
             avg_imag_chi[chi_id_start + chi_id] = np.imag(chis[chi_id])
-        inits = gh.concat(init_pos, init_probs)
+        inits = helpers.concat(init_pos, init_probs)
 
     # rescale everything to SI units
     t = rescale_factors['time'] * t
@@ -242,33 +260,31 @@ if __name__ == '__main__':
     avg_imag_chi = rescale_factors['time']**2 / rescale_factors['mass'] * avg_imag_chi
 
     # ------------- BEGIN FDT CALCULATIONS ------------- #
-    # calculate fluctuation response
-    k_b = 1.380649e-23 # m^2 kg s^-2 K^-1
-    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (k_b * parameters['u_gs_max'])
+    temp = hb_rescale_params['k_gs_max'] * hb_rescale_params['d']**2 / (K_B * parameters['u_gs_max'])
     temp = (rescale_factors['mass'] * rescale_factors['distance']**3 / rescale_factors['time']**2) * temp
-    theta = fh.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, onesided=onesided)
+    theta = fdt.fluc_resp(avg_psd_at_omegas[1:], avg_imag_chi, omegas[1:], temp, onesided=onesided)
     # ------------- END FDT CALCULATIONS ------------- #
 
     # ------------- BEGIN PLOTTING ------------- #
     t = t[steady_id:]
 
     # preliminary plotting
-    gh.plot(t, x0[0, :], labels=(r'Time (s)', r'$x_{0}$ (m)'))
+    helpers.plot(t, x0[0, :], labels=(r'Time (s)', r'$x_{0}$ (m)'))
 
     # autocorrelation function
-    gh.plot(t, avg_auto_corr, labels=(r'Time (s)', r'$\langle \frac{C(t)}{C(0)} \rangle \text{m}^2$'))
+    helpers.plot(t, avg_auto_corr, labels=(r'Time (s)', r'$\langle \frac{C(t)}{C(0)} \rangle \text{m}^2$'))
 
     # Power spectral density
-    gh.plot(pos_freqs, avg_psd, labels=(r'Frequency (Hz)', r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$'), lims=[(pos_freqs[0], pos_freqs[len(pos_freqs)//2])])
-    gh.plot(omegas, avg_psd_at_omegas, labels=(r'Angular frequency (rad/s)', r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$'), lims=[(0, omegas[-1])])
+    helpers.plot(pos_freqs, avg_psd, labels=(r'Frequency (Hz)', r'Power spectral density $\left(\frac{\text{m}^2}{Hz}\right)$'), lims=[(pos_freqs[0], pos_freqs[len(pos_freqs) // 2])])
+    helpers.plot(omegas, avg_psd_at_omegas, labels=(r'Angular frequency (rad/s)', r'Power spectral density $\left(\frac{\text{m}^2}{rad/s}\right)$'), lims=[(0, omegas[-1])])
 
     # linear response function
-    gh.plot(omegas[1:] / (2 * np.pi), avg_real_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Re\{\chi_x\}$'))
-    gh.plot(omegas[1:] / (2 * np.pi), avg_imag_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Im\{\chi_x\}$'))
+    helpers.plot(omegas[1:] / (2 * np.pi), avg_real_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Re\{\chi_x\}$'))
+    helpers.plot(omegas[1:] / (2 * np.pi), avg_imag_chi, scatter=True, labels=(r'Driving Frequency (Hz)', r'$\Im\{\chi_x\}$'))
 
     # theta
-    gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'), hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
-    gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'))
+    helpers.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'), hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
+    helpers.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'))
 
     y_scale_range = 0
     while True:
@@ -277,6 +293,6 @@ if __name__ == '__main__':
         except ValueError:
             print("Invalid input")
             break
-        gh.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'),
-                lims=[(omegas[1], omegas[-1]), (-y_scale_range, y_scale_range)], hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
+        helpers.plot(omegas[1:], theta, scatter=True, labels=(r'Angular frequency (rad/s)', r'$\theta(\omega)$'),
+                     lims=[(omegas[1], omegas[-1]), (-y_scale_range, y_scale_range)], hlines=(1, omegas[1] / (2 * np.pi), omegas[-1] / (2 * np.pi)))
     # ------------- END PLOTTING ------------- #

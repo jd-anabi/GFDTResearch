@@ -8,13 +8,10 @@ from core.Solvers import sdeint
 from core.Models import nondimensional_model as nd_model, steady_nondimensional_model as steady_nd_model
 from core.Helpers import hair_model_helpers as hmh
 
-K_B = 1.380649e-23 # m^2 kg s^-2 K^-1
 SOSC_MAX_RANGE = 1.5
 SOSC_MIN_RANGE = 0.5
 
-def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
-                  x_rescale_params: list, t_rescale_params: list,
-                  steady_id: float, explicit: bool = True) -> float:
+def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list, x_rescale_params: list, t_rescale_params: list, steady_id: float, explicit: bool = True) -> tuple:
     """
     Finds the frequency of spontaneous oscillations for an undriven hair bundle given a set of parameters and initial conditions
     :param t: time array
@@ -43,7 +40,7 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     n = len(t)
     ts = [t[0], t[-1]]
 
-    # solving a system of SDEs and implementing a progress bar (this is cool fyi)
+    # solving a system of SDEs
     solver = sdeint.Solver()
     sol = torch.zeros((n, 1, x0.shape[1]), dtype=dtype, device=device)
     with torch.no_grad():
@@ -58,6 +55,7 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
 
     result = sol.cpu().detach().numpy() # shape: (len(t), 1, x0.shape[1])
     x = result[:, 0, 0]
+    x0 = x
     x = hmh.rescale_x(x, *x_rescale_params)
     t = hmh.rescale_t(t, *t_rescale_params)
     x = x[steady_id:]
@@ -66,7 +64,7 @@ def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list,
     freqs = sp.fft.rfftfreq(x.shape[0], dt)
     xf = sp.fft.rfft(x - np.mean(x), x.shape[0])
     sosc_id = np.argmax(xf)
-    return freqs[sosc_id]
+    return x, freqs[sosc_id]
 
 def gen_freqs(omega_0: float, n: int = 5000) -> np.ndarray:
     """
@@ -226,8 +224,9 @@ def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: flo
     :param onesided: whether the PSD is one-sided or not
     :return: the fluctuation response function
     """
+    k_b = 1.380649e-23  # m^2 kg s^-2 K^-1
     onesided_factor = 4 if onesided else 2
     theta = np.zeros_like(omegas)
     for i in range(len(theta)):
-        theta[i] = omegas[i] * s[i] / (onesided_factor * K_B * temp * np.abs(imag_chi[i]))
+        theta[i] = omegas[i] * s[i] / (onesided_factor * k_b * temp * np.abs(imag_chi[i]))
     return theta
