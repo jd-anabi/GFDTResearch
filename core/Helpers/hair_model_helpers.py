@@ -1,8 +1,7 @@
+import torch
 import numpy as np
-from sympy.abc import alpha
 
-
-def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> np.ndarray:
+def rescale_x(x_nd: torch.Tensor, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> torch.Tensor:
     """
     Rescaling the hair-bundle displacement
     :param x_nd: the hair bundle position
@@ -15,9 +14,9 @@ def rescale_x(x_nd: np.ndarray, gamma: float, d: float, x_sp: float, k_sp: float
     :return: the rescaled hair-bundle displacement
     """
     x = chi_hb * d / gamma * x_nd + k_sp * x_sp / (k_sp + alpha)
-    return x
+    return x.to(x_nd.device)
 
-def irescale_x(x: float, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> float:
+def irescale_x(x: torch.Tensor, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> torch.Tensor:
     """
     Rescaling the hair-bundle displacement from dimensional -> non-dimensional
     :param x: the hair bundle position
@@ -30,12 +29,12 @@ def irescale_x(x: float, gamma: float, d: float, x_sp: float, k_sp: float, alpha
     :return: the rescaled hair-bundle displacement
     """
     x_nd = gamma * (x - k_sp * x_sp / (k_sp + alpha)) / (chi_hb * d)
-    return x_nd
+    return x_nd.to(x.device)
 
-def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> np.ndarray:
+def rescale_t(t_nd: torch.Tensor, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> torch.Tensor:
     """
     Rescaling the time array
-    :param nd_t: the time array
+    :param t_nd: the time array
     :param k_gs_max: maximum stiffness of gating spring
     :param s_max: maximum slipping rate
     :param t_0: time offset
@@ -43,10 +42,10 @@ def rescale_t(nd_t: np.ndarray, k_gs_max: float, s_max: float, t_0: float, s_max
     :param chi_a: non-dimensional parameter for non-dimensional adaptation motor displacement
     :return:  the rescaled time
     """
-    t = chi_a * s_max_nd / (k_gs_max * s_max) * nd_t - t_0
-    return t
+    t = chi_a * s_max_nd / (k_gs_max * s_max) * t_nd - t_0
+    return t.to(t_nd.device)
 
-def irescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb: float) -> np.ndarray:
+def irescale_f(force: torch.Tensor, gamma: float, d: float, k_sp: float, chi_hb: float) -> torch.Tensor:
     """
     Rescaling the stimulus force from dimensional -> non-dimensional
     :param force: the stimulus force position
@@ -57,11 +56,11 @@ def irescale_f(force: np.ndarray, gamma: float, d: float, k_sp: float, chi_hb: f
     :return: the rescaled stimulus force
     """
     force_nd = gamma / (chi_hb * k_sp * d) * force
-    return force_nd
+    return force_nd.to(force.device)
 
-def irescale_f_params(omegas: np.ndarray, amp: float, phase: float, offset: float,
+def irescale_f_params(omegas: torch.Tensor, amp: float, phase: float, offset: float,
                       gamma: float, d: float, k_sp: float, chi_hb: float,
-                      k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[np.ndarray, float, np.ndarray, float]:
+                      k_gs_max: float, s_max: float, s_max_nd: float, chi_a: float, t_0: float) -> tuple[torch.Tensor, float, torch.Tensor, float]:
     """
     Rescale the stimulus force (sinusoidal force)  parameters from dimensional -> non-dimensional
     :param amp: amplitude
@@ -85,4 +84,4 @@ def irescale_f_params(omegas: np.ndarray, amp: float, phase: float, offset: floa
     offset_nd = alpha * offset
     omega_nd = t_prime * omegas
     phases_nd = phase - t_0 * omegas
-    return omega_nd, amp_nd, phases_nd, offset_nd
+    return omega_nd.to(omegas.device), amp_nd, phases_nd.to(omegas.device), offset_nd

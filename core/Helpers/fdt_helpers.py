@@ -1,103 +1,50 @@
 from typing import Union
 
+import torch
 import scipy as sp
 import numpy as np
-import torch
+from numpy.ma.core import shape
 
-from core.Solvers import sdeint
-from core.Models import nondimensional_model as nd_model, steady_nondimensional_model as steady_nd_model
-from core.Helpers import hair_model_helpers as hmh
+FREQ_MAX_RANGE = 1.5
+FREQ_MIN_RANGE = 0.5
 
-SOSC_MAX_RANGE = 1.5
-SOSC_MIN_RANGE = 0.5
-
-def get_sosc_freq(t: np.ndarray, x0: np.ndarray, params: list, x_rescale_params: list, t_rescale_params: list, steady_id: float, explicit: bool = True) -> tuple:
-    """
-    Finds the frequency of spontaneous oscillations for an undriven hair bundle given a set of parameters and initial conditions
-    :param t: time array
-    :param x0: the initial conditions of each simulation
-    :param params: the parameters to use in the for the non-dimensional hair bundle constructor
-    :param x_rescale_params: the parameters to use for scaling the data
-    :param t_rescale_params: the parameters to use for scaling the time
-    :param steady_id: the index of the steady-state solution slice
-    :param explicit: whether to use the explicit Euler-Maruyama method
-    :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
-    """
-    device = torch.device('cpu')
-    dtype = torch.float64 if device.type == 'cuda' or device.type == 'cpu' else torch.float32
-
-    # check if we are using the steady-state solution
-    if params[3] == 0:
-        x0 = x0[:, :4]
-        sde = steady_nd_model.HairBundleSDE(*params, np.zeros((1, len(t))), batch_size=1, device=device, dtype=dtype).to(device)
-    else:
-        sde = nd_model.HairBundleSDE(*params, np.zeros((1, len(t))), batch_size=1, device=device, dtype=dtype).to(device)
-
-    # setting up initial conditions
-    x0s = torch.tensor(x0, dtype=dtype, device=device)
-
-    # time array
-    n = len(t)
-    ts = [t[0], t[-1]]
-
-    # solving a system of SDEs
-    solver = sdeint.Solver()
-    sol = torch.zeros((n, 1, x0.shape[1]), dtype=dtype, device=device)
-    with torch.no_grad():
-        try:
-            if explicit:
-                sol = solver.euler(sde, x0s, ts, n) # only keep the last solution
-            else:
-                sol = solver.implicit_euler(sde, x0s, ts, n)
-        except (Warning, Exception) as e:
-            print(e)
-            exit()
-
-    result = sol.cpu().detach().numpy() # shape: (len(t), 1, x0.shape[1])
-    x = result[:, 0, 0]
-    x0 = x
-    x = hmh.rescale_x(x, *x_rescale_params)
-    t = hmh.rescale_t(t, *t_rescale_params)
-    x = x[steady_id:]
-    t = t[steady_id:]
-    dt = t[1] - t[0] if t.shape[0] != 1 else 0
-    freqs = sp.fft.rfftfreq(x.shape[0], dt)
-    xf = sp.fft.rfft(x - np.mean(x), x.shape[0])
-    sosc_id = np.argmax(xf)
-    return x, freqs[sosc_id]
-
-def gen_freqs(omega_0: float, n: int = 5000) -> np.ndarray:
+def gen_freqs(omega_0: float, n: int = 5000) -> torch.Tensor:
     """
     Returns an array of driving frequencies around omega_0
     :param omega_0: the frequency to generate the array around
     :param n: number of frequencies to generate
     :return: an array of driving frequencies around omega_0
     """
-    omegas = np.linspace(SOSC_MIN_RANGE * omega_0, SOSC_MAX_RANGE * omega_0, n - 2)
+    if n < 2:
+        omegas = torch.linspace(FREQ_MIN_RANGE * omega_0, FREQ_MAX_RANGE * omega_0, n, device=torch.device('cpu'))
+        return torch.unique(omegas)
+    else:
+        omegas = torch.linspace(FREQ_MIN_RANGE * omega_0, FREQ_MAX_RANGE * omega_0, n - 2, device=torch.device('cpu'))
     delta = omegas[1] - omegas[0]
     if np.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
-    omegas = np.append(omegas, omega_0)
-    omegas = np.append(omegas, 0)
-    omegas = np.sort(omegas)
-    return np.unique(omegas)
+    omegas = torch.append(omegas, omega_0)
+    omegas = torch.append(omegas, 0)
+    omegas = torch.sort(omegas)
+    return torch.unique(omegas)
 
-def force(t: np.ndarray, amp: float, omega_0: float, phase: float, offset: float, n: int = 5000) -> np.ndarray:
+def force(t: torch.Tensor, amp: float, omega_0: float, phase: float, offset: float, batch_size: int = 1, device: torch.device = torch.device('cpu')) -> torch.Tensor:
     """
-    Returns the stimulus force position at times t
+    Returns the force at times t
     :param t: time
     :param amp: amplitude
     :param omega_0: angular frequency of spontaneous oscillations
-    :param phase: phase of the stimulus force
-    :param offset: offset of the stimulus force
-    :param n: number of stimulus forces
-    :return: the stimulus force position
+    :param phase: phase of the force
+    :param offset: offset of the force
+    :param batch_size: batch size of forces
+    :param device: device to compute forces on
+    :return: the force
     """
-    sf_batches = np.zeros((n, len(t)))
-    omegas = gen_freqs(omega_0, n)
-    for i in range(n):
-        sf_batches[i] = amp * np.cos(omegas[i] * t + phase) + offset
-    return sf_batches
+    forces = torch.zeros((batch_size, t.shape[0]), dtype=t.dtype, device=device)
+    omegas = gen_freqs(omega_0, batch_size).to(device)
+    for i in range(batch_size):
+        forces[i] = amp * torch.cos(omegas[i] * t + phase) + offset
+    return forces
 
 def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
     """
