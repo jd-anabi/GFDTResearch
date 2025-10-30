@@ -21,11 +21,10 @@ def gen_freqs(omega_0: float, n: int = 5000) -> torch.Tensor:
     else:
         omegas = torch.linspace(FREQ_MIN_RANGE * omega_0, FREQ_MAX_RANGE * omega_0, n - 2, device=torch.device('cpu'))
     delta = omegas[1] - omegas[0]
-    if np.any(omegas == omega_0):
+    if torch.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
-    omegas = torch.append(omegas, omega_0)
-    omegas = torch.append(omegas, 0)
-    omegas = torch.sort(omegas)
+    omegas = torch.cat((omegas, torch.tensor([omega_0], dtype=omegas.dtype, device=omegas.device)), dim=0)
+    omegas = torch.cat((omegas, torch.tensor([0], dtype=omegas.dtype, device=omegas.device)), dim=0)
     return torch.unique(omegas)
 
 def force(t: torch.Tensor, amp: float, omega_0: float, phase: float, offset: float, batch_size: int = 1, device: torch.device = torch.device('cpu')) -> torch.Tensor:

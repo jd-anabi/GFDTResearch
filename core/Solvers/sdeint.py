@@ -16,7 +16,7 @@ class Solver:
             :return: tensor of the solution; shape: (n, batch size, d)
             """
             # time info
-            t = torch.linspace(*ts, n)
+            t = torch.linspace(*ts, n, device=x0.device)
             dt = t[1].item() - t[0].item() # fixed time step
 
             # dimensions

@@ -6,7 +6,7 @@ class HairBundleSDE(torch.nn.Module):
                  c_min: torch.Tensor, s_min: torch.Tensor, s_max: torch.Tensor, ca2_m: torch.Tensor,
                  ca2_gs: torch.Tensor, u_gs_max: torch.Tensor, delta_e: torch.Tensor, k_gs_ratio: torch.Tensor,
                  chi_hb: torch.Tensor, chi_a: torch.Tensor, x_c: torch.Tensor, eta_hb: torch.Tensor,
-                 eta_a: torch.Tensor, force: torch.Tensor, batch_size: int, device: torch.device = 'cuda',
+                 eta_a: torch.Tensor, force: torch.Tensor, batch_size: int, device: torch.device = torch.device('cpu'),
                  dtype: torch.dtype = torch.float64):
         super().__init__()
         # sde model parameters
@@ -54,8 +54,11 @@ class HairBundleSDE(torch.nn.Module):
         return dx
 
     def g(self, x=None, t=None) -> torch.Tensor:
-        dsigma = torch.tensor([self.__hb_noise(), self.__a_noise(), 0, 0], dtype=self.dtype, device=self.device)
-        return torch.tile(torch.diag(dsigma), (self.batch_size, 1, 1))
+        hb_noise = self.__hb_noise()
+        a_noise = self.__a_noise()
+        dsigma = torch.stack((hb_noise, a_noise, torch.zeros_like(hb_noise), torch.zeros_like(hb_noise)), dim=0)
+        dsigma = torch.atleast_2d(torch.transpose(dsigma, -1, 0))
+        return torch.diag_embed(dsigma)
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:
@@ -86,8 +89,8 @@ class HairBundleSDE(torch.nn.Module):
         return 1 / (1 + self.E_exp * torch.exp(arg))
 
     # noise
-    def __hb_noise(self) -> float:
+    def __hb_noise(self) -> torch.Tensor:
         return self.eta_hb / self.tau_hb
 
-    def __a_noise(self) -> float:
+    def __a_noise(self) -> torch.Tensor:
         return -1 * self.s_max * self.s_min * self.eta_a
