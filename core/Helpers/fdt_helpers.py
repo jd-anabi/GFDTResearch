@@ -1,50 +1,44 @@
-from typing import Union
-
 import torch
-import scipy as sp
-import numpy as np
-from numpy.ma.core import shape
 
-FREQ_MAX_RANGE = 1.5
-FREQ_MIN_RANGE = 0.5
-
-def gen_freqs(omega_0: float, n: int = 5000) -> torch.Tensor:
+def gen_freqs(omega_0: float, n: int = 1, bounds: tuple = (0.5, 1.5), device: torch.device = torch.device('cpu')) -> torch.Tensor:
     """
     Returns an array of driving frequencies around omega_0
     :param omega_0: the frequency to generate the array around
     :param n: number of frequencies to generate
+    :param bounds: the range of frequencies to generate about omega_0
+    :param device: device to compute frequencies on
     :return: an array of driving frequencies around omega_0
     """
     if n < 2:
-        omegas = torch.linspace(FREQ_MIN_RANGE * omega_0, FREQ_MAX_RANGE * omega_0, n, device=torch.device('cpu'))
+        omegas = torch.linspace(bounds[0] * omega_0, bounds[1] * omega_0, n, device=device)
         return torch.unique(omegas)
     else:
-        omegas = torch.linspace(FREQ_MIN_RANGE * omega_0, FREQ_MAX_RANGE * omega_0, n - 2, device=torch.device('cpu'))
+        omegas = torch.linspace(bounds[0] * omega_0, bounds[1] * omega_0, n - 2, device=device)
     delta = omegas[1] - omegas[0]
     if torch.any(omegas == omega_0):
         omegas[omegas == omega_0] = omega_0 + delta / 2
-    omegas = torch.cat((omegas, torch.tensor([omega_0], dtype=omegas.dtype, device=omegas.device)), dim=0)
-    omegas = torch.cat((omegas, torch.tensor([0], dtype=omegas.dtype, device=omegas.device)), dim=0)
+    omegas = torch.cat((omegas, torch.tensor([omega_0], dtype=omegas.dtype, device=device)), dim=0)
+    omegas = torch.cat((omegas, torch.tensor([0], dtype=omegas.dtype, device=device)), dim=0)
     return torch.unique(omegas)
 
-def force(t: torch.Tensor, amp: float, omega_0: float, phase: float, offset: float, batch_size: int = 1, device: torch.device = torch.device('cpu')) -> torch.Tensor:
+def force(t: torch.Tensor, amp: float, omega_0: float, phase: float, offset: float, batch_size: int = 1) -> torch.Tensor:
     """
-    Returns the force at times t
-    :param t: time
-    :param amp: amplitude
-    :param omega_0: angular frequency of spontaneous oscillations
+    Returns the force at times t for different frequencies centered around omega_0
+    :param t: time series tensor
+    :param amp: amplitude of the force
+    :param omega_0: angular frequency to center forcing at
     :param phase: phase of the force
     :param offset: offset of the force
     :param batch_size: batch size of forces
-    :param device: device to compute forces on
-    :return: the force
+    :return: the force (shape = (batch_size, t.shape[0]))
     """
-    forces = torch.zeros((batch_size, t.shape[0]), dtype=t.dtype, device=device)
-    omegas = gen_freqs(omega_0, batch_size).to(device)
+    forces = torch.zeros((batch_size, t.shape[0]), dtype=t.dtype, device=t.device)
+    omegas = gen_freqs(omega_0, batch_size)
     for i in range(batch_size):
         forces[i] = amp * torch.cos(omegas[i] * t + phase) + offset
     return forces
 
+'''
 def auto_corr(x: np.ndarray, d: int = 1) -> np.ndarray:
     """
     Returns the (normalized) auto-correlation function <X(t) X(0)> for the time series data
@@ -176,3 +170,4 @@ def fluc_resp(s: np.ndarray, imag_chi: np.ndarray, omegas: np.ndarray, temp: flo
     for i in range(len(theta)):
         theta[i] = omegas[i] * s[i] / (onesided_factor * k_b * temp * np.abs(imag_chi[i]))
     return theta
+'''

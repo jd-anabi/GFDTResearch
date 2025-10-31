@@ -8,8 +8,8 @@ class HairBundleSDE(torch.nn.Module):
                  c_min: torch.Tensor, s_min: torch.Tensor, s_max: torch.Tensor, ca2_m: torch.Tensor,
                  ca2_gs: torch.Tensor, u_gs_max: torch.Tensor, delta_e: torch.Tensor, k_gs_ratio: torch.Tensor,
                  chi_hb: torch.Tensor, chi_a: torch.Tensor, x_c: torch.Tensor, eta_hb: torch.Tensor,
-                 eta_a: torch.Tensor, force: torch.Tensor, batch_size: int, device: torch.device = 'cuda',
-                 dtype: torch.dtype = torch.float64):
+                 eta_a: torch.Tensor, force: torch.Tensor, batch_size: int, device: torch.device = 'cpu',
+                 dtype: torch.dtype = torch.float32):
         super().__init__()
         # sde model parameters
         self.batch_size = batch_size
@@ -45,19 +45,22 @@ class HairBundleSDE(torch.nn.Module):
         self.k_gs_offset = 1 - self.k_gs_ratio
         self.E_exp = torch.exp(self.u_gs_max * self.delta_e)
 
-    def f(self, x, t, t_id) -> torch.Tensor:
+    def f(self, x, t) -> torch.Tensor:
         dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
         dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4])
         dp_m = self.__p_m_dot(x[:, 2], x[:, 4])
         dp_gs = self.__p_gs_dot(x[:, 3], x[:, 4])
         dp_t = self.__p_t_dot(x[:, 0], x[:, 1], x[:, 3], x[:, 4])
-        dx_hb = dx_hb + self.force[:, t_id] / self.tau_hb
+        dx_hb = dx_hb + self.force[:, t] / self.tau_hb
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs, dp_t), dim=1)
         return dx
 
-    def g(self, x = None, t = None) -> torch.Tensor:
-        dsigma = torch.tensor([self.__hb_noise(), self.__a_noise(), 0, 0, 0], dtype=self.dtype, device=self.device)
-        return torch.tile(torch.diag(dsigma), (self.batch_size, 1, 1))
+    def g(self) -> torch.Tensor:
+        hb_noise = self.__hb_noise()
+        a_noise = self.__a_noise()
+        dsigma = torch.stack((hb_noise, a_noise, torch.zeros_like(hb_noise), torch.zeros_like(hb_noise), torch.zeros(hb_noise)), dim=0)
+        dsigma = torch.atleast_2d(torch.transpose(dsigma, -1, 0))
+        return torch.diag_embed(dsigma)
 
     # -------------------------------- PDEs (begin) ----------------------------------
     def __x_hb_dot(self, x_hb, x_a, p_gs, p_t) -> torch.Tensor:

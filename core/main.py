@@ -4,8 +4,6 @@ import math
 from typing import Dict
 import multiprocessing as mp
 
-from torch import dtype
-
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 import pint
@@ -73,7 +71,7 @@ if __name__ == '__main__':
         factors = [ureg(unit).to_base_units().magnitude for unit in units]
         units_rescale: Dict[str, float] = {'distance': factors[0], 'mass': factors[1], 'time': factors[2]}
     except pint.UndefinedUnitError as e:
-        print(f'Error: {e}. Unrecognized units.')
+        print(f"Error: {e}. Unrecognized units.")
         exit()
     # -------------------------- END SETUP -------------------------- #
 
@@ -107,9 +105,9 @@ if __name__ == '__main__':
     t_max = int(input("Max time: "))
     ts = (0, t_max)
     n = int((ts[-1] - ts[0]) / dt)
-    t_nd = torch.linspace(ts[0], ts[-1], n, dtype=DTYPE, device=DEVICE)
+    t_nd = torch.linspace(ts[0], ts[-1], n, dtype=torch.float32, device=torch.device('cpu'))
     steady_id = int(0.4 * len(t_nd))
-    segs = math.ceil(t_max / 200)
+    segs = math.ceil(ts[-1] / 100)
     time_seg_ids = helpers.get_even_ids(t_nd.shape[0], segs + 1)
 
     # rescale time to dimensional
@@ -130,32 +128,22 @@ if __name__ == '__main__':
     init_pos = np.random.randint(0, 10, size=(BATCH_SIZE, 2))
     init_probs = np.random.randint(0, 1, size=(BATCH_SIZE, 3))
     inits = helpers.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
-    inits = torch.tensor(inits, dtype=DTYPE, device=DEVICE)
+    inits = torch.tensor(inits, dtype=torch.float32, device=torch.device('cpu'))
     inits_0 = inits[0, :].unsqueeze(0)
 
     sim = simulator.Simulator(torch.tensor(params, dtype=torch.float32, device=torch.device('cpu')).unsqueeze(0),
-                              t_nd.to(torch.device('cpu'), dtype=torch.float32), inits_0.to(torch.device('cpu'), dtype=torch.float32),
-                              fdt.force(t_nd, 0, 0, 0, 0, 1, device=torch.device('cpu')),
-                              segs=segs, device=torch.device('cpu'))
+                              fdt.force(t_nd, 0, 0, 0, 0, 1),
+                              inits_0.to(torch.device('cpu'), dtype=torch.float32), t_nd.to(torch.device('cpu'), dtype=torch.float32), segs=segs)
     x0 = sim.simulate()[0, 0, 0]
     helpers.plot(units_rescale['time'] * t.cpu().detach().numpy()[steady_id:], units_rescale['distance'] * x0.cpu().detach().numpy()[steady_id:], labels=(r'Time (s)', r'$x_{0}$ (m)'))
     omega_center = 2 * np.pi * pos_freqs[torch.argmax(torch.abs(torch.fft.rfft(x0 - torch.mean(x0))))]
-    print(f'Frequency of spontaneous oscillations: {omega_center / (2 * np.pi * units_rescale['time'])} Hz')
+    print(f"Frequency of spontaneous oscillations: {omega_center / (2 * np.pi * units_rescale['time'])} Hz")
 
     prior = utils.BoxUniform(low=torch.zeros(17), high=torch.ones(17) * 5, device=str(DEVICE))
     thetas = prior.sample((BATCH_SIZE,)).to(dtype=DTYPE)
     for i in range(BATCH_SIZE):
         thetas[i, 3] = 0
-    print(thetas)
-    sim.batch_size = BATCH_SIZE
-    sim.params = thetas
-    sim.force = fdt.force(t_nd, 0, omega_center, 0, 0, BATCH_SIZE, device=DEVICE)
-    sim.inits = inits
-    sim.device = DEVICE
-    sim.dtype = DTYPE
-    x = sim.simulate()[0, 0, :, :]
-    print(x)
-    inference = SNPE(prior=prior)
+    print(f"Parameter samples: {thetas}")
     exit()
     # -------------------- END NATURAL FREQUENCY CALCULATION -------------------- #
 

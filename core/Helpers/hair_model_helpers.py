@@ -14,7 +14,7 @@ def rescale_x(x_nd: torch.Tensor, gamma: float, d: float, x_sp: float, k_sp: flo
     :return: the rescaled hair-bundle displacement
     """
     x = chi_hb * d / gamma * x_nd + k_sp * x_sp / (k_sp + alpha)
-    return x.to(x_nd.device)
+    return x
 
 def irescale_x(x: torch.Tensor, gamma: float, d: float, x_sp: float, k_sp: float, alpha: float, chi_hb: float) -> torch.Tensor:
     """
@@ -29,7 +29,7 @@ def irescale_x(x: torch.Tensor, gamma: float, d: float, x_sp: float, k_sp: float
     :return: the rescaled hair-bundle displacement
     """
     x_nd = gamma * (x - k_sp * x_sp / (k_sp + alpha)) / (chi_hb * d)
-    return x_nd.to(x.device)
+    return x_nd
 
 def rescale_t(t_nd: torch.Tensor, k_gs_max: float, s_max: float, t_0: float, s_max_nd: float, chi_a: float) -> torch.Tensor:
     """
@@ -43,7 +43,7 @@ def rescale_t(t_nd: torch.Tensor, k_gs_max: float, s_max: float, t_0: float, s_m
     :return:  the rescaled time
     """
     t = chi_a * s_max_nd / (k_gs_max * s_max) * t_nd - t_0
-    return t.to(t_nd.device)
+    return t
 
 def irescale_f(force: torch.Tensor, gamma: float, d: float, k_sp: float, chi_hb: float) -> torch.Tensor:
     """
@@ -56,7 +56,7 @@ def irescale_f(force: torch.Tensor, gamma: float, d: float, k_sp: float, chi_hb:
     :return: the rescaled stimulus force
     """
     force_nd = gamma / (chi_hb * k_sp * d) * force
-    return force_nd.to(force.device)
+    return force_nd
 
 def irescale_f_params(omegas: torch.Tensor, amp: float, phase: float, offset: float,
                       gamma: float, d: float, k_sp: float, chi_hb: float,
@@ -84,4 +84,4 @@ def irescale_f_params(omegas: torch.Tensor, amp: float, phase: float, offset: fl
     offset_nd = alpha * offset
     omega_nd = t_prime * omegas
     phases_nd = phase - t_0 * omegas
-    return omega_nd.to(omegas.device), amp_nd, phases_nd.to(omegas.device), offset_nd
+    return omega_nd, amp_nd, phases_nd, offset_nd

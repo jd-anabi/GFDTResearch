@@ -16,4 +16,4 @@ def get_moments(x: torch.Tensor) -> torch.Tensor:
     norm = (x_obs - mean.unsqueeze(-1)) / std.unsqueeze(-1)
     skew = (norm**3).mean(dim=-1)
     kurt = (norm**4).mean(dim=-1)
-    return torch.stack((mean, var, skew, kurt), dim=-1).to(x.device) # shape: (4, b, 1)
+    return torch.stack((mean, var, skew, kurt), dim=-1) # shape: (4, b, 1)

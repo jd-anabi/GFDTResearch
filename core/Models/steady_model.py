@@ -7,7 +7,7 @@ class HairBundleSDE(torch.nn.Module):
                  ca2_gs: torch.Tensor, u_gs_max: torch.Tensor, delta_e: torch.Tensor, k_gs_ratio: torch.Tensor,
                  chi_hb: torch.Tensor, chi_a: torch.Tensor, x_c: torch.Tensor, eta_hb: torch.Tensor,
                  eta_a: torch.Tensor, force: torch.Tensor, batch_size: int, device: torch.device = torch.device('cpu'),
-                 dtype: torch.dtype = torch.float64):
+                 dtype: torch.dtype = torch.float32):
         super().__init__()
         # sde model parameters
         self.batch_size = batch_size
@@ -43,17 +43,17 @@ class HairBundleSDE(torch.nn.Module):
         self.k_gs_offset = 1 - self.k_gs_ratio
         self.E_exp = torch.exp(self.u_gs_max * self.delta_e)
 
-    def f(self, x, t, t_id: int = 0) -> torch.Tensor:
+    def f(self, x, t: int = 0) -> torch.Tensor:
         p_t0 = self.__p_t0(x[:, 0], x[:, 1], x[:, 3])
         dx_hb = self.__x_hb_dot(x[:, 0], x[:, 1], x[:, 3], p_t0)
         dx_a = self.__x_a_dot(x[:, 0], x[:, 1], x[:, 2], x[:, 3], p_t0)
         dp_m = self.__p_m_dot(x[:, 2], p_t0)
         dp_gs = self.__p_gs_dot(x[:, 3], p_t0)
-        dx_hb = dx_hb + self.force[:, t_id] / self.tau_hb
+        dx_hb = dx_hb + self.force[:, t] / self.tau_hb
         dx = torch.stack((dx_hb, dx_a, dp_m, dp_gs), dim=1)
         return dx
 
-    def g(self, x=None, t=None) -> torch.Tensor:
+    def g(self) -> torch.Tensor:
         hb_noise = self.__hb_noise()
         a_noise = self.__a_noise()
         dsigma = torch.stack((hb_noise, a_noise, torch.zeros_like(hb_noise), torch.zeros_like(hb_noise)), dim=0)
