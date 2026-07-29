@@ -7,7 +7,12 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from abc import ABC, abstractmethod
 from torch.distributions import TransformedDistribution
-from core.SBI.reparam import build_box_bijection
+from core.SBI.reparam import build_box_bijection, clamp_to_box
+
+# Fixed k-means init for the latent GMM. A prior must be reproducible or no posterior trained from it
+# can be: sklearn defaults random_state to the global NumPy RNG, which nothing in this pipeline pins.
+GMM_RANDOM_STATE = 0
+
 
 class Prior(ABC):
     def __init__(self, dtype: torch.dtype = torch.float32,device: torch.device = torch.device('cpu')):
@@ -58,14 +63,10 @@ class Prior(ABC):
         # --- Map accepted physical points to latent space before clustering + GMM fit ---
         # eps-clamp handles the degenerate case where a sweep produced a sample exactly on
         # the box boundary: sigmoid^-1(0) = -inf and sigmoid^-1(1) = +inf would blow up.
+        # Shared with gen_training_data via reparam.clamp_to_box so the two cannot drift; safe to
+        # clamp in place here because accepted_t was just built and nothing else holds a view.
         accepted_t = torch.tensor(accepted_params, dtype=self.dtype, device=self.device)
-        eps = 1e-6
-        boxed = torch.clamp(
-            accepted_t,
-            min=lows + eps * (highs - lows),
-            max=highs - eps * (highs - lows),
-        )
-        latent_params = T_nd.inv(boxed).cpu().numpy()  # (N, d) unbounded
+        latent_params = T_nd.inv(clamp_to_box(accepted_t, T_nd)).cpu().numpy()  # (N, d) unbounded
 
         # --- Cluster in latent space (still StandardScaled for HDBSCAN's density metric) ---
         scaler = StandardScaler()
@@ -86,7 +87,11 @@ class Prior(ABC):
 
         # --- Fit GMM on UNSCALED latent points (the GMM captures raw latent-space density) ---
         progress_bar = tqdm(total=5, desc="Constructing latent prior...")
-        gmm = GaussianMixture(n_components=n_clusters, covariance_type='full').fit(latent_params)
+        # random_state pins the k-means init; without it the fit was seeded from the global NumPy RNG,
+        # so a prior (and every posterior trained from it) could not be reproduced even under a fixed
+        # torch seed. Paired with the sorted() in the *_prior samplers -- both are needed.
+        gmm = GaussianMixture(n_components=n_clusters, covariance_type='full',
+                              random_state=GMM_RANDOM_STATE).fit(latent_params)
         progress_bar.update()
         means = torch.tensor(gmm.means_, dtype=self.dtype, device=self.device)
         cov = torch.tensor(gmm.covariances_, dtype=self.dtype, device=self.device)

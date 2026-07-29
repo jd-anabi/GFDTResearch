@@ -7,6 +7,7 @@ Fluent stylesheet (design.build_qss) keyed on objectName ``helpBadge``, so it re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QToolTip, QWidget
+from ..design import LABEL_MAX_W, scaled
 
 from core.Helpers import labels as _labels
 from core.gui import icons
@@ -21,7 +22,9 @@ class HelpBadge(QToolButton):
         self.setObjectName("helpBadge")         # -> QToolButton#helpBadge in the global Fluent QSS
         icons.apply_icon(self, "help")          # bundled icon font (falls back to "?")
         self.setToolTip(text)
-        self.setFixedSize(16, 16)
+        # Scaled, not a hard 16: at a larger OS text size the glyph used to clip inside a box that
+        # never grew with it.
+        self.setFixedSize(scaled(16), scaled(16))
         self.setCursor(Qt.WhatsThisCursor)
         self.setFocusPolicy(Qt.NoFocus)         # a help hint must never steal tab focus from the form
         self.clicked.connect(self._pin)
@@ -36,7 +39,14 @@ def help_label(text: str, help_text: str) -> QWidget:
     layout = QHBoxLayout(holder)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(4)
-    layout.addWidget(QLabel(_labels.pretty_gui(text)))     # HTML/Unicode rich text (Qt AutoText renders it)
+    inner = QLabel(_labels.pretty_gui(text))               # HTML/Unicode rich text (Qt AutoText renders it)
+    # WRAP + a ceiling. This holder IS the QFormLayout row label, so the form sizes its whole label
+    # column to the widest one: a single long option name ("F0 (ND forcing amplitude)",
+    # "chi frequency range") narrowed every field in that form. Wrapping lets it use two lines
+    # instead of stealing width from the fields.
+    inner.setWordWrap(True)
+    inner.setMaximumWidth(LABEL_MAX_W)
+    layout.addWidget(inner)
     layout.addWidget(HelpBadge(help_text))
     layout.addStretch(1)
     return holder

@@ -1,3 +1,9 @@
 /sbi-logs/
 /archive/
 /.claude/
+
+# A 6.9 MB run log that was committed to the repo root. Ignoring it stops it coming back;
+# it is still TRACKED, so untracking is a separate, deliberate step (see PRISM_HANDOFF 9.7).
+/sbc_run.log
+*.pyc
+__pycache__/

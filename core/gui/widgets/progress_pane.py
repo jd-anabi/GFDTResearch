@@ -210,7 +210,12 @@ class ProgressPane(QWidget):
         self.spinner.setTextFormat(Qt.PlainText)
         # Fixed width: the spinner cycles glyphs and swaps to a stall message, and an unpinned label
         # would re-lay-out the pane on every 100ms tick.
-        self.spinner.setMinimumWidth(150)
+        #
+        # setFIXEDWidth, not setMinimumWidth. The comment above always claimed a pinned width, but a
+        # MINIMUM is not one: with QSizePolicy.Fixed the widget takes its sizeHint(), which grows
+        # when _tick swaps in the longer stall message -- so the pane re-laid-out exactly as the
+        # comment said it must not. setFixedWidth makes the claim true.
+        self.spinner.setFixedWidth(150)
         self.spinner.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         overall_line = QWidget()
@@ -327,7 +332,9 @@ class ProgressPane(QWidget):
         if idle > STALL_S:
             # Freeze the spinner rather than animate it. A spinner that keeps twirling on a wedged run
             # is worse than none: it actively asserts progress that is not happening.
-            self.spinner.setText(f"⏳ no output for {int(idle)}s")
+            stall = f"⏳ no output for {int(idle)}s"
+            self.spinner.setText(stall)
+            self.spinner.setToolTip(stall)      # the width is pinned now, so long text can clip
             self.sparkline.push(None)                # and drain the trend line: nothing is happening
             return
         self._frame = (self._frame + 1) % len(_SPINNER)
@@ -350,8 +357,8 @@ class ProgressPane(QWidget):
         through a full 0->100% sweep every second or two. The overall bar's job is the top-level count.
 
         Nor the outermost, and nor a sticky first-seen "driver" -- both of those peg the bar:
-          * the pos-0 bar ("Training neural posterior", core/SBI/pipeline.py:517) wraps
-            range(TRAINING_NUM_ROUNDS) and that is 1 (core/config.py:104), so it reads 0% for the
+          * the pos-0 bar ("Training neural posterior", pipeline.train_nn) wraps
+            range(TRAINING_NUM_ROUNDS) and that is 1 (config.TRAINING_NUM_ROUNDS), so it reads 0% for the
             entire multi-hour build -- hence RowState.informative excludes total<=1 bars;
           * sbi's neural-network training emits no tqdm bar at all (only a printed epoch counter), so
             a driver latched onto "Generating training data" would sit at 100% through the longest

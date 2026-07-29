@@ -11,6 +11,8 @@ CONVENTION:
 """
 from __future__ import annotations
 
+import warnings
+
 import torch
 from torch.distributions import constraints
 from torch.distributions.transforms import (
@@ -93,6 +95,39 @@ def build_box_bijection(lows: torch.Tensor, highs: torch.Tensor,
         SigmoidTransform(),                                 # ℝ -> (0, 1)
         UnitToBoxTransform(lows, highs, log_mask),          # (0, 1) -> (lo, hi), per-dim linear/log
     ])
+
+
+def clamp_to_box(theta: torch.Tensor, transform, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Clamp physical parameters into the OPEN interior of ``transform``'s box, IN PLACE.
+
+    Why this exists. The latent prior is an unbounded GMM, and in float32 ``sigmoid(z)`` rounds to
+    exactly 1.0 once z >~ 16.6 -- so T(z) can land exactly ON a box bound and T.inv() of it is
+    +-inf. A single such row NaNs the NPE loss for a whole training run, and it survives the
+    finiteness filter in train_nn because that filter only ever inspected the DATA (see the
+    thetas-side filter added alongside this). A value written back into a CLOSED interval (the
+    Sobol t_scale override) can also land marginally OUTSIDE the box, where the log branch takes
+    log() of a negative and yields NaN rather than inf. Both are covered here.
+
+    IN PLACE is load-bearing, not an optimisation: callers hold VIEWS into ``theta``
+    (gen_training_data slices it into _nd/_rescale and writes t_scale through the rescale view).
+    Rebinding to a fresh tensor would leave those views addressing the UNCLAMPED storage, so the
+    simulator would run different parameters than the latent target recorded for them -- finite,
+    in range, and completely silent.
+
+    ``eps`` and the clamp shape match Priors/prior.py, which clamps before the same inverse for the
+    same reason; that call site now delegates here so the two cannot drift apart.
+
+    :param theta:     (..., d) physical parameters, modified in place.
+    :param transform: the bijection whose box to clamp into; one without a UnitToBoxTransform part
+                      (or a non-composed transform) is a no-op.
+    :return: ``theta``, for convenience.
+    """
+    box = next((p for p in getattr(transform, "parts", ()) if isinstance(p, UnitToBoxTransform)), None)
+    if box is None:
+        return theta
+    span = box.highs - box.lows
+    return theta.clamp_(min=box.lows + eps * span, max=box.highs - eps * span)
 
 
 def _resolve_log_params(log_params) -> set:
@@ -281,6 +316,73 @@ def build_rotated_bijection(box_transform: ComposeTransform, V: torch.Tensor) ->
     return ComposeTransform([OrthogonalTransform(V.transpose(-1, -2))] + list(box_transform.parts))
 
 
+def sidecar_path(choice: str, posterior_dir):
+    """The '<name>.rot.pt' companion path for a posterior filename. One spelling, many callers."""
+    base = choice[:-3] if choice.endswith(".pt") else choice
+    return posterior_dir / (base + ".rot.pt")
+
+
+def read_sidecar(choice: str, posterior_dir, map_location=None) -> dict | None:
+    """
+    Load a posterior's '<name>.rot.pt' sidecar, normalised to the dict form.
+
+    Returns None when there is no sidecar (a pre-reparam posterior: linear box, no rotation, and no
+    recorded observation mode). A legacy BARE-TENSOR sidecar is normalised to {"V": t, "log_params": []}
+    so callers only ever handle one shape.
+    """
+    path = sidecar_path(choice, posterior_dir)
+    if not path.exists():
+        return None
+    obj = torch.load(str(path), map_location=map_location, weights_only=False)
+    return obj if isinstance(obj, dict) else {"V": obj, "log_params": []}
+
+
+def posterior_mode(posterior_latent, sidecar: dict | None = None) -> tuple[str, int, int | None]:
+    """
+    Recover the OBSERVATION MODE a saved posterior was trained in: ("spontaneous"|"forced"|"chi",
+    forcing_dim, K or None).
+
+    Three tiers, in strict precedence:
+      1. the sidecar's recorded ``mode``/``forcing_dim`` — authoritative, written since this change;
+      2. the trained network itself — our EmbeddedNet stores input_dim/forcing_dim as attributes;
+      3. arithmetic on ``condition_shape`` minus the summary width — last resort, and it WARNS,
+         because it silently goes wrong the day a 42nd summary feature is added.
+
+    Tier 2/3 decoding is ambiguous in principle (a hypothetical 6-parameter drive is indistinguishable
+    from chi at K=2), which is exactly why tier 1 exists and why the sidecar is now always written.
+    Built-in drives declare at most 5 forcing parameters, so the threshold below is safe for them.
+    """
+    if sidecar:
+        mode, fdim = sidecar.get("mode"), sidecar.get("forcing_dim")
+        if mode is not None and fdim is not None:
+            return str(mode), int(fdim), sidecar.get("chi_n_freqs")
+
+    est = getattr(posterior_latent, "posterior_estimator", None)
+    fdim = None
+    net = getattr(est, "embedding_net", None)
+    if net is not None:
+        # embedding_net is typically Sequential(Standardize, EmbeddedNet); find the part that knows.
+        parts = list(net) if hasattr(net, "__iter__") else [net]
+        fdim = next((getattr(p, "forcing_dim") for p in parts if hasattr(p, "forcing_dim")), None)
+    if fdim is None:
+        cond = getattr(est, "condition_shape", None)
+        if cond is None or len(cond) == 0:
+            raise ValueError("Cannot determine this posterior's observation mode: it has no sidecar, "
+                             "no embedding net carrying forcing_dim, and no condition_shape.")
+        from core.SBI.statistics import FEATURE_LABELS
+        fdim = int(cond[-1]) - (len(FEATURE_LABELS) + 1)
+        warnings.warn(
+            f"Posterior has no sidecar and no embedded forcing_dim; inferring forcing_dim={fdim} "
+            f"arithmetically from condition_shape={tuple(cond)}. This breaks silently if the summary "
+            f"feature count ever changes -- retrain or hand-write a sidecar.", stacklevel=2)
+    fdim = int(fdim)
+    if fdim == 0:
+        return "spontaneous", 0, None
+    if fdim >= 6 and fdim % 3 == 0:
+        return "chi", fdim, fdim // 3
+    return "forced", fdim, None
+
+
 def load_eval_bijection(cfg, choice: str, posterior_dir) -> ComposeTransform:
     """
     Reconstruct the EXACT physical-space bijection (log box + optional rotation) for a SAVED
@@ -297,17 +399,12 @@ def load_eval_bijection(cfg, choice: str, posterior_dir) -> ComposeTransform:
     :param choice:        posterior filename (e.g. "posterior_new.pt").
     :param posterior_dir: directory holding the posterior + its .rot.pt sidecar (a Path).
     """
-    base = choice[:-3] if choice.endswith(".pt") else choice
-    rot_path = posterior_dir / (base + ".rot.pt")
-    if not rot_path.exists():
-        return build_inferred_bijection(cfg, log_params=[])        # legacy: linear box, no rotation
     # map_location rehomes the saved rotation V onto this machine's device (a CUDA-trained V loads on
     # CPU/MPS) so the box+rotation transform runs on the same device as the posterior's samples.
-    obj = torch.load(str(rot_path), map_location=cfg.hw.device, weights_only=False)
-    if isinstance(obj, dict):
-        V, log_params = obj.get("V", None), obj.get("log_params", [])
-    else:                                                          # legacy bare-tensor V (linear box)
-        V, log_params = obj, []
+    obj = read_sidecar(choice, posterior_dir, map_location=cfg.hw.device)
+    if obj is None:
+        return build_inferred_bijection(cfg, log_params=[])        # legacy: linear box, no rotation
+    V, log_params = obj.get("V", None), obj.get("log_params", [])
     T = build_inferred_bijection(cfg, log_params=log_params)
     return build_rotated_bijection(T, V) if V is not None else T
 

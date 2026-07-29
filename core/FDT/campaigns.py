@@ -47,19 +47,11 @@ def _pick_n_segs(n_steps: int, batch_size: int) -> int:
 
 def _memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
     """
-    Per-batch element budget for the simulator's major device-resident tensors
-    (sol + force). On CUDA, uses a fraction of currently-free GPU memory so we
-    adapt to whatever's actually available. On CPU/MPS, defaults conservatively.
+    Per-batch element budget for the simulator's major device-resident tensors (sol + force).
+    Delegates to config.memory_budget_elements, which the SBI path shares.
     """
-    bytes_per_elem = 4 if dtype == torch.float32 else 8
-    if device.type == "cuda":
-        free_bytes, _ = torch.cuda.mem_get_info(device)
-        budget_bytes = int(free_bytes * FDT_CUDA_MEM_FRACTION)
-    elif device.type == "cpu":
-        budget_bytes = 4 * 1024 ** 3   # 4 GB conservative cap for CPU
-    else:
-        budget_bytes = 1 * 1024 ** 3   # 1 GB for MPS / other
-    return max(1, budget_bytes // bytes_per_elem)
+    from core.config import memory_budget_elements
+    return memory_budget_elements(device, dtype, FDT_CUDA_MEM_FRACTION)
 
 
 def _plan_adaptive_batches(omegas_list: list, fpb_max: int, M: int, n_vars: int,
@@ -94,7 +86,7 @@ def _plan_adaptive_batches(omegas_list: list, fpb_max: int, M: int, n_vars: int,
 def _make_simulator(cfg: FDTConfig, params, force, inits, t, *, freqs_per_batch=1, segs=1,
                     batch_size=1, device):
     """Build the model simulator for an FDT campaign. User models dispatch through the registry
-    (a UserSimulator around the compiled torch model), mirroring core/SBI/pipeline.py:132-138;
+    (a UserSimulator around the compiled torch model), mirroring pipeline.gen_obs's dispatch;
     built-ins use their VALID_SIMS class. Case-insensitive on the model name."""
     from core import registry
     if registry.is_user_model(cfg.model):
@@ -151,13 +143,15 @@ def observable_noise_prefactor(cfg: FDTConfig) -> float:
 
 
 def _n_force_channels(cfg: FDTConfig) -> int:
-    """Number of forcing channels the model's simulator expects. A user model needs ONE channel per
-    state variable (UserModel indexes force[:, j, t] per variable, Campaign drives channel 0 only);
-    a built-in uses 2 if 'amp_y' is a force param (Hopf dual-channel), else 1."""
+    """Number of forcing channels the model's simulator expects; see forcing.n_force_channels, which
+    is the single source of truth (shared with the SBI pipeline and the GUI's Simulate planner)."""
     from core import registry
-    if registry.is_user_model(cfg.model):
-        return cfg.inits_tensor.shape[1]
-    return 2 if "amp_y" in cfg.force_params_dict else 1
+    from core.forcing import n_force_channels
+    # Resolve inits_tensor ONLY for user models (which need one channel per state variable). A
+    # built-in's channel count is a property of its drift, so reading inits_tensor eagerly here would
+    # break callers that never build one -- pinned by test_n_force_channels_user_vs_builtin.
+    n_vars = cfg.inits_tensor.shape[1] if registry.is_user_model(cfg.model) else None
+    return n_force_channels(cfg.model, cfg.force_params_dict, n_vars)
 
 
 def run_campaign1_psd(cfg: FDTConfig, M: int = None, T_obs_nd: float = None,
@@ -195,8 +189,13 @@ def run_campaign1_psd(cfg: FDTConfig, M: int = None, T_obs_nd: float = None,
     sim = _make_simulator(cfg, params, force, inits, t,
                           freqs_per_batch=1, segs=n_segs, batch_size=M, device=device)
     sol = sim.simulate(state_dep_drift=cfg.state_dep_drift)  # (n_vars, 1, M, n_steps)
-    x_full = sol[0, 0, :, :]            # (M, n_steps) -- full trajectory including burn-in
-    x_steady = x_full[:, burn_idx:]      # (M, n_obs)   -- post-burn-in for PSD
+    # sol[0, 0] is a VIEW, so holding it pins the WHOLE (n_vars, 1, M, n_steps) solution -- ~2.5 GB
+    # for Nadrowski -- alive through psd_welch, for a diagnostic that only ever reads channel 0.
+    # Materialise the one channel we need, take the ensemble mean while the buffer is still around
+    # (it is the only other thing anyone wants from it), then drop the full solution.
+    x_steady = sol[0, 0, :, burn_idx:].contiguous()   # (M, n_obs) post-burn-in, its own storage
+    x_mean_full = sol[0, 0, :, :].mean(dim=0) if return_trajectory else None   # (n_steps,)
+    del sol
 
     if nperseg is None:
         nperseg = min(2 ** 14, x_steady.shape[-1])
@@ -205,7 +204,6 @@ def run_campaign1_psd(cfg: FDTConfig, M: int = None, T_obs_nd: float = None,
     omegas, G = psd_welch(x_steady, dt=dt, nperseg=nperseg)
 
     if return_trajectory:
-        x_mean_full = x_full.mean(dim=0)  # (n_steps,) -- ensemble-mean trajectory
         return omegas, G, t, x_mean_full
     return omegas, G
 

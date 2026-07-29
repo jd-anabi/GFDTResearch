@@ -6,7 +6,7 @@
 # 0.26.1); torch is already 2.9.0+cu130. After the bump, re-verify: (1) sbi still prints its per-epoch
 # counter (the GUI cancel checkpoint -- grep sbi for _maybe_show_progress / "Epochs trained");
 # (2) the calibration numbers (0.26's TARP changes make them non-comparable to the pre-upgrade
-# handoff). See gui_handoff.txt (ENV NOTE).
+# handoff). See PRISM_HANDOFF.md section 1.2 (Environment / version drift).
 
 --extra-index-url https://download.pytorch.org/whl/cu130
 

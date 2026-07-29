@@ -6,6 +6,22 @@ from core import config
 from core.Helpers import helpers
 from core.Solvers import sdeint
 
+
+class SimulationError(RuntimeError):
+    """A solver failure inside ``Simulator.simulate``, carrying the geometry that produced it.
+
+    Always raised ``from`` the underlying error, so the original traceback survives as ``__cause__``
+    and Python prints both. Callers that need to branch on the cause can test it directly, e.g.
+    ``isinstance(err.__cause__, torch.OutOfMemoryError)``.
+
+    This used to be ``print(...); exit()``, which hard-killed the interpreter: a CUDA OOM arrived with
+    no traceback (so the failing call site was unknowable), and any caller -- the test runners, the
+    GUI's QThreadPool worker, the scripts -- died mid-run with nothing reported. Note ``exit()`` is the
+    ``site`` builtin and is not guaranteed to exist at all under ``python -O`` or an embedded
+    interpreter.
+    """
+
+
 class Simulator(ABC):
     def __init__(self, params: torch.Tensor, force: torch.Tensor, inits: torch.Tensor, t: torch.Tensor,
                  freqs_per_batch: int = 1, segs: int = 1, batch_size: int = 1, device: torch.device = torch.device('cpu'),
@@ -58,11 +74,25 @@ class Simulator(ABC):
             self.sde.force = full_force[:, :, time_seg_ids[tid]:time_seg_ids[tid + 1]]
             results = self.__sols(curr_time, curr_inits, state_dep_drift)  # shape: (len(curr_time), BATCH_SIZE, number of variables)
 
-            # update initial conditions
-            curr_inits = results[-1, :, :]
+            # update initial conditions. The .clone() is load-bearing for MEMORY, not correctness:
+            # results[-1, :, :] is a VIEW into this segment's (len(curr_time), batch, n_vars) solver
+            # buffer, so carrying it into the next iteration would pin that whole buffer -- 2.5 GB at
+            # CHUNK_LEN=100k x batch=2048 x 3 vars -- alive for the whole of the next segment's
+            # integration. Copying one (batch, n_vars) row costs ~24 KB and lets the buffer go.
+            curr_inits = results[-1, :, :].clone()
 
             # extract position data
+            #
+            # SEAM DUPLICATION -- know this before building anything phase-sensitive on `sol`.
+            # sdeint writes xs[0] = x0 and then integrates range(n-1) steps, and x0 here is the
+            # PREVIOUS segment's final state. So sol[..., ids[k]] == sol[..., ids[k]-1] at every
+            # segment boundary: the trajectory advances len(t) - segs steps, not len(t) - 1, and `t`
+            # and `sol` are NOT exactly co-indexed. Negligible for the spectral/ACF features here at
+            # segs <= 3, but a feature that reads instantaneous phase or a finite difference ACROSS a
+            # seam would see a zero-length step. Note this also makes Simulator.simulate and a direct
+            # sdeint call disagree on effective length for identical inputs.
             sol[:, :, time_seg_ids[tid]:time_seg_ids[tid + 1]] = torch.transpose(results, 0, 2)  # shape: (number of variables, BATCH_SIZE, len(curr_time))
+            del results          # release the segment buffer BEFORE the next __sols allocates its own
         self.sde.force = full_force
         sol = sol.reshape(n_vars, self.freqs_per_batch, ensemble_size, self.t.shape[0])  # shape: (number of variables, frequencies per batch, ensemble size, length of time series)
         return sol
@@ -114,18 +144,23 @@ class Simulator(ABC):
         self._set_up_model()
 
     # --- PRIVATE METHODS --- #
-    def __sols(self, t: torch.Tensor, inits: torch.Tensor, state_dep_drift: bool, explicit: bool = True) -> torch.Tensor:
+    def __sols(self, t: torch.Tensor, inits: torch.Tensor, state_dep_drift: bool) -> torch.Tensor:
         """
         Returns sde solution for a hair bundle given a set of parameters and initial conditions
         :param t: time array
-        :param explicit: whether to use the explicit Euler-Maruyama method
         :return: a 2D array of length len(t) x num_vars; num_vars is 5 if pt_steady_state is False and 4 otherwise
         """
         # time array
         n = t.shape[0]
         ts = (t[0], t[-1])
 
-        # solving a system of SDEs
+        # Solving a system of SDEs. Constructed per call ON PURPOSE, despite this running once per
+        # time segment: Solver builds its three methods as closures in __init__, so resolving
+        # sdeint.Solver at CALL time is the seam that lets a caller swap the solver out (see
+        # tests/test_user_sbi.py::test_solver_failure_raises_instead_of_killing_the_process, which
+        # patches the class to make every method raise). Hoisting this to a module-level singleton
+        # saves ~3 closure allocations per ~10-second segment -- far too little to be worth losing
+        # the seam over.
         solver = sdeint.Solver()
 
         # Pick eager vs compiled. Auto: CUDA + model exposes compiled_step.
@@ -136,15 +171,20 @@ class Simulator(ABC):
 
         with torch.no_grad():
             try:
-                if not explicit:
-                    sol = solver.implicit_euler(self.sde, inits, ts, n)
-                elif use_compile:
+                if use_compile:
                     sol = solver.euler_compiled(self.sde, inits, ts, n, state_dep_drift=state_dep_drift)
                 else:
                     sol = solver.euler(self.sde, inits, ts, n, state_dep_drift=state_dep_drift)
-            except (Warning, Exception) as e:
-                print(f'Warning or Exception occurred: {e}')
-                exit()
+            # NOT BaseException: streams.WorkerCancelled derives from BaseException precisely so a
+            # cooperative cancel sails through handlers like this one to reach Worker.run. Widening
+            # here would turn every GUI cancel into a spurious simulation failure.
+            except Exception as e:
+                method = "euler_compiled" if use_compile else "euler"
+                raise SimulationError(
+                    f"{type(self.sde).__name__} {method} failed after {n} steps "
+                    f"(batch={self._batch_size}, segs={self.segs}, device={self._device}, "
+                    f"dtype={self._dtype}): {type(e).__name__}: {e}"
+                ) from e
         return sol
 
     @abstractmethod

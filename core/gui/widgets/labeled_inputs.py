@@ -3,11 +3,19 @@ the experimental-data file prompts)."""
 from PySide6.QtGui import QDoubleValidator, QIntValidator
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QWidget
 
+from ..design import FIELD_MIN_W, PATH_FIELD_MIN_W
+
+# These classes set a validator and, now, a MINIMUM WIDTH. Qt's default QFormLayout policy on Windows
+# is FieldsStayAtSizeHint, so without a floor a numeric field rendered 3-6 characters wide: typing
+# "0.033333" scrolled inside the box and the value could not be read back without clicking into it.
+# The matching half of the fix is the field-growth policy (see widgets/forms.make_form).
+
 
 class FloatField(QLineEdit):
     def __init__(self, default: float = 0.0, parent=None):
         super().__init__(str(default), parent)
         self.setValidator(QDoubleValidator())
+        self.setMinimumWidth(FIELD_MIN_W)
 
     def value(self) -> float:
         try:
@@ -20,6 +28,7 @@ class IntField(QLineEdit):
     def __init__(self, default: int = 0, parent=None):
         super().__init__(str(default), parent)
         self.setValidator(QIntValidator())
+        self.setMinimumWidth(FIELD_MIN_W)
 
     def value(self) -> int:
         try:
@@ -32,6 +41,10 @@ class PathField(QWidget):
     def __init__(self, file_filter: str = "Data (*.csv *.npy);;All files (*)", parent=None):
         super().__init__(parent)
         self.edit = QLineEdit()
+        self.edit.setMinimumWidth(PATH_FIELD_MIN_W)
+        # Absolute paths elide at the FRONT, so the filename stays visible; the tooltip carries the
+        # whole thing (a per-frequency chi row leaves only ~120px of line edit).
+        self.edit.textChanged.connect(lambda t: self.edit.setToolTip(t))
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
         self._filter = file_filter

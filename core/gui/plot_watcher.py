@@ -3,7 +3,7 @@
 WHY NOT just take them from the runner's return value: the FDT / Reduction / CrossVal runners don't
 hand their figures back. run_fdt returns None, run_reduction_map returns a ReductionRecord, and
 run_param_study_cli returns the two HDF5 *data* paths -- the figure paths are only print()ed
-(core/FDT/fdt_pipeline.py:130-148, core/Reduction/sweep.py:192, core/FDT/cross_validation.py:284).
+(FDT.fdt_pipeline.run_fdt, Reduction.sweep, FDT.cross_validation.run_fdt_param_sweep).
 
 WHY NOT scrape those prints: four modules, four different formats, and it would weld the GUI to
 print() text inside core.

@@ -17,6 +17,7 @@ construction (Campaign 2's grid is omega_0 x fixed log-ratios), so rows stack
 with no interpolation.
 """
 from __future__ import annotations
+import warnings
 import json
 import math
 from datetime import datetime
@@ -237,14 +238,19 @@ def run_fdt_param_sweep(
 
         # --- Phase B: forced response on the common grid per operating point ---
         print(f"\n--- Phase B ({sweep_param} sweep): forced response on common grid ---")
+        n_failed = 0
         for idx, (cfg_op, (freqs_psd, G)) in enumerate(zip(cfg_ops, psds)):
             print(f"  [B {idx+1}/{len(sweep_grid)}] {sweep_param}={sweep_grid[idx]:.6g}")
             grp = ops[f"{idx:03d}"]
             try:
                 chis, ratio = _campaign2_ratio(cfg_op, omegas_common, freqs_psd, G)
             except Exception as e:
+                # Recorded per point, and COUNTED. A systematic failure (a CUDA OOM, say) fails every
+                # point identically, so an overnight sweep could "complete" with nothing in it -- the
+                # per-point note scrolled past hours ago and the summary said nothing.
                 print(f"      Campaign 2 FAILED: {e}")
                 grp.attrs["error"] = str(e)
+                n_failed += 1
                 continue
 
             grp.attrs["omega_0_ref"] = omega_0_ref
@@ -260,7 +266,19 @@ def run_fdt_param_sweep(
             print(f"      T_eff/T peak = {np.nanmax(ratio.cpu().numpy()):.3g}")
             h5.flush()
 
-    print(f"\n{sweep_param} sweep complete. Saved to: {output_path}")
+    n_points = len(sweep_grid)
+    if n_failed == n_points:
+        raise RuntimeError(
+            f"{sweep_param} sweep produced NO usable points: all {n_points} operating points failed "
+            f"in Campaign 2 (per-point reasons are in the HDF5 'error' attrs). This is almost always "
+            f"one systematic cause -- a CUDA OOM repeating identically at every point -- not "
+            f"{n_points} independent failures. {output_path} contains the PSDs but no response data.")
+    if n_failed:
+        warnings.warn(
+            f"{sweep_param} sweep: {n_failed}/{n_points} operating points failed in Campaign 2 and "
+            f"carry no response data. See their 'error' attrs in {output_path}.", stacklevel=2)
+    print(f"\n{sweep_param} sweep complete ({n_points - n_failed}/{n_points} points). "
+          f"Saved to: {output_path}")
     return output_path
 
 

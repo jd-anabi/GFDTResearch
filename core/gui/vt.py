@@ -1,7 +1,7 @@
 """Route tqdm's terminal protocol into structured progress rows + clean log lines.
 
 Qt-free on purpose: everything here is plain Python, so it can be unit-tested by replaying the
-literal chunks tqdm writes (see tests/test_vt.py).
+literal chunks tqdm writes (see the classifier tests in tests/test_gui_progress.py).
 
 WHY THIS EXISTS
     The naive "split on \\r and \\n" reader that this replaces mistook tqdm's bar frames for log
@@ -79,8 +79,8 @@ class RowState:
     @property
     def informative(self) -> bool:
         """Can this row drive an overall percentage? A total=1 bar goes 0% -> 100% with nothing in
-        between -- e.g. core/SBI/pipeline.py:517 wraps range(TRAINING_NUM_ROUNDS) and that is 1
-        (core/config.py:104), so it reads 0% for the whole multi-hour posterior build."""
+        between -- e.g. pipeline.train_nn's outer bar wraps range(TRAINING_NUM_ROUNDS) and that is 1
+        (config.TRAINING_NUM_ROUNDS), so it reads 0% for the whole multi-hour posterior build."""
         return self.pct is not None and (self.total or 0) > 1
 
     @property
@@ -193,8 +193,8 @@ class StreamRouter:
         row 0 (tqdm/std.py:1302-1303). Persist the bar's final frame to the log -- which is what a
         terminal shows -- and retire the row.
 
-        Without this a finished leave=True bar (core/SBI/Priors/prior.py:88 "Constructing latent
-        prior...", core/FDT/campaigns.py:214 "Campaign 2") would sit in the progress pane at 100% for
+        Without this a finished leave=True bar (Priors.prior "Constructing latent
+        prior...", FDT.campaigns "Campaign 2") would sit in the progress pane at 100% for
         the rest of the run AND, being `informative`, would peg the overall bar at 100% -- reading as
         "done" or "hung" while the pipeline is still working.
         """

@@ -22,22 +22,21 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/identif
 import math
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
 
-from core import cli, orchestrator
-from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
-                         NADROWSKI_LABELS, CHUNK_LEN, POSTERIOR_PATH)
+import _common
+from core import orchestrator
+from core.config import CHUNK_LEN, POSTERIOR_PATH
 from core.SBI import pipeline
 from core.SBI.reparam import build_inferred_bijection, load_eval_bijection
 
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
+_common.enable_warnings()
+
 POST = os.environ.get("POST", "posterior_3d.pt")
-TOBS_S = float(os.environ.get("TOBS_S", str(T_MIN_EXP_S)))
 M = int(os.environ.get("M", "32"))
 M_NOISE = int(os.environ.get("M_NOISE", "128"))
 REL = float(os.environ.get("REL", "0.02"))
@@ -47,14 +46,15 @@ MIN_VALID = float(os.environ.get("MIN_VALID", "0.5"))
 SD_ID = float(os.environ.get("SD_ID", "0.3"))      # SD below this = "identified"
 SF, SS = 1, 2
 torch.manual_seed(SEED)
-print(f"[cfg] CELL={CELL} POST={POST} K={K} M={M} M_NOISE={M_NOISE} REL={REL} SD_ID={SD_ID} SEED={SEED}", flush=True)
+print(f"[cfg] POST={POST} K={K} M={M} M_NOISE={M_NOISE} REL={REL} SD_ID={SD_ID} SEED={SEED}",
+      flush=True)
 
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c, t_max_exp=T_MAX_EXP_S * s2c,
-                T_obs=TOBS_S * s2c, hw=detect_device())
+cfg = _common.script_cfg()
+# The Laplace marginal-SD verdict below is computed over the single-frequency 41-feature Fisher. A
+# chi posterior conditions on a different feature set entirely, so the same arithmetic would produce
+# a confident, meaningless "identified / not identified" call. Refuse rather than mislead.
+_common.assert_not_chi(cfg, "identifiability_offgt")
+_common.describe_features(cfg)
 dtype, device = cfg.hw.dtype, cfg.hw.device
 N_obs = int(cfg.T_obs / cfg.dt_exp)
 nd_dim = len(cfg.params_dict)
@@ -110,7 +110,7 @@ def measure(nd, res, force, m, CAP):
     feats, xf_d, xs_d = _raw(nd, res, force, m, crn=True)
     v = _valid(xf_d, xs_d, CAP)
     if not v.any():
-        return np.full(41, np.nan), 0.0
+        return np.full(_common.n_features(cfg), np.nan), 0.0
     return feats[v].mean(0), float(v.mean())
 
 
@@ -124,7 +124,7 @@ def grad(perturb, base, d, CAP):
         return (fp - f0) / d
     if vm >= MIN_VALID:
         return (f0 - fm) / d
-    return np.full(41, np.nan)
+    return np.full(_common.n_features(cfg), np.nan)
 
 
 def analyze_point(nd, res, force):

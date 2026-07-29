@@ -26,7 +26,6 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/feature
 import math
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,13 +34,12 @@ import torch
 import matplotlib; matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from core import cli
-from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
-                         NADROWSKI_LABELS, CHUNK_LEN, PLOT_PATH)
+import _common
+from core.config import CHUNK_LEN, PLOT_PATH
 from core.SBI import pipeline
 
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
-TOBS_S = float(os.environ.get("TOBS_S", str(T_MIN_EXP_S)))
+_common.enable_warnings()
+
 M = int(os.environ.get("M", "48"))
 M_NOISE = int(os.environ.get("M_NOISE", "192"))
 REL = float(os.environ.get("REL", "0.02"))
@@ -49,14 +47,15 @@ SEED = int(os.environ.get("SEED", "0"))
 MIN_VALID = float(os.environ.get("MIN_VALID", "0.5"))
 SF, SS = 1, 2
 torch.manual_seed(SEED)
-print(f"[cfg] CELL={CELL} TOBS_S={TOBS_S} M={M} M_NOISE={M_NOISE} REL={REL} SEED={SEED}", flush=True)
+print(f"[cfg] M={M} M_NOISE={M_NOISE} REL={REL} SEED={SEED}", flush=True)
 
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c, t_max_exp=T_MAX_EXP_S * s2c,
-                T_obs=TOBS_S * s2c, hw=detect_device())
+cfg = _common.script_cfg()
+# This ranks candidate features by how much they shrink a marginal ON TOP OF the 41-feature baseline.
+# In chi mode the baseline is a different feature set (Group G zeroed, 3K chi features added), so the
+# measured "gain" of every candidate would be inflated -- chi already supplies much of it -- and the
+# ranking would be wrong with no sign of trouble.
+_common.assert_not_chi(cfg, "feature_candidate_test")
+_common.describe_features(cfg)
 dtype, device = cfg.hw.dtype, cfg.hw.device
 DT = cfg.dt_exp
 N_obs = int(cfg.T_obs / cfg.dt_exp)
@@ -200,7 +199,7 @@ def measure(pvec, rescale_vec, m):
     feats, xf_d, xs_d = _raw(pvec, rescale_vec, m, crn=True)
     v = _valid(xf_d, xs_d)
     if not v.any():
-        return np.full(41, np.nan), np.full(NC, np.nan), 0.0
+        return np.full(_common.n_features(cfg), np.nan), np.full(NC, np.nan), 0.0
     cand = candidate_matrix(xs_d[torch.tensor(v, device=device)])
     return feats[v].mean(0), cand.mean(0), float(v.mean())
 
@@ -215,7 +214,7 @@ def grad(perturb, base, d):
         return (f41p - f410) / d, (fCp - fC0) / d
     if vm >= MIN_VALID:
         return (f410 - f41m) / d, (fC0 - fCm) / d
-    return np.full(41, np.nan), np.full(NC, np.nan)
+    return np.full(_common.n_features(cfg), np.nan), np.full(NC, np.nan)
 
 
 # ---- 16-param Jacobian (41 feats + candidates), standardized & prior-range-scaled ----

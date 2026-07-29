@@ -1,8 +1,8 @@
 """REDUCTION mode: the NWK -> Hopf reduction map.
 
-Mirrors cli.build_reduction_config (core/cli.py:451) but with widgets instead of prompts, then runs
+Mirrors cli.build_reduction_config (cli.make_reduction_config) but with widgets instead of prompts, then runs
 the already prompt-free Reduction.sweep.run_reduction_map on a worker. The model is fixed to NADROWSKI
--- the reduction is Nadrowski-specific (core/cli.py:470-472).
+-- the reduction is Nadrowski-specific (cli.make_reduction_config).
 
 This is the only mode that is purely analytical (no SDE simulation), so it is also the quickest way to
 sanity-check the whole panel -> worker -> figure path.
@@ -18,6 +18,7 @@ from .. import settings
 from ..widgets.artifact_picker import ArtifactPicker
 from ..widgets.help_badge import add_help_row
 from ..widgets.labeled_inputs import FloatField
+from ..widgets.forms import make_form
 
 _MODEL = "NADROWSKI"
 
@@ -28,6 +29,13 @@ HELP = {
 
 
 class ReductionPanel(BasePanel):
+    """Drives the NWK -> Hopf normal-form reduction map.
+
+    NADROWSKI only, by nature rather than by policy: the map is an intrinsic property of that model's
+    equations, so there is no model selector.
+
+    Persists (group "reduction"): the cell picker and the sweep knobs.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.record = None
@@ -36,7 +44,7 @@ class ReductionPanel(BasePanel):
 
     def _build_controls(self):
         box = QGroupBox("NWK → Hopf reduction map")
-        form = QFormLayout(box)
+        form = make_form(box)
 
         self.cell_picker = ArtifactPicker(CELL_PATH / _MODEL.lower())
         self.f0 = FloatField(0.05)

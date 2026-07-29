@@ -34,7 +34,7 @@ class NadrowskiPrior(prior.Prior):
         thetas = lows + unit_samples * (highs - lows)
 
         init_pos: np.ndarray = np.array(np.random.randint(0, 10, size=(curr_batch_size, 2)))
-        init_probs: np.ndarray = np.array(np.random.randint(0, 1, size=(curr_batch_size, 1)))
+        init_probs: np.ndarray = np.zeros((curr_batch_size, 1), dtype=int)   # randint(0,1) is ALWAYS 0
         inits = helpers.concat(init_pos, init_probs)
         inits_tensor = torch.tensor(inits, dtype=self.dtype, device=self.device)
         # Single-channel forcing: shape (batch, 1, T) per the unified force convention.
@@ -77,7 +77,7 @@ class NadrowskiPrior(prior.Prior):
 
         # SDE variable
         init_pos: np.ndarray = np.array(np.random.randint(0, 10, size=(batch_size, 2)))
-        init_probs: np.ndarray = np.array(np.random.randint(0, 1, size=(batch_size, 1)))
+        init_probs: np.ndarray = np.zeros((batch_size, 1), dtype=int)
         inits = helpers.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 3)
         inits = torch.tensor(inits, dtype=dtype, device=device)
         # Single-channel forcing: shape (batch, 1, T) per the unified force convention.
@@ -105,4 +105,8 @@ class NadrowskiPrior(prior.Prior):
                 del x
         added_params_progress_bar.close()
 
-        return list(accepted_params)
+        # SORTED, not list(): iteration order over a set of float tuples is unspecified and varies
+        # with the values themselves, and this list feeds StandardScaler -> HDBSCAN -> GaussianMixture
+        # in prior.py. Unordered input there made a prior -- and therefore any posterior trained from
+        # it -- unreproducible even under a fixed seed.
+        return sorted(accepted_params)

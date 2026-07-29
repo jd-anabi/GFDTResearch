@@ -19,6 +19,12 @@ from core.Helpers import helpers
 
 FORCE_KINDS = ("sin", "step", "triangular", "exponential")
 
+# Force channels each BUILT-IN drift actually indexes (see core/Models/*.f_pure). This is a property
+# of the MODEL, not of the cell's forcing params: HopfModel reads force_step[:, 1] unconditionally
+# (hopf_model.py:15, :49), so a driveless Hopf config still needs 2 channels even though no "amp_y"
+# is declared. Nadrowski (nadrowski_model.py:18, :68) and BP (bp_model.py:50) read channel 0 only.
+_BUILTIN_FORCE_CHANNELS = {"nadrowski": 1, "bp": 1, "hopf": 2}
+
 # Forcing parameter names per kind (the <name>_<var> suffix convention is applied by the caller).
 FORCING_PARAM_NAMES = {
     "sin":         ("amp", "freq", "phase", "offset"),
@@ -26,6 +32,42 @@ FORCING_PARAM_NAMES = {
     "step":        ("amp", "t0", "offset"),
     "exponential": ("amp", "tau", "offset"),
 }
+
+
+def n_force_channels(model: str, forcing_idx: dict | None = None, n_vars: int | None = None) -> int:
+    """
+    Number of force channels the model's simulator expects -- the single source of truth for the
+    width of a zero-force (or any hand-built) force tensor.
+
+    This matters for memory, not just correctness: the SBI pipeline used to build its zero-force
+    tensors ``n_vars`` wide, which for Nadrowski (n_vars=3) and BP (n_vars=5) over-allocates the
+    single largest tensor in a training batch by 3x and 5x respectively.
+
+    The channel count is a property of the MODEL's drift, not of the cell's declared forcing params:
+    a driveless Hopf config declares no "amp_y" but HopfModel still indexes ``force_step[:, 1]``.
+    Unknown built-ins fall back to ``n_vars``, which is always wide enough.
+
+    :param model: model name (built-in or user-defined).
+    :param forcing_idx: forcing-param name -> column map. Only consulted to widen a built-in to the
+                        legacy dual-channel Hopf convention when "amp_y" is present.
+    :param n_vars: number of state variables. Required for user models (which index force[:, j, t]
+                   per variable, see build_user_force_tensor) and for the unknown-built-in fallback.
+    :return: channel count for a (batch, n_channels, T) force tensor.
+    """
+    from core import registry            # local: forcing.py stays importable without the registry
+
+    if registry.is_user_model(model):
+        if n_vars is None:
+            raise ValueError(f"n_vars is required to size the force tensor for user model '{model}'.")
+        return n_vars
+    n = _BUILTIN_FORCE_CHANNELS.get(model.lower())
+    if n is None:                        # unknown built-in: keep the conservative full-width tensor
+        if n_vars is None:
+            raise ValueError(f"Unknown model '{model}' and no n_vars given to size the force tensor.")
+        return n_vars
+    if forcing_idx and "amp_y" in forcing_idx:
+        n = max(n, 2)                    # legacy dual-channel sinusoidal convention (ND Hopf)
+    return n
 
 
 def build_nondim_force_tensor(

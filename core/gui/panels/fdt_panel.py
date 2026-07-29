@@ -1,10 +1,10 @@
 """FDT mode: the fluctuation-dissipation-theorem analysis.
 
-Mirrors cli.build_fdt_config (core/cli.py:431) with widgets, then runs FDT.fdt_pipeline.run_fdt on a
+Mirrors cli.build_fdt_config (cli.make_fdt_config) with widgets, then runs FDT.fdt_pipeline.run_fdt on a
 worker.
 
 The two checkboxes are load-bearing. run_fdt's `skip_sanity` / `confirm_production` default to None,
-which means "ask via input()" -- that is the CLI path (core/FDT/fdt_pipeline.py:69-80). A GUI MUST pass
+which means "ask via input()" -- that is the CLI path (FDT.fdt_pipeline.run_fdt). A GUI MUST pass
 explicit booleans; leaving them None would block the worker forever on an input() nobody can answer.
 """
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QGroupBox, QPushButton
@@ -19,6 +19,7 @@ from .. import settings
 from ..widgets.artifact_picker import ArtifactPicker
 from ..widgets.help_badge import add_help_row, with_badge
 from ..widgets.labeled_inputs import FloatField, IntField
+from ..widgets.forms import make_form
 
 HELP = {
     "model": "Which model to analyse. FDT supports NADROWSKI, HOPF, BP (experimental), and "
@@ -50,6 +51,14 @@ def _run_fdt_guarded(cfg, *, skip_sanity, confirm_production):
 
 
 class FdtPanel(BasePanel):
+    """Drives a single-cell FDT analysis (``FDT.fdt_pipeline.run_fdt``).
+
+    Passes explicit booleans for run_fdt's ``skip_sanity``/``confirm_production``: their None default
+    means "ask via input()", which on a worker thread would block forever with no prompt to answer.
+
+    Persists (group "fdt"): model, cell picker, and the campaign knobs. Restore order matters --
+    model FIRST, then the pickers, or the model's refresh() wipes the restored picker.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build_controls()
@@ -57,7 +66,7 @@ class FdtPanel(BasePanel):
 
     def _build_controls(self):
         box = QGroupBox("FDT analysis")
-        form = QFormLayout(box)
+        form = make_form(box)
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(VALID_MODELS)

@@ -4,12 +4,12 @@ Interactive CLI prompts for the SBI pipeline.
 This is the ONLY module that calls input() / print() for user interaction.
 To build a GUI, replace this module with one that provides the same function signatures.
 """
-import warnings
 from collections import OrderedDict
 from pathlib import Path
 
 import pint
 
+from core import config          # live-read config.CHI_MODE / CHI_N_FREQS (avoid import-time snapshot)
 from .config import (
     SimConfig, FDTConfig, detect_device, cpu_device,
     DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S,
@@ -28,6 +28,35 @@ class UnitParseError(ValueError):
     """
 
 
+def _prompt_index(n_options: int, prompt: str, *, allow_zero: bool = False):
+    """Prompt for a 1-based menu choice and return the 0-based index, re-asking until it is valid.
+
+    Every list prompt in this module used to be a bare ``int(input(...)) - 1`` straight into a list
+    subscript. Three ways that went wrong, all silent or unhelpful:
+      * ``0``  -> index -1 -> the LAST item, with no error. Several prompts explicitly invite "0",
+        so this was reachable by following the instructions. A fat-fingered digit ran an entire
+        multi-hour pipeline against the wrong cell.
+      * a negative -> counted from the end, same class of silent mis-selection.
+      * out of range -> a bare IndexError, which the callers' ``except ValueError`` did not catch.
+
+    :param allow_zero: when True, ``0`` is a legal answer and returns None (the "from scratch"
+                       option some prompts offer) rather than selecting anything.
+    """
+    lo = 0 if allow_zero else 1
+    while True:
+        raw = input(prompt).strip()
+        try:
+            choice = int(raw)
+        except ValueError:
+            print(f"  '{raw}' is not a number. Enter a number between {lo} and {n_options}.")
+            continue
+        if allow_zero and choice == 0:
+            return None
+        if lo <= choice <= n_options:
+            return choice - 1
+        print(f"  {choice} is out of range. Enter a number between {lo} and {n_options}.")
+
+
 # ── Model & cell file selection ──────────────────────────────────────────────
 def select_model() -> tuple[str, list[str], bool]:
     """
@@ -39,17 +68,17 @@ def select_model() -> tuple[str, list[str], bool]:
     print("Available models:")
     for idx, model in enumerate(VALID_MODELS):
         print(f"  ({idx + 1}) {model}")
-    model_num = int(input("\nWhich model would you like to run? Select a number: "))
-    model = VALID_MODELS[model_num - 1]
-    labels = VALID_LABELS[model_num - 1]
+    idx = _prompt_index(len(VALID_MODELS), "\nWhich model would you like to run? Select a number: ")
+    model = VALID_MODELS[idx]
+    labels = VALID_LABELS[idx]
     from core import registry
     if registry.is_user_model(model):
         raise ValueError(
             f"'{model}' is a user-defined model. User-defined models are Simulate-only; "
             "use the GUI's Simulate section.")
     state_dep_drift = registry.state_dep_drift(model)
-    if model not in VALID_MODELS:
-        raise ValueError(f"Invalid model selection. Please choose from {VALID_MODELS}.")
+    # (The old `if model not in VALID_MODELS` check here was dead: model was just read OUT of
+    # VALID_MODELS, so it could never fail. Range-checking the INPUT is what was actually needed.)
     helpers.clear_screen()
     return model, labels, state_dep_drift
 
@@ -61,9 +90,9 @@ def select_cell_file() -> str:
     """
     print("Available cell files:")
     cell_files = file_manager.list_dir(str(CELL_PATH))
-    file_num = int(input("\nFile number for model parameters: "))
+    idx = _prompt_index(len(cell_files), "\nFile number for model parameters: ")
     helpers.clear_screen()
-    return str(CELL_PATH / cell_files[file_num - 1])
+    return str(CELL_PATH / cell_files[idx])
 
 def select_bounds_file() -> str:
     """
@@ -73,9 +102,9 @@ def select_bounds_file() -> str:
     """
     print("Available bounds files:")
     bounds_files = file_manager.list_dir(str(BOUNDS_PATH))
-    file_num = int(input("\nFile number for parameter BOUNDS: "))
+    idx = _prompt_index(len(bounds_files), "\nFile number for parameter BOUNDS: ")
     helpers.clear_screen()
-    return str(BOUNDS_PATH / bounds_files[file_num - 1])
+    return str(BOUNDS_PATH / bounds_files[idx])
 
 def resolve_units_file(model: str) -> str:
     """
@@ -108,21 +137,18 @@ def select_or_build_prior() -> tuple[str | None, bool]:
     """
     print("Available priors: ")
     saved = file_manager.list_dir(str(PRIOR_PATH), keep=lambda f: f.endswith(".pt"))
-    try:
-        if len(saved) > 0:
-            idx = int(input(
-                "\nWhich prior would you like to use? "
-                "Select a file number ('0' if you want to make from scratch): "
-            )) - 1
-            if idx == -1:
-                raise ValueError
-            helpers.clear_screen()
-            return saved[idx], False
-        else:
-            raise ValueError
-    except ValueError:
+    if not saved:
         helpers.clear_screen()
         return None, True
+    # allow_zero: '0' is the documented "make from scratch" answer here. An out-of-range POSITIVE
+    # used to raise a bare IndexError that the surrounding `except ValueError` did not catch, and a
+    # NEGATIVE silently selected from the end of the list.
+    idx = _prompt_index(len(saved),
+                        "\nWhich prior would you like to use? "
+                        "Select a file number ('0' if you want to make from scratch): ",
+                        allow_zero=True)
+    helpers.clear_screen()
+    return (None, True) if idx is None else (saved[idx], False)
 
 def select_or_train_posterior() -> tuple[str | None, bool]:
     """
@@ -135,21 +161,15 @@ def select_or_train_posterior() -> tuple[str | None, bool]:
     # live alongside each <name>.pt (picking one would fail to load).
     saved = file_manager.list_dir(str(POSTERIOR_PATH),
                                   keep=lambda f: f.endswith(".pt") and not f.endswith(".rot.pt"))
-    try:
-        if len(saved) > 0:
-            idx = int(input(
-                "\nWhich posterior would you like to use? "
-                "Select a file number (or '0' if you would like to make it from scratch): "
-            )) - 1
-            if idx == -1:
-                raise ValueError
-            helpers.clear_screen()
-            return saved[idx], False
-        else:
-            raise ValueError
-    except ValueError:
+    if not saved:
         helpers.clear_screen()
         return None, True
+    idx = _prompt_index(len(saved),
+                        "\nWhich posterior would you like to use? "
+                        "Select a file number (or '0' if you would like to make it from scratch): ",
+                        allow_zero=True)
+    helpers.clear_screen()
+    return (None, True) if idx is None else (saved[idx], False)
 
 def prompt_save_name(artifact_type: str) -> str:
     """
@@ -176,24 +196,53 @@ def select_inference_mode() -> str:
     helpers.clear_screen()
     return {"1": "simulated", "2": "experimental", "3": "none"}.get(choice, "none")
 
-def load_and_validate_gt(cfg: SimConfig, cell_path: str) -> None:
+def validate_gt_file(cfg: SimConfig, cell_path: str) -> list:
+    """Non-mutating dry run of ``load_and_validate_gt``: the problems that would make it raise.
+
+    Lets a GUI validate a cell the moment it is PICKED, on the GUI thread, instead of discovering the
+    failure inside a worker halfway through an inference run. Mirrors SimConfig._fill_checked's rules --
+    MISSING parameters are fatal, extras are ignored, and only ND/rescale are range-checked (forcing is
+    the known drive, whose range is deliberately not enforced).
+
+    :return: human-readable problem strings; empty means the cell can be injected.
+    """
+    try:
+        inits, param_vals, rescale_vals, forcing_vals = file_manager.parse_values_file(cell_path)
+    except Exception as e:                            # noqa: BLE001 -- surfaced to the user as-is
+        return [f"could not parse the cell file: {e}"]
+    problems = []
+    for label, vals, cfg_dict, check_bounds in (
+            ("ND parameter", param_vals, cfg.params_dict, True),
+            ("rescale parameter", rescale_vals, cfg.rescale_params, True),
+            ("forcing parameter", forcing_vals, cfg.force_params_dict, False)):
+        missing = sorted(set(cfg_dict) - set(vals))
+        if missing:
+            problems.append(f"missing {label}(s) the bounds file requires: {', '.join(missing)}")
+            continue
+        if check_bounds:
+            problems += [f"{label} {n} = {vals[n]:g} is outside its bounds ({lo:g}, {hi:g})"
+                         for n, (_, (lo, hi)) in cfg_dict.items() if not (lo <= vals[n] <= hi)]
+    if not inits:
+        problems.append("the cell file declares no initial conditions")
+    return problems
+
+
+def load_and_validate_gt(cfg: SimConfig, cell_path: str) -> list:
     """
     Parse a cell file's VALUES + initial conditions and inject them into cfg, validating (via
     SimConfig.inject_ground_truth) that the ND/rescale values lie within the bounds file's bounds.
+
+    :return: names of cell values the bounds file does not declare, which were therefore IGNORED
+             (e.g. f_scale + the drive when a forced cell is paired with spontaneous bounds). Empty in
+             the usual matched case; callers may surface it, and existing callers can ignore it.
     """
     inits, param_vals, rescale_vals, forcing_vals = file_manager.parse_values_file(cell_path)
-    cfg.inject_ground_truth(inits, param_vals, rescale_vals, forcing_vals)
+    return cfg.inject_ground_truth(inits, param_vals, rescale_vals, forcing_vals)
 
 
-# Display-only SI unit hints, indexed by forcing param name. Used to label the
-# CLI prompt; the authoritative SI-unit map lives in orchestrator._FORCING_SI_UNITS.
-_INFERENCE_PROMPT_UNITS = {
-    "amp":    "N",
-    "amp_y":  "N",   # Hopf y-channel amplitude (shares freq/phase/offset with x)
-    "freq":   "Hz",
-    "phase":  "rad",
-    "offset": "N",
-}
+# Display-only SI unit hints, indexed by forcing param name (CLI prompts + the GUI's drive fields).
+# DERIVED from config.FORCING_SI_UNITS, the authoritative conversion table, so the two cannot drift.
+_INFERENCE_PROMPT_UNITS = config.FORCING_DISPLAY_UNITS
 
 def get_inference_inputs(force_param_names: list[str]) -> tuple[str, str, float, dict]:
     """
@@ -219,6 +268,27 @@ def get_inference_inputs(force_param_names: list[str]) -> tuple[str, str, float,
         forcing_params_si[name] = float(input(f"  {name}{unit_str}: "))
     helpers.clear_screen()
     return spont_path, forced_path, T_obs_s, forcing_params_si
+
+
+def get_inference_inputs_chi() -> tuple[str, list[str], float, float]:
+    """Prompt for the chi(omega) experimental inputs: one PASSIVE recording, then K single-tone FORCED
+    recordings (the k-th driven at the k-th relative frequency multiplier of the spontaneous peak
+    Omega_0), the observation duration, and the physical drive amplitude used. K = config.CHI_N_FREQS.
+
+    chi = response/drive is drive-amplitude-independent in the linear regime, so any linear F0 works;
+    it is reported only so the lock-in divides by it (see orchestrator.build_experiment_obs_chi).
+
+    :return: (spont_path, forced_paths (length K), T_obs_seconds, F0_si_newtons).
+    """
+    k = config.CHI_N_FREQS
+    spont_path = input("Path to PASSIVE (unforced) recording (.csv or .npy): ").strip()
+    print(f"\nPaths to the {k} FORCED recordings, in INCREASING drive-frequency order")
+    print("(recording i was driven at multiplier i of the spontaneous peak Omega_0):")
+    forced_paths = [input(f"  forced recording {i + 1}/{k}: ").strip() for i in range(k)]
+    T_obs_s = float(input("\nObservation duration T_obs (seconds): "))
+    F0_si = float(input("Drive amplitude F0 (N, the physical force used for every recording): "))
+    helpers.clear_screen()
+    return spont_path, forced_paths, T_obs_s, F0_si
 
 
 def get_inference_inputs_spontaneous() -> tuple[str, float]:
@@ -330,7 +400,7 @@ def _parse_cell(cell_file: str, model: str | None = None):
     # ── Legacy fallback: bounds + units read inline from the cell (models without decoupled files) ──
     inits_dict, params_dict, rescale_params, force_params_dict, units_dict = file_manager.parse_model_file(cell_file)
 
-    ureg = pint.UnitRegistry()
+    ureg = config.unit_registry()      # shared singleton: building one parses pint's full unit file
     try:
         si_factors = [ureg(unit).to_base_units().magnitude for unit in units_dict]
     except pint.UndefinedUnitError as e:
@@ -357,7 +427,7 @@ def _units_to_factors(units: tuple) -> tuple[list[float], float]:
     From a set of unit strings compute (si_factors, s_to_cell). Standalone so `_parse_cell` stays
     byte-for-byte untouched (it is shared by the FDT/REDUCTION/CROSSVAL builders + the scripts).
     """
-    ureg = pint.UnitRegistry()
+    ureg = config.unit_registry()      # shared singleton: building one parses pint's full unit file
     try:
         si_factors = [ureg(unit).to_base_units().magnitude for unit in units]
     except pint.UndefinedUnitError as e:
@@ -376,15 +446,41 @@ def _units_to_factors(units: tuple) -> tuple[list[float], float]:
 
 
 # ── Pure config cores (no prompts) — shared by the CLI builders below and the GUI ────────────
-def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds_file: str) -> SimConfig:
+def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds_file: str = None, *,
+                    bounds_dicts=None, units_override=None,
+                    chi_mode: bool | None = None, chi_n_freqs: int | None = None,
+                    chi_f0: float | None = None, chi_freq_bounds: tuple | None = None,
+                    reparam_rotate: bool | None = None) -> SimConfig:
     """
     Build a bounds-only SimConfig (no prompts) from a chosen model + bounds file. Ground-truth values,
     initial conditions, and T_obs are filled later (only for simulated inference). Shared by
     build_sim_config (CLI) and the GUI's SBI config form.
+
+    The chi(omega) knobs are explicit keyword args so a GUI can set them PER CONFIG; each falls back to
+    the live ``config.CHI_*`` module value when None (the CLI passes nothing and keeps its behaviour).
+    They are stored ON the config, so a posterior trained from it is self-describing.
+
+    ``units_override`` DECLARES what the numbers in the bounds/cell files mean; it never converts them.
+    Pass a path to a units file, or an iterable of unit tokens (e.g. ``("nm", "ms", "pN", "kHz")``).
+    None keeps the per-model default ``Resources/Units/<model>/units.txt``.
+
+    ``bounds_dicts`` is the hand-entered alternative to ``bounds_file``: a
+    ``(params, rescale, forcing)`` triple in ``parse_bounds_file``'s shape. Exactly one of the two must
+    be given. Parameter ORDER within each dict is load-bearing (simulators bind columns positionally),
+    so it is preserved verbatim.
     """
-    units_file = resolve_units_file(model)
-    params_dict, rescale_params, force_params_dict, _ = file_manager.parse_bounds_file(bounds_file)
-    units_dict = file_manager.parse_units_file(units_file)
+    if (bounds_file is None) == (bounds_dicts is None):
+        raise ValueError("make_sim_config needs exactly one of bounds_file or bounds_dicts.")
+    if bounds_dicts is not None:
+        params_dict, rescale_params, force_params_dict = (OrderedDict(d) for d in bounds_dicts)
+    else:
+        params_dict, rescale_params, force_params_dict, _ = file_manager.parse_bounds_file(bounds_file)
+    if units_override is None:
+        units_dict = file_manager.parse_units_file(resolve_units_file(model))
+    elif isinstance(units_override, (str, Path)):
+        units_dict = file_manager.parse_units_file(str(units_override))
+    else:
+        units_dict = tuple(str(u) for u in units_override)
     si_factors, s_to_cell = _units_to_factors(units_dict)
 
     # convert experimental constants from seconds to cell-file time units (training T-range)
@@ -398,6 +494,13 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         force_params_dict=force_params_dict,
         units_dict=units_dict,
         si_factors=si_factors,
+        # multi-frequency chi(omega) conditioning; explicit arg wins, else the live module value
+        chi_mode=config.CHI_MODE if chi_mode is None else bool(chi_mode),
+        chi_n_freqs=config.CHI_N_FREQS if chi_n_freqs is None else int(chi_n_freqs),
+        chi_f0=config.CHI_F0 if chi_f0 is None else float(chi_f0),
+        chi_freq_bounds=(config.CHI_FREQ_BOUNDS if chi_freq_bounds is None
+                         else tuple(chi_freq_bounds)),
+        reparam_rotate=(config.REPARAM_ROTATE if reparam_rotate is None else bool(reparam_rotate)),
         dt_exp=DT_EXP_S * s_to_cell,
         t_min_exp=T_MIN_EXP_S * s_to_cell,
         t_max_exp=T_MAX_EXP_S * s_to_cell,

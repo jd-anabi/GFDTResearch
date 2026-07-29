@@ -236,7 +236,7 @@ class CompiledUserModel:
 
     ``param_names`` order is LOAD-BEARING: it is the constructor positional order, the
     ``torch.unbind(params, dim=1)`` column order, and the Bounds-file ND section order -- all three must
-    stay identical (see the model/solver contract in features_handoff.txt).
+    stay identical (see the model/solver contract in PRISM_HANDOFF.md section 3.1).
     """
     var_names: list = field(default_factory=list)     # declared order; index 0 = the observable
     param_names: list = field(default_factory=list)   # first appearance in the typed expressions

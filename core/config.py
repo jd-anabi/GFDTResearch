@@ -4,7 +4,7 @@ Configuration constants, device detection, and data carriers for the SBI pipelin
 import os
 from dataclasses import dataclass, field, replace
 from collections import OrderedDict
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 import torch
@@ -54,6 +54,41 @@ def cpu_device() -> DeviceConfig:
     """
     return DeviceConfig(device=torch.device("cpu"), dtype=torch.float32, batch_size=2 ** 6)
 
+
+# Fraction of currently-FREE device memory a single simulation batch may plan to occupy. The rest
+# absorbs PyTorch internals, allocator fragmentation, and the intermediates that are not counted in
+# the caller's per-sample estimate. 0.6 matches the value the FDT campaigns have used all along.
+CUDA_MEM_FRACTION = 0.6
+
+
+def memory_budget_elements(device: torch.device, dtype: torch.dtype,
+                           fraction: float = CUDA_MEM_FRACTION) -> int:
+    """
+    How many tensor ELEMENTS one batch may plan to hold on ``device``.
+
+    On CUDA this reads the actually-free memory, so it adapts to whatever else is resident -- which
+    matters on a desktop GPU where the compositor and browsers can hold 1-2 GB. CPU/MPS get fixed
+    conservative caps.
+
+    Originally FDT-only (core/FDT/campaigns.py); lifted here because the SBI path needs the same
+    budget and was instead relying on CHUNK_LEN / N_ND_MAX, which are batch-size-blind STEP counts
+    and so cannot bound bytes at all.
+    """
+    bytes_per_elem = 4 if dtype == torch.float32 else 8
+    if device.type == "cuda":
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        # mem_get_info reports the DRIVER's view, in which every block PyTorch has cached counts as
+        # used -- even the ones it has already freed and will hand straight back. Add that reusable
+        # pool back, or the budget collapses as soon as the caching allocator has warmed up, and a
+        # loop that re-plans against it degenerates to a batch of one (slow enough to look hung).
+        reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+        budget_bytes = int((free_bytes + max(0, reusable)) * fraction)
+    elif device.type == "cpu":
+        budget_bytes = 4 * 1024 ** 3   # 4 GB conservative cap for CPU
+    else:
+        budget_bytes = 1 * 1024 ** 3   # 1 GB for MPS / other
+    return max(1, budget_bytes // bytes_per_elem)
+
 # === PATHS ===
 # Resources live at <repo-root>/Resources. The run scripts (run.bat/run.sh) cd to the repo root, so the
 # cwd-relative form is correct in normal use; the __file__ fallback keeps paths valid if the app is ever
@@ -81,6 +116,17 @@ NADROWSKI_LABELS = [r"$\kappa$", r"$\tilde{\lambda}$", r"$\varphi$", r"$\tilde{\
 VALID_MODELS = ["BP", "NADROWSKI", "HOPF"]
 VALID_LABELS = [BP_LABELS, NADROWSKI_LABELS, HOPF_LABELS]
 
+# === FORCING PARAMETER UNITS (single source of truth) ===
+# SI unit per forcing-parameter name, used to convert an experimenter's values into cell-file units.
+# "Hz" is SPECIAL-CASED at the conversion site: a drive frequency is INVERSE CELL TIME by construction
+# (forcing.py evaluates sin(2*pi*freq*t_dim) with t_dim in cell time units), so it converts via
+# SimConfig.freq_si_to_cell -- never by matching a declared frequency token, which resolves to 1.0
+# against an `ms` cell. None = dimensionless (phase, in radians).
+# The display map is DERIVED from this one so the prompt/label hints can never drift from the
+# authoritative conversion table (they were separately maintained and had already started to).
+FORCING_SI_UNITS = {"amp": "N", "amp_y": "N", "freq": "Hz", "phase": None, "offset": "N"}
+FORCING_DISPLAY_UNITS = {n: ("rad" if u is None else u) for n, u in FORCING_SI_UNITS.items()}
+
 # === ENSEMBLE CONSTANTS ===
 UNIQUE_FREQS = 2 ** 6
 K_B = 1.380649e-23  # m^2 kg s^-2 K^-1
@@ -94,7 +140,29 @@ T_MAX_EXP_S = 60.0     # longest expected recording (1 min)
 CHUNK_LEN = 100_000    # fine integration steps per segment (per-chunk memory cap)
 N_ND_MAX = 300_000     # max total fine integration steps per batch (pre-filter ceiling)
 PPC_BIN_SIZE = 50      # samples per mini-batch for posterior-predictive-check simulation
-CAL_RUN_SIZE = 10      # samples per (t_scale, T) pair in SBC calibration data
+# --- SBC calibration batching -------------------------------------------------------------------
+# These two are INDEPENDENT knobs and it matters which one you turn.
+#
+# The SDE solver is a kernel-launch-bound sequential time loop, so a batch of 10 and a batch of 256
+# cost the SAME wall-clock. Calibration cost is therefore driven by the NUMBER OF BATCHES, not the
+# number of samples:   sim cost  ~  CAL_N_SCALES x (1 + K in chi mode)
+#                      samples   =  CAL_N_SCALES x cal_run_size      (run_size is nearly free)
+#                      SBC cost  ~  n_cal                            (run_sbc draws + check_sbc C2ST)
+#
+# CAL_N_SCALES is also the (t_scale, T) DIVERSITY count: gen_training_data draws one Sobol pair per
+# batch and OVERRIDES t_scale to it for every row, so all rows in a batch share one t_scale truth and
+# their SBC ranks are not independent. t_scale's effective sample size is CAL_N_SCALES, NOT n_cal.
+# Lowering it buys wall-clock at the direct expense of the parameter chi(omega) mode exists to pin.
+#
+# Defaults below reproduce the historical behaviour EXACTLY at SBC_N_CAL=2000 (200 pairs x 10), so
+# results stay comparable with the keeper posterior's K=10 x n_cal=2000 characterization. To spend
+# the free GPU capacity, raise SBC_N_CAL and leave CAL_N_SCALES alone (200 x 64 = 12800 samples costs
+# the same simulation time as today, only more downstream SBC). To make a chi-mode validate tractable
+# -- it pays CAL_N_SCALES x (K+1) simulations, ~7x at K=6 -- lower CAL_N_SCALES and say so in the
+# write-up, because that is a different measurement, not a faster one.
+CAL_N_SCALES = 200     # (t_scale, T) pairs per calibration set == number of batches == sim cost
+CAL_RUN_SIZE = 10      # FLOOR on samples per pair (the historical fixed value)
+CAL_RUN_SIZE_MAX = 256 # ceiling on samples per pair; the solver is flat in batch size up to ~2048
 SBC_N_CAL = 2000       # calibration datasets for SBC in validate(). n_cal=1000 was under-powered:
                        # the K=10 repeat study (scripts/sbc_characterize.py) showed mild marginal
                        # miscalibration only surfaces reliably at n_cal>=2000 (KS power grows with n_cal).
@@ -164,6 +232,54 @@ REPARAM_LOG_PARAMS = []   # ALL-LINEAR box (the keeper posterior_07012026's coor
                           # nd_log_mask stays all-False, and the existing linear ND prior
                           # (prior_forcing_no_forcing.pt) + posterior_07012026 already match this box.
 
+# === MULTI-FREQUENCY SUSCEPTIBILITY chi(omega) MODE (breaks the information ceiling) ===
+# When CHI_MODE is on, the forced conditioning is a K-frequency susceptibility CURVE chi(omega)
+# instead of a single-frequency Group-G lock-in. Per observation the drive is K SINGLE-TONE
+# recordings at omega_k = CHI_FREQ_BOUNDS-spaced multipliers * Omega_0, where Omega_0 is the
+# spontaneous-oscillation peak measured from the passive trace (mirrors the FDT pipeline's
+# data-driven grid; see core/FDT/spectral.gen_freqs_log / find_spectral_peak). Each chi(omega_k)
+# enters as [log|chi|, cos(arg chi), sin(arg chi)] -> 3K features, routed through the EmbeddedNet's
+# second pathway (forcing_dim = 3K). A single passive trace only sees the products D*A_nd (amplitude)
+# and (lambda_hb/k_gs)*tau_nd (timescale); the chi(omega) SHAPE over frequency separates
+# kappa/lambda/x_scale/t_scale INDIVIDUALLY -- the only lever on the information ceiling + the
+# x_scale location bias (KEEPER CAVEAT 1). CHI_MODE=False = the exact current pipeline
+# (single-frequency forcing, or spontaneous-only), so this is fully optional and additive.
+CHI_MODE = False
+CHI_N_FREQS = 6                # K: number of single-tone drive frequencies (recordings) per observation.
+CHI_FREQ_BOUNDS = (0.1, 10.0)  # log-spaced multipliers of the measured spontaneous peak Omega_0 spanned
+                               # by the K-frequency grid (mirrors FDTConfig.freq_bounds).
+CHI_K_MAX = 24         # upper bound on K accepted by the GUI. Cost is linear in K (each probe
+                       # is another full simulation per observation) and the Infer tab grows one
+                       # file-picker row per probe frequency.
+CHI_F0 = 0.2                   # ND drive amplitude for every chi probe. Driving at a FIXED ND amplitude
+                               # (dimensional amp = CHI_F0 * f_scale, which build_nondim divides back to
+                               # CHI_F0) keeps the lock-in SNR uniform across the f_scale prior, and models
+                               # an experimentalist who scales the physical drive to the cell. chi =
+                               # redimensionalized response / dimensional drive, so it still carries
+                               # x_scale/f_scale.
+                               #
+                               # CHOSEN BY MEASUREMENT, not by a linearity argument. An ACTIVE (spontaneously
+                               # oscillating) bundle has NO clean linear-response regime near its own
+                               # frequency -- a weak drive is not "more linear", it is simply swamped by the
+                               # spontaneous oscillation, and the lock-in then measures noise divided by a
+                               # small number. The criterion that matters is REPRODUCIBILITY: chi must be a
+                               # stable function of theta, not of the noise seed. Measured on cell_2 at
+                               # T_obs ~ 8 s, M = 8 seeds (|chi| coefficient of variation):
+                               #     ND 0.05 -> 0.21 at Omega_0, 0.17 at 0.3x, but 0.62 at 3x  (unusable
+                               #                high-frequency probes -- and the grid runs to 10x)
+                               #     ND 0.2  -> 0.04 at Omega_0, 0.04 at 0.3x, 0.17 at 3x       (usable
+                               #                everywhere; retains a ~10x |chi| range across frequency,
+                               #                which IS the shape information the flow conditions on)
+                               #     ND >=0.5 -> even steadier, but entrainment saturates |chi| (9.2 -> 1.4
+                               #                at Omega_0 from 0.05 -> 1.0), compressing its theta-dependence
+                               # So 0.2 balances lock-in SNR against saturation. TUNABLE per config in the
+                               # Config tab; re-measure for a cell with a very different Q or noise level.
+
+# Cycles of the observation's own oscillation shown in the time-domain posterior-overlay figures. The
+# window is derived per observation from its measured peak frequency, so this stays meaningful whatever
+# t_scale is: enough cycles to judge frequency and waveform, few enough that individual cycles are legible.
+EYE_TEST_CYCLES = 15
+
 # === TRANSIENT (Case A: clip initial conditions settling) ===
 TRANSIENT_ND_UNITS = 100  # ND time units of transient to discard; ~20 e-folds of the slowest
                           # bounded mode (tau_c up to ~5.0) in ND Nadrowski cell files.
@@ -172,6 +288,19 @@ TRANSIENT_ND_UNITS = 100  # ND time units of transient to discard; ~20 e-folds o
 STABILITY_SWEEP_ND_UNITS = 1000  # ND time units used to screen parameter stability during
                                 # prior construction (global + local sweeps). Short enough
                                 # to be cheap, long enough for instabilities to manifest.
+
+@lru_cache(maxsize=1)
+def unit_registry():
+    """The process-wide pint UnitRegistry.
+
+    Constructing one parses pint's full unit-definition file (~100-300 ms). Every config builder and
+    every diagnostic script parses units at least once per cell, and cli._parse_cell /
+    cli._units_to_factors used to mint a fresh registry on each call. Quantities from different
+    registries cannot be combined, so a single shared instance is also the safer arrangement.
+    """
+    import pint
+    return pint.UnitRegistry()
+
 
 # === SIMULATION CONFIG DATACLASS ===
 @dataclass
@@ -191,7 +320,30 @@ class SimConfig:
     rescale_params: OrderedDict # {name: (val, (lo, hi))}
     force_params_dict: OrderedDict # {name: (val, (lo, hi))}
     units_dict: tuple
+    # DEPRECATED and unread. si_factors is built by iterating units_dict, which is SET-derived and
+    # therefore has non-deterministic order, so it could never be safely indexed -- and nothing in the
+    # repo reads it. Kept only so the existing constructor calls (cli + 8 scripts) keep working; use
+    # get_unit_conversion_factor / freq_si_to_cell / the *_unit properties instead, which match by
+    # DIMENSION rather than position. Do not add new readers.
     si_factors: list[float]
+
+    # Multi-frequency susceptibility mode: replace the single-frequency forced conditioning with a
+    # K-frequency chi(omega) curve (see config.CHI_MODE). Threads like has_forcing; set at build time
+    # from config.CHI_MODE. Default False = the existing single-frequency / spontaneous pipeline.
+    # The three knobs are carried ON THE CONFIG (not read from the module at use time) so a config --
+    # and therefore a posterior trained from it -- is SELF-DESCRIBING: changing the global afterwards
+    # cannot silently reinterpret an existing run. default_factory reads the module value LIVE at
+    # construction, so the CLI still picks up config.CHI_* edits without passing anything.
+    chi_mode: bool = False
+    chi_n_freqs: int = field(default_factory=lambda: CHI_N_FREQS)
+    chi_f0: float = field(default_factory=lambda: CHI_F0)
+    chi_freq_bounds: tuple = field(default_factory=lambda: CHI_FREQ_BOUNDS)
+
+    # Decorrelating Fisher rotation, carried per-config for the same reason as the chi knobs: consumers
+    # used to `from .config import REPARAM_ROTATE`, which snapshots at import and cannot be toggled at
+    # runtime. Reading it from the config makes a trained posterior self-describing about whether the
+    # rotation was intended (the <name>.rot.pt sidecar stores the resulting V).
+    reparam_rotate: bool = field(default_factory=lambda: REPARAM_ROTATE)
 
     # Time / segmentation (legacy fallback fields; primary time setup uses dt_exp + T_obs)
     t_max: float = None
@@ -202,6 +354,14 @@ class SimConfig:
     t_min_exp: float = None       # shortest expected recording
     t_max_exp: float = None       # longest expected recording
     T_obs: float = None           # ground-truth observation duration (user input)
+    # Resolved observation length in SAMPLES, written by orchestrator.generate_observations after any
+    # cost-ceiling clipping. Downstream consumers (PPC in infer_and_visualize, the overlay figures)
+    # MUST read this rather than recomputing int(T_obs/dt_exp): the two expressions are algebraically
+    # equal but not numerically, and the ceiling branch writes T_obs back as N_obs*dt_exp, whose
+    # re-truncation can land on N_obs-1. A one-sample disagreement there silently deleted all five
+    # posterior-overlay figures. None => generate_observations has not run (the experimental paths,
+    # which take their length from the recording itself).
+    n_obs: int = None
 
     # Hardware
     hw: DeviceConfig = field(default_factory=detect_device)
@@ -305,13 +465,21 @@ class SimConfig:
         return torch.tensor(nd, dtype=self.hw.dtype, device=self.hw.device).unsqueeze(0)
 
     @staticmethod
-    def _fill_checked(label: str, cell_vals: dict, cfg_dict: OrderedDict, check_bounds: bool) -> None:
-        """Validate a cell values dict against a config (val,(lo,hi)) dict, then fill in the values."""
-        if set(cell_vals.keys()) != set(cfg_dict.keys()):
-            missing = sorted(set(cfg_dict) - set(cell_vals))
-            extra = sorted(set(cell_vals) - set(cfg_dict))
+    def _fill_checked(label: str, cell_vals: dict, cfg_dict: OrderedDict, check_bounds: bool) -> list:
+        """Validate a cell values dict against a config (val,(lo,hi)) dict, then fill in the values.
+
+        MISSING is fatal -- the bounds file declares a parameter the cell cannot supply, and a None left
+        in slot 0 would crash later in params_tensor. EXTRA cell values are IGNORED and returned, so the
+        caller can report them: the BOUNDS file is the single source of truth for which parameters are
+        inferred, so a cell carrying more than the bounds declare is merely over-specified. That is what
+        lets one cell serve several bounds files -- e.g. a forced cell (f_scale + a Forcing section) used
+        with a spontaneous bounds file that declares neither. cli._merge_vals_bounds already drops
+        bounds-absent params exactly this way; being strict only here made the two paths disagree.
+        """
+        missing = sorted(set(cfg_dict) - set(cell_vals))
+        if missing:
             raise ValueError(
-                f"Cell file {label} do not match the bounds file: missing={missing}, unexpected={extra}."
+                f"Cell file is missing {label} required by the bounds file: {missing}."
             )
         if check_bounds:
             oob = [f"{n}={cell_vals[n]} not in ({lo}, {hi})"
@@ -320,21 +488,34 @@ class SimConfig:
                 raise ValueError(f"Cell file {label} outside the bounds file's bounds: " + "; ".join(oob))
         for n in cfg_dict:
             cfg_dict[n] = (cell_vals[n], cfg_dict[n][1])
+        return sorted(set(cell_vals) - set(cfg_dict))
 
     def inject_ground_truth(self, inits: dict, param_vals: dict,
-                            rescale_vals: dict, forcing_vals: dict) -> None:
+                            rescale_vals: dict, forcing_vals: dict) -> list:
         """
         Fill ground-truth VALUES + initial conditions from a cell file into a bounds-built config.
 
-        SAFEGUARD: the ND and rescale (inferred) param sets must match the bounds file and every value
-        must lie within its bounds — else a clear ValueError listing the offenders. Forcing is the known
-        DRIVE (conditioning, not an inferred param): its set must match, but its range is not enforced
-        (a spontaneous cell legitimately uses amp=0/freq=0 outside the drive prior's range).
+        SAFEGUARD: every ND and rescale (inferred) parameter the BOUNDS file declares must be present in
+        the cell and lie within its bounds — else a clear ValueError listing the offenders. Forcing is the
+        known DRIVE (conditioning, not an inferred param): it must be present, but its range is not
+        enforced (a spontaneous cell legitimately uses amp=0/freq=0 outside the drive prior's range).
+
+        Values the cell carries that the bounds file does NOT declare are IGNORED and returned, so the
+        caller can note them — see _fill_checked. This is what lets one cell be used across the three
+        observation modes (a forced cell against a spontaneous bounds file drops f_scale + the drive).
+
+        :return: names of cell values that were ignored, tagged by section (may be empty).
         """
-        self._fill_checked("ND parameters", param_vals, self.params_dict, check_bounds=True)
-        self._fill_checked("rescale parameters", rescale_vals, self.rescale_params, check_bounds=True)
-        self._fill_checked("forcing parameters", forcing_vals, self.force_params_dict, check_bounds=False)
+        ignored = [f"{n} (ND)" for n in
+                   self._fill_checked("ND parameters", param_vals, self.params_dict, check_bounds=True)]
+        ignored += [f"{n} (rescale)" for n in
+                    self._fill_checked("rescale parameters", rescale_vals, self.rescale_params,
+                                       check_bounds=True)]
+        ignored += [f"{n} (forcing)" for n in
+                    self._fill_checked("forcing parameters", forcing_vals, self.force_params_dict,
+                                       check_bounds=False)]
         self.inits_dict = OrderedDict(inits)
+        return ignored
 
     def set_observation_context(self, T_obs: float, forcing_vals: dict | None = None) -> None:
         """
@@ -371,6 +552,30 @@ class SimConfig:
         return len(self.force_params_dict) > 0
 
     @property
+    def observation_mode(self) -> str:
+        """Which of the THREE observation protocols this config describes.
+
+          "spontaneous"  chi off, no drive     -- ONE passive trace. Groups A-F, Group G zero-padded;
+                                                  conditioning [S(41) | log T]. f_scale is inert here
+                                                  (it only ever divides a force) so it should not be in
+                                                  the inferred set -- give such a cell a bounds file with
+                                                  neither a Forcing section nor f_scale.
+          "forced"       chi off, has_forcing  -- passive + ONE forced trace at the cell's own drive.
+                                                  Conditioning [S(41) | log T | forcing].
+          "chi"          chi on                -- passive + K single-tone forced traces. Conditioning
+                                                  [S(41, G=0) | log T | chi(3K)]. The cell's own drive is
+                                                  IGNORED (chi probes at mult_k * measured Omega_0), so
+                                                  this is independent of has_forcing.
+
+        The mode is chosen by which BOUNDS file is picked (has_forcing == "it declares a Forcing
+        section") plus the chi toggle. The three conditioning widths cannot collide (K >= 2 is enforced),
+        so loading a posterior trained in a different mode fails loudly on shape rather than silently.
+        """
+        if self.chi_mode:
+            return "chi"
+        return "forced" if self.has_forcing else "spontaneous"
+
+    @property
     def forcing_idx(self) -> dict[str, int]:
         """Maps forcing param names to column indices, e.g. {"amp": 0, "freq": 1, ...}."""
         return {name: i for i, name in enumerate(self.force_params_dict.keys())}
@@ -390,27 +595,69 @@ class SimConfig:
         Examples:
           - get_unit_conversion_factor("s")  -> 1000.0 if cell uses ms
           - get_unit_conversion_factor("N")  -> 1e12 if cell uses pN
-          - get_unit_conversion_factor("Hz") -> 1.0 if cell uses Hz
 
-        :param si_unit: SI unit string (e.g. "s", "N", "Hz", "rad").
+        NOTE: do NOT use this for a drive FREQUENCY -- use ``freq_si_to_cell``, which derives the
+        factor from the TIME unit. See that property for why.
+
+        :param si_unit: SI unit string (e.g. "s", "N", "rad").
         :return: Conversion factor: cell_value = si_value * factor.
         :raises ValueError: If no unit in the cell file matches the given dimensionality.
         """
-        import pint
-        ureg = pint.UnitRegistry()
+        ureg = self._ureg          # cached -- a fresh UnitRegistry per call is expensive and this is hot
         target_dim = ureg.Quantity(1, si_unit).dimensionality
         for unit_str in self.units_dict:
             try:
                 if ureg.Quantity(1, unit_str).dimensionality == target_dim:
                     return ureg.Quantity(1, si_unit).to(unit_str).magnitude
-            except pint.UndefinedUnitError:
+            except Exception:                  # noqa: BLE001 -- undefined token; skip
                 continue
-        raise ValueError(f"No unit with dimensionality {target_dim} found in cell file.")
+        raise ValueError(f"No unit with dimensionality {target_dim} found in the units file.")
+
+    @property
+    def freq_si_to_cell(self) -> float:
+        """Drive-frequency conversion factor: ``freq_cell = freq_Hz * freq_si_to_cell``.
+
+        Frequency is INVERSE CELL TIME *by construction*, not an independently declared unit:
+        core/forcing.py builds ``t_dim`` in cell time units and evaluates ``sin(2*pi*freq*t_dim)``, and
+        statistics.py / chi.py index their FFTs with ``dt`` in cell time units. So a 30 Hz drive in an
+        ``ms`` cell is 0.03 cycles/ms, NOT 30.
+
+        Deriving the factor from the TIME unit is what makes it correct regardless of what (if anything)
+        the units file declares for frequency. Matching a declared "Hz" token instead resolves to 1.0
+        against an ``ms`` cell and inflates every experimental drive by 1000x -- the bug this replaces.
+        Use ``check_unit_consistency()`` to surface a units file whose frequency token disagrees.
+        """
+        return 1.0 / self.get_unit_conversion_factor("s")
+
+    def check_unit_consistency(self) -> list[str]:
+        """Human-readable warnings where the DECLARED units disagree with how the pipeline uses them.
+
+        Units *declare* what the numbers in the bounds/cell files mean; they are never auto-converted.
+        So a declaration that contradicts the pipeline's own convention silently mis-scales real data.
+
+        Check: the declared FREQUENCY token must be the reciprocal of the declared TIME token (Hz with s,
+        kHz with ms, ...), because drive frequency is consumed as inverse cell time (see freq_si_to_cell).
+        """
+        msgs: list[str] = []
+        t_tok, f_tok = self.time_unit, self.freq_unit
+        if t_tok and f_tok:
+            try:
+                declared = self._ureg.Quantity(1, f_tok).to(f"1/{t_tok}").magnitude
+            except Exception:                  # noqa: BLE001 -- unconvertible pair; nothing to assert
+                return msgs
+            if abs(declared - 1.0) > 1e-9:
+                msgs.append(
+                    f"Units file declares frequency in '{f_tok}' but time in '{t_tok}'. The pipeline "
+                    f"consumes drive frequency as INVERSE CELL TIME (1/{t_tok}), so a '{f_tok}' value is "
+                    f"off by {1.0 / declared:g}x. Declare the reciprocal of the time unit (e.g. kHz for "
+                    f"ms) or drop the frequency token entirely -- it is display-only, and conversions "
+                    f"derive from the time unit."
+                )
+        return msgs
 
     @cached_property
     def _ureg(self):
-        import pint
-        return pint.UnitRegistry()
+        return unit_registry()
 
     def _resolve_unit(self, si_unit: str) -> "str | None":
         """The cell's unit TOKEN whose dimensionality matches ``si_unit`` (e.g. "s" -> "ms"), or None.
@@ -442,7 +689,12 @@ class SimConfig:
 
     @cached_property
     def force_unit(self) -> "str | None":
-        """Cell force unit token (e.g. "pN"); None for BP, which declares no force unit."""
+        """Cell force unit token (e.g. "pN"); None for BP, which declares no force unit.
+
+        CAVEAT for a model with NO f_scale (Hopf): forcing.py then falls back to the Hopf-style nondim
+        f_scale = x_scale / t_scale, so the EFFECTIVE force unit is length/time (nm/ms) regardless of
+        what the units file declares. The declared token is still used to convert an experimental drive,
+        so for such a model the declaration is a labelling convention, not a derived quantity."""
         return self._resolve_unit("N")
 
     @cached_property

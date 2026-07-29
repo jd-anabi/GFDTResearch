@@ -16,13 +16,13 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/reparam
 import math
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
 
+import _common
 from core import cli
 from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
                          NADROWSKI_LABELS, CHUNK_LEN, POSTERIOR_PATH)
@@ -38,12 +38,8 @@ DZ = float(os.environ.get("DZ", "0.1"))
 SEED = int(os.environ.get("SEED", "0"))
 torch.manual_seed(SEED)
 
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c, t_max_exp=T_MAX_EXP_S * s2c,
-                T_obs=T_MIN_EXP_S * s2c, hw=detect_device())
+_common.enable_warnings()
+cfg = _common.script_cfg()
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 P = nd_dim + len(cfg.rescale_params)
@@ -86,7 +82,7 @@ def sim_feats(theta_row, m):
 # ---- simulation-based latent Fisher F = J^T J ----
 print("[fisher] computing latent feature-Jacobian at GT ...", flush=True)
 fnoise = np.maximum(sim_feats(gt_phys, M_NOISE).std(0), 1e-9)
-J = np.zeros((41, P))
+J = np.zeros((_common.n_features(cfg), P))   # the MODE's feature count, not a literal 41
 for i in range(P):
     zp = z_gt.clone(); zp[i] += DZ
     zm = z_gt.clone(); zm[i] -= DZ

@@ -15,6 +15,7 @@ import math
 import numpy as np
 import torch
 
+from core import forcing as _forcing
 from core.config import CHUNK_LEN, REPARAM_FISHER_M, REPARAM_FISHER_DZ, REPARAM_FISHER_POINTS
 from core.SBI import pipeline
 from core.SBI.statistics import FEATURE_LABELS
@@ -27,6 +28,10 @@ def _default_inits(cfg, dtype, device) -> torch.Tensor:
     own synthesis (pipeline.INIT_SHAPES: randint pos + zero prob), seeded for a deterministic Fisher.
     The transient (steady_idx) washes these out, so the specific values do not matter.
     """
+    from core import registry
+    if registry.is_user_model(cfg.model):        # user models declare their own inits (no INIT_SHAPES row)
+        from core.SBI.Priors.user_prior import declared_inits
+        return declared_inits(registry.get(cfg.model)).to(dtype=dtype, device=device)
     n_pos, n_prob = pipeline.INIT_SHAPES[cfg.model.lower()]
     rng = np.random.RandomState(0)
     inits = np.concatenate([rng.randint(0, 10, size=(1, n_pos)), np.zeros((1, n_prob))], axis=1)
@@ -80,14 +85,37 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
     # Drive + initial conditions: use the ground-truth cell when present (scripts, preserves the exact
     # legacy V); otherwise (GT-free training) use a representative in-distribution drive and the
     # model-default inits the training loop itself synthesizes, so the rotation reflects training, not GT.
-    if cfg.has_ground_truth:
-        forcing_gt = torch.tensor([[v for v, _ in cfg.force_params_dict.values()]], dtype=dtype, device=device)
-        base_inits = cfg.inits_tensor
+    # A SPONTANEOUS config (no Forcing section in its bounds) has no drive to probe. The rotation is
+    # still well-defined there -- the Fisher just measures how Groups A-F respond to a latent
+    # perturbation, which is exactly the information such a posterior conditions on -- so branch rather
+    # than refuse. chi-mode is excluded upstream (build_posterior), not here.
+    has_drive = cfg.has_forcing
+    base_inits = cfg.inits_tensor if cfg.has_ground_truth else _default_inits(cfg, dtype, device)
+    n_vars = base_inits.shape[-1]
+    n_force_ch = _forcing.n_force_channels(cfg.model, cfg.forcing_idx, n_vars)
+    if has_drive:
+        if cfg.has_ground_truth:
+            forcing_gt = torch.tensor([[v for v, _ in cfg.force_params_dict.values()]],
+                                      dtype=dtype, device=device)
+        else:
+            forcing_gt = _representative_forcing(cfg, force_prior, dtype, device)
+        amp_v, freq_v, phase_v = (forcing_gt[:, cfg.forcing_idx[k]] for k in ("amp", "freq", "phase"))
     else:
-        forcing_gt = _representative_forcing(cfg, force_prior, dtype, device)
-        base_inits = _default_inits(cfg, dtype, device)
-    amp_v, freq_v, phase_v = (forcing_gt[:, cfg.forcing_idx[k]] for k in ("amp", "freq", "phase"))
+        forcing_gt = amp_v = freq_v = phase_v = None
 
+    # NOTE on the float64 statistics stack below (an audited "performance opportunity", NOT taken).
+    #
+    # The stated rationale was that float64 here is wasted "for a Fisher that is immediately
+    # .numpy()'d and whose eigenvectors are cast back to float32". That does not follow: this is a
+    # CENTRAL DIFFERENCE. fisher_at computes (feats(z+dz) - feats(z-dz)) / (2*dz) on features that
+    # are O(1) with dz = REPARAM_FISHER_DZ = 0.1, so the difference is small relative to the operands
+    # and cancellation is the dominant error term -- exactly the situation where intermediate
+    # precision matters even though the RESULT is rounded. Doing the FFT stack in float32 would eat
+    # into the signal, and the output of this function is the rotation V: the coordinate system the
+    # flow is trained in. A cheaper Fisher that quietly moves V is not a performance win.
+    #
+    # If this is ever revisited, the honest test is to build V both ways at several operating points
+    # and compare the resulting eigenbasis -- not to reason from the output dtype.
     def feats(theta_row, mm):
         nd = theta_row[:nd_dim].unsqueeze(0).expand(mm, -1).contiguous()
         res = theta_row[nd_dim:]
@@ -97,22 +125,47 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
         t_fine = cfg.t[:n_fine]
         n_segs = max(1, math.ceil(n_fine / CHUNK_LEN))
         rv = res.unsqueeze(0).expand(mm, -1).contiguous()
-        force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(mm, -1), t_fine, rv,
-                                                       cfg.forcing_idx, cfg.rescale_idx)
 
         def s(f):
             return pipeline.gen_obs(model=cfg.model, params=nd, t=t_fine,
                                     inits=base_inits.expand(mm, -1).contiguous(), force=f,
                                     n_segs=n_segs, steady_idx=cfg.steady_idx,
-                                    state_dep_drift=cfg.state_dep_drift, batch_size=mm, dtype=dtype,
-                                    device=device)[0][:, ::subs][:, :N_obs]
-        torch.manual_seed(1); xf = s(force)
-        torch.manual_seed(2); xs = s(torch.zeros_like(force))
+                                    state_dep_drift=cfg.state_dep_drift, batch_size=mm, var_idx=0,
+                                    dtype=dtype, device=device)[0][:, ::subs][:, :N_obs]
+
         xsc = res[cfg.rescale_idx["x_scale"]].double()
         xof = res[cfg.rescale_idx["x_offset"]].double() if "x_offset" in cfg.rescale_idx else 0.0
-        return pipeline.gen_stats(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
-                                  amp_v.expand(mm).double(), freq_v.expand(mm).double(),
-                                  phase_v.expand(mm).double(), device=device).numpy()
+        # The fixed seeds below are LOAD-BEARING -- common random numbers, so the zp/zm arms of the
+        # central difference in fisher_at() share a noise realisation and the derivative is not
+        # swamped by it. But torch.manual_seed is GLOBAL: build_latent_fisher_rotation runs inside
+        # build_posterior immediately before train_nn, so on return the process RNG was left pinned
+        # at seed 2 and every SDE noise draw of the 5000-batch training run became a deterministic
+        # function of it -- two "independent" runs shared their entire noise realisation, and any
+        # run-to-run variance study measured nothing. fork_rng keeps the CRN benefit and restores
+        # the caller's stream on exit. Fork the CUDA generator too when we are on a GPU, since
+        # manual_seed reseeds both and the simulation noise is drawn on `device`.
+        fork_devices = [device] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=fork_devices):
+            if has_drive:
+                force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(mm, -1), t_fine, rv,
+                                                               cfg.forcing_idx, cfg.rescale_idx)
+                torch.manual_seed(1); xf = s(force)
+                torch.manual_seed(2); xs = s(torch.zeros_like(force))
+                return pipeline.gen_stats(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
+                                          amp_v.expand(mm).double(), freq_v.expand(mm).double(),
+                                          phase_v.expand(mm).double(), device=device).numpy()
+            # Spontaneous: ONE unforced run; Group G is zero-padded, so those 11 columns contribute
+            # nothing to J and the Fisher is driven purely by Groups A-F (the same features the
+            # posterior sees).
+            # n_force_channels, not n_vars: this is the one zero-force site the 2026-07-28 sweep
+            # missed. The tensor is the largest single allocation in a Fisher evaluation and there
+            # are ~216 of them per rotation, so an n_vars-wide one over-allocates 3x for Nadrowski
+            # and 5x for BP. See forcing.n_force_channels -- the channel count is a property of the
+            # model's DRIFT, so a driveless Hopf still needs 2 channels.
+            zero = torch.zeros((mm, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+            torch.manual_seed(2); xs = s(zero)
+            return pipeline.gen_stats(xsc * xs.double() + xof, None, cfg.dt_exp, None, None, None,
+                                      device=device, spontaneous_only=True).numpy()
 
     def fisher_at(theta_row):
         """Per-point standardized feature-Fisher F_k = J^T J, or None if features are non-finite."""

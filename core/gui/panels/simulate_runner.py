@@ -10,8 +10,10 @@ the per-segment loop in ``core/Simulator/simulator.py`` incrementally -- carryin
 rebuilding the sinusoidal force per frame -- so memory stays flat and frames arrive continuously.
 
 The runner is driven directly on ``sdeint.Solver().euler`` rather than through ``Simulator.simulate`` /
-``__sols`` for two reasons: (1) it avoids the ``exit()`` those call on a solver exception, and (2) it
-lets us advance a fixed ``frame_steps`` of fine EM steps per frame and yield between them.
+``__sols`` so it can advance a fixed ``frame_steps`` of fine EM steps per frame and yield between
+them -- ``simulate`` runs the whole horizon in one call. (It also used to dodge the ``exit()`` those
+called on a solver exception; that became simulator.SimulationError on 2026-07-28, so it is no longer
+a reason -- see _make_simulator below.)
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ from ..streams import WorkerCancelled
 def build_stream_config(model: str, cell_path: str):
     """Build a ground-truth ``SimConfig`` from a model + cell pick, forced onto CPU.
 
-    Mirrors the inference-Simulate tab (``inference_tabs._run_simulated_preview``): the bounds file is
+    Mirrors the inference simulated path (``inference_tabs._run_simulated_inference``): the bounds file is
     the per-model sibling of the cell (``Bounds/<model>/<cell>.txt``), so no separate bounds pick is
     needed. ``make_sim_config`` defaults ``hw`` to ``detect_device()`` (CUDA on a capable box); the
     batch-1 sequential Euler loop is CPU-optimal AND every tensor here must share one device, so force
@@ -123,10 +125,10 @@ def plan_stream(cfg, t_obs_s: float) -> StreamPlan:
     x_offset = (rescale_gt[:, rescale_idx["x_offset"]].item() if "x_offset" in rescale_idx else 0.0)
 
     # User models drive ONE force channel per state variable (zeros where unforced); built-ins keep
-    # the legacy 1-or-2-channel sinusoidal convention.
+    # the legacy 1-or-2-channel sinusoidal convention. forcing.n_force_channels is the shared rule.
     spec = registry.get(cfg.model)
     user_spec = spec if (spec is not None and spec.is_user_model) else None
-    n_channels = spec.n_vars if user_spec is not None else (2 if "amp_y" in forcing_idx else 1)
+    n_channels = forcing.n_force_channels(cfg.model, forcing_idx, cfg.inits_tensor.shape[1])
 
     return StreamPlan(
         dt_nd=dt_nd_min, subsample_factor=subsample_factor, steady_steps=steady_steps, n_obs=n_obs,
@@ -152,24 +154,21 @@ def _make_simulator(plan: StreamPlan, dtype, device):
     """Construct the per-model Simulator ONCE to get its ``.sde`` (reuses each subclass's positional
     ``*torch.unbind(params)`` construction, incl. BP steady-vs-full selection + init slicing).
 
-    The Simulator subclasses call ``exit()`` on a construction failure (a pre-existing pipeline wart);
-    that raises ``SystemExit``, a BaseException that ``Worker.run`` does NOT catch -- it would kill the
-    worker thread silently. Translate it into a normal error so the panel shows a dialog instead.
+    Every Simulator now raises on a construction failure (SimulationError for the built-ins,
+    RuntimeError for UserSimulator), both ordinary Exceptions that ``Worker.run`` catches and turns
+    into an error dialog. This used to need a ``except SystemExit`` translation, because the built-in
+    subclasses answered a bad cell with ``print(); exit()`` -- a BaseException that Worker.run does
+    NOT catch, so it killed the worker thread silently.
     """
     placeholder_force = torch.zeros((1, plan.n_channels, 2), dtype=dtype, device=device)
     placeholder_t = torch.zeros(2, dtype=dtype, device=device)
     if plan.user_spec is not None:
-        # UserSimulator raises RuntimeError natively (no exit()), so no SystemExit translation needed.
         return registry.make_user_simulator(plan.user_spec, plan.params_tensor, placeholder_force,
                                             plan.inits_tensor, placeholder_t, segs=1, batch_size=1,
                                             device=device)
     sim_cls = pipeline._sim_class(plan.model)
-    try:
-        return sim_cls(plan.params_tensor, placeholder_force, plan.inits_tensor, placeholder_t,
-                       segs=1, batch_size=1, device=device)
-    except SystemExit as e:                          # the subclasses' _set_up_model exit() -> SystemExit
-        raise RuntimeError(
-            "Could not construct the simulator for this cell/model (invalid parameters?).") from e
+    return sim_cls(plan.params_tensor, placeholder_force, plan.inits_tensor, placeholder_t,
+                   segs=1, batch_size=1, device=device)
 
 
 def run_simulation_stream(cfg, t_obs_s: float, frame_steps: int = 2000, fps: float = 30.0,

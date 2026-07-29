@@ -1,10 +1,10 @@
 """CROSSVAL mode: the FDT parameter-sweep study.
 
-Two sweeps probe FDT restoration on the Nadrowski model (core/cli.py:523-526):
+Two sweeps probe FDT restoration on the Nadrowski model (see cli.make_param_sweep_config):
   * S sweep  (T_a/T held at 1): vary S;      FDT is restored as S -> 0.
   * T sweep  (S held at 0):     vary T_a/T;  FDT is restored as T_a/T -> 1.
 
-Mirrors cli.build_param_sweep_config (core/cli.py:519) with widgets, then runs the prompt-free
+Mirrors cli.build_param_sweep_config with widgets, then runs the prompt-free
 FDT.cross_validation.run_param_study_cli on a worker. Model is fixed to NADROWSKI.
 """
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
@@ -19,6 +19,8 @@ from .. import settings
 from ..widgets.artifact_picker import ArtifactPicker
 from ..widgets.help_badge import add_help_row
 from ..widgets.labeled_inputs import FloatField, IntField
+from ..widgets.field_row import LabeledFieldRow
+from ..widgets.forms import make_form
 
 _MODEL = "NADROWSKI"
 
@@ -34,23 +36,27 @@ HELP = {
 }
 
 
-class _GridRow(QWidget):
+class _GridRow(LabeledFieldRow):
     """min / max / n_points for one sweep axis."""
 
     def __init__(self, lo: float, hi: float, points: int, parent=None):
-        super().__init__(parent)
         self.lo, self.hi, self.points = FloatField(lo), FloatField(hi), IntField(points)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        for label, field in (("min", self.lo), ("max", self.hi), ("n", self.points)):
-            layout.addWidget(QLabel(label))
-            layout.addWidget(field, 1)
+        super().__init__((("min", self.lo), ("max", self.hi), ("n", self.points)), parent=parent)
 
     def spec(self) -> tuple:
-        return self.lo.value(), self.hi.value(), self.points.value()
+        return self.values()
 
 
 class CrossValPanel(BasePanel):
+    """Drives the FDT parameter-sweep study (``FDT.cross_validation.run_param_study_cli``).
+
+    Model is fixed to NADROWSKI. Two sweeps -- S with T_a/T held at 1, and T_a/T with S held at 0 --
+    each running from the FDT-restoring limit to the selected cell's own value.
+
+    Persists (group "crossval"): the cell picker, the preset, the free knobs (n_freqs, ensemble_M,
+    freqs_per_batch, F0) and each grid's point COUNT. Deliberately NOT the grids' lo/hi: those are
+    re-derived from the cell, so a value saved against a different cell would be a stale bound.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build_controls()
@@ -60,7 +66,7 @@ class CrossValPanel(BasePanel):
 
     def _build_controls(self):
         box = QGroupBox("FDT parameter-sweep study")
-        form = QFormLayout(box)
+        form = make_form(box)
 
         self.cell_picker = ArtifactPicker(CELL_PATH / _MODEL.lower())
         self.cell_picker.combo.currentIndexChanged.connect(self._on_cell_changed)
@@ -70,6 +76,10 @@ class CrossValPanel(BasePanel):
         self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
 
         self.cell_values = QLabel("—")
+        # This label receives an UNBOUNDED str(e) from _on_cell_changed's broad except. Without wrap
+        # it forced the whole controls column wider than any sensible width, which used to trigger
+        # the permanent horizontal scrollbar on a panel that otherwise fit.
+        self.cell_values.setWordWrap(True)
         self.s_grid = _GridRow(0.0, 1.0, 8)
         self.t_grid = _GridRow(1.0, 1.0, 8)
         self.n_freqs = IntField(30)
@@ -95,7 +105,7 @@ class CrossValPanel(BasePanel):
 
         self.controls_layout.addWidget(box)
 
-    # ── prefill, exactly as the CLI does (core/cli.py:532-548) ───────────────
+    # ── prefill, exactly as the CLI does (cli.build_param_sweep_config's prefill) ───────────────
     def _on_cell_changed(self):
         cell = self.cell_picker.selected_path()
         if not cell:
@@ -170,7 +180,7 @@ class CrossValPanel(BasePanel):
         self.preset_combo.setCurrentText(settings.get_str(qs, "preset", self.preset_combo.currentText()))
         self.cell_picker.restore_key(settings.get_str(qs, "cell"))
         # Restore ONLY the freely-set knobs -- and after the cell, so a saved `points` survives. Do NOT
-        # restore the grid lo/hi: those are re-derived from the cell (core/cli.py:532-548), and a saved
+        # restore the grid lo/hi: those are re-derived from the cell (cli.build_param_sweep_config's prefill), and a saved
         # value from a DIFFERENT cell would be a stale, wrong bound.
         settings.restore_field(qs, "f0", self.f0)
         settings.restore_field(qs, "freqs_per_batch", self.freqs_per_batch)

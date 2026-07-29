@@ -1,5 +1,5 @@
 """
-Step 4 (sbi_calibration_handoff.txt): degeneracy / sloppiness map over ALL 16 inferred params.
+Step 4 (PRISM_HANDOFF.md, Appendix A): degeneracy / sloppiness map over ALL 16 inferred params.
 
 Generalizes scripts/diagnose_fmax.py Part B. At the cell-file ground truth it builds the
 standardized feature-Jacobian
@@ -25,7 +25,6 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/degener
 import math
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,48 +33,68 @@ import torch
 import matplotlib; matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from core import cli
-from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
-                         NADROWSKI_LABELS, CHUNK_LEN, PLOT_PATH)
-from core.SBI import pipeline
+import _common
+from core import forcing
+from core.config import CHUNK_LEN, PLOT_PATH
+from core.SBI import chi as chi_mod, pipeline
 from core.SBI.statistics import FEATURE_LABELS
 
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
-TOBS_S = float(os.environ.get("TOBS_S", str(T_MIN_EXP_S)))
+_common.enable_warnings()
+
 M = int(os.environ.get("M", "32"))
 M_NOISE = int(os.environ.get("M_NOISE", "128"))
 REL = float(os.environ.get("REL", "0.02"))
 SEED = int(os.environ.get("SEED", "0"))
 MIN_VALID = float(os.environ.get("MIN_VALID", "0.5"))
 ZERO_TOL = float(os.environ.get("ZERO_TOL", "0.05"))     # ||g||_std below this = "no local info"
-SF, SS = 1, 2
+SF, SS, SC = 1, 2, 3                                     # CRN seeds: forced / spontaneous / chi block
 torch.manual_seed(SEED)
-print(f"[cfg] CELL={CELL} TOBS_S={TOBS_S} M={M} M_NOISE={M_NOISE} REL={REL} "
-      f"MIN_VALID={MIN_VALID} ZERO_TOL={ZERO_TOL} SEED={SEED}", flush=True)
+print(f"[cfg] M={M} M_NOISE={M_NOISE} REL={REL} MIN_VALID={MIN_VALID} ZERO_TOL={ZERO_TOL} "
+      f"SEED={SEED}", flush=True)
 
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c, t_max_exp=T_MAX_EXP_S * s2c,
-                T_obs=TOBS_S * s2c, hw=detect_device())
+cfg = _common.script_cfg()
+_common.assert_nadrowski(cfg, "the printed ND parameter names are Nadrowski's")
 dtype, device = cfg.hw.dtype, cfg.hw.device
 N_obs = int(cfg.T_obs / cfg.dt_exp)                       # physical length (t_scale-independent)
 
 gt_nd = cfg.params_tensor[0].clone()
 gt_rescale = torch.tensor([v for v, _ in cfg.rescale_params.values()], dtype=dtype, device=device)
-forcing_gt = torch.tensor([[v for v, _ in cfg.force_params_dict.values()]], dtype=dtype, device=device)
-amp_v = forcing_gt[:, cfg.forcing_idx["amp"]]
-freq_v = forcing_gt[:, cfg.forcing_idx["freq"]]
-phase_v = forcing_gt[:, cfg.forcing_idx["phase"]]
 
-ND_NAMES = ["kappa", "lambda", "phi/f_max", "tau", "tau_c", "S", "dG", "beta", "N", "temp"]
+# ---- Which information set is this map about? ----------------------------------------------------
+# The Jacobian MUST be built from the features the posterior actually conditions on, or the answer is
+# about a different experiment than the one being run.
+#
+#   forced : [S(41) incl. Group G from a single-tone drive at the cell's own frequency]
+#   chi    : [S(41) with Group G ZEROED | chi(3K)]  -- so Group G's 11 columns are dropped and the
+#            3K chi columns take their place.
+#
+# Left unchanged, this script reported the FORCED Jacobian regardless of the chi toggle: it kept the
+# 11 Group-G columns chi mode zeroes and omitted the 3K chi columns entirely. Its |cos| pairs were
+# therefore literally independent of chi, so it would have reported kappa~x_scale and lambda~t_scale
+# as strong as ever and falsely refuted the whole chi hypothesis it was being used to test.
+_G_MASK = _common.summary_keep_idx()
+FEAT_LABELS = _common.feature_labels(cfg)
+_N_FORCE_CH = forcing.n_force_channels(cfg.model, cfg.forcing_idx, cfg.inits_tensor.shape[-1])
+_common.describe_features(cfg)
+
+if cfg.chi_mode:
+    _MULTS = chi_mod.chi_multipliers_for(cfg)
+    print(f"[mode] probe multipliers of Omega_0: {[round(v, 4) for v in _MULTS.tolist()]}", flush=True)
+else:
+    forcing_gt = torch.tensor([[v for v, _ in cfg.force_params_dict.values()]],
+                              dtype=dtype, device=device)
+    amp_v = forcing_gt[:, cfg.forcing_idx["amp"]]
+    freq_v = forcing_gt[:, cfg.forcing_idx["freq"]]
+    phase_v = forcing_gt[:, cfg.forcing_idx["phase"]]
+
+MODE_TAG = cfg.observation_mode                           # suffixes the outputs, see the plots below
+ND_NAMES = list(cfg.params_dict.keys())
 RESCALE_NAMES = list(cfg.rescale_params.keys())
 nd_bounds = [b for _, b in cfg.params_dict.values()]
 
 
 def _raw(pvec, rescale_vec, m, crn):
-    """(feats (m,41) float64 np, xf_dim, xs_dim). Time-grid re-derived from rescale_vec's t_scale."""
+    """(feats (m, n_feat) float64 np, x_for_validity, xs_dim). Grid re-derived from rescale_vec."""
     t_scale = float(rescale_vec[cfg.rescale_idx["t_scale"]])
     subs = max(1, round((cfg.dt_exp / t_scale) / cfg.dt_nd_min))
     n_fine = min(cfg.steady_idx + N_obs * subs, len(cfg.t))
@@ -83,28 +102,56 @@ def _raw(pvec, rescale_vec, m, crn):
     n_segs = max(1, math.ceil(n_fine / CHUNK_LEN))
     p = pvec.unsqueeze(0).expand(m, -1).contiguous()
     rv = rescale_vec.unsqueeze(0).expand(m, -1).contiguous()
-    force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(m, -1), t_fine, rv,
-                                                   cfg.forcing_idx, cfg.rescale_idx)
+    inits_m = cfg.inits_tensor.expand(m, -1).contiguous()
 
     def sim(f):
         return pipeline.gen_obs(model=cfg.model, params=p, t=t_fine,
-                                inits=cfg.inits_tensor.expand(m, -1).contiguous(), force=f,
+                                inits=inits_m, force=f,
                                 n_segs=n_segs, steady_idx=cfg.steady_idx,
                                 state_dep_drift=cfg.state_dep_drift, batch_size=m, dtype=dtype,
                                 device=device)[0][:, ::subs][:, :N_obs]
-    if crn:
-        torch.manual_seed(SF)
-    xf = sim(force)
-    if crn:
-        torch.manual_seed(SS)
-    xs = sim(torch.zeros_like(force))
+
     xsc = rescale_vec[cfg.rescale_idx["x_scale"]].double()
     xof = rescale_vec[cfg.rescale_idx["x_offset"]].double() if "x_offset" in cfg.rescale_idx else 0.0
-    xf_d, xs_d = xsc * xf.double() + xof, xsc * xs.double() + xof   # float64 redim
-    feats = pipeline.gen_stats(xs_d, xf_d, cfg.dt_exp, amp_v.expand(m).double(),
-                               freq_v.expand(m).double(), phase_v.expand(m).double(),
-                               device=device).numpy()
-    return feats, xf_d, xs_d
+
+    # fork_rng so the fixed CRN seeds below do not leak out and pin the caller's global RNG (the
+    # same defect that was fixed in SBI/decorrelate.feats).
+    with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+        if cfg.chi_mode:
+            zero = torch.zeros((m, _N_FORCE_CH, t_fine.shape[0]), dtype=dtype, device=device)
+            if crn:
+                torch.manual_seed(SS)
+            xs_d = xsc * sim(zero).double() + xof
+            # SEED AGAIN, right here. gen_chi_block runs K MORE simulations whose noise is otherwise
+            # completely unseeded -- so the +delta and -delta arms of the central difference would
+            # see different chi noise realisations and the derivative would be swamped. Omitting this
+            # produces a plausible-looking, meaningless map.
+            if crn:
+                torch.manual_seed(SC)
+            chi_block = pipeline.gen_chi_block(
+                model=cfg.model, params_nd=p, rescale=rv, x_spont_dim=xs_d.to(dtype),
+                t_fine=t_fine, inits=inits_m, rescale_idx=cfg.rescale_idx, n_segs=n_segs,
+                steady_idx=cfg.steady_idx, subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
+                multipliers=_MULTS, f0_nd=cfg.chi_f0, state_dep_drift=cfg.state_dep_drift,
+                dtype=dtype, device=device)
+            spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
+                                       device=device, spontaneous_only=True).numpy()
+            feats = np.concatenate([spont[:, _G_MASK], chi_block.double().cpu().numpy()], axis=1)
+            return feats, xs_d, xs_d
+
+        force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(m, -1), t_fine, rv,
+                                                       cfg.forcing_idx, cfg.rescale_idx)
+        if crn:
+            torch.manual_seed(SF)
+        xf = sim(force)
+        if crn:
+            torch.manual_seed(SS)
+        xs = sim(torch.zeros_like(force))
+        xf_d, xs_d = xsc * xf.double() + xof, xsc * xs.double() + xof   # float64 redim
+        feats = pipeline.gen_stats(xs_d, xf_d, cfg.dt_exp, amp_v.expand(m).double(),
+                                   freq_v.expand(m).double(), phase_v.expand(m).double(),
+                                   device=device).numpy()
+        return feats, xf_d, xs_d
 
 
 def _valid(xf_d, xs_d):
@@ -219,14 +266,33 @@ for i in range(len(ns)):
     for j in range(len(ns)):
         ax.text(j, i, f"{C[i, j]:.2f}", ha="center", va="center",
                 color="white" if C[i, j] < 0.6 else "black", fontsize=6)
-ax.set_title("|cos| between standardized feature-gradients (16-param)")
+ax.set_title(f"|cos| between standardized feature-gradients — {MODE_TAG.upper()} "
+             f"({len(FEAT_LABELS)} features)")
 fig.colorbar(im, ax=ax, fraction=0.046); fig.tight_layout()
-heat = str(PLOT_PATH / "degeneracy_cosine.png"); fig.savefig(heat, dpi=130)
+# Suffixed by MODE. Step 3 of the handoff is a forced-vs-chi COMPARISON, so unsuffixed names meant the
+# second run silently overwrote the first and you compared a figure with itself.
+heat = str(PLOT_PATH / f"degeneracy_cosine_{MODE_TAG}.png"); fig.savefig(heat, dpi=130)
 
 fig2, ax2 = plt.subplots(figsize=(7, 4))
 ax2.bar(range(len(Sn)), Sn, color="steelblue"); ax2.set_yscale("log")
 ax2.set_xlabel("singular index"); ax2.set_ylabel("sigma / sigma_max (log)")
-ax2.set_title("Jacobian singular spectrum over stiff cols (small = sloppy)"); fig2.tight_layout()
-spec = str(PLOT_PATH / "degeneracy_singular_spectrum.png"); fig2.savefig(spec, dpi=130)
+ax2.set_title(f"Jacobian singular spectrum over stiff cols — {MODE_TAG.upper()} (small = sloppy)")
+fig2.tight_layout()
+spec = str(PLOT_PATH / f"degeneracy_singular_spectrum_{MODE_TAG}.png"); fig2.savefig(spec, dpi=130)
 print("\nsaved:", heat); print("saved:", spec)
+
+# ---- which FEATURES carry each parameter -------------------------------------------------------
+# The actual scientific payload of the forced-vs-chi comparison: not merely whether an alias weakened,
+# but whether the CHI features are what broke it. Compare the two runs' tables side by side.
+print(f"\n=== top features per parameter ({MODE_TAG.upper()}) ===")
+for p in range(P):
+    col = J[:, p]
+    if not np.isfinite(col).all():
+        print(f"  {names[p]:11s} (unmeasurable)")
+        continue
+    top = np.argsort(-np.abs(col))[:5]
+    print(f"  {names[p]:11s} " + ", ".join(f"{FEAT_LABELS[i]}={col[i]:+.2f}" for i in top))
+
+print(f"\n[mode] this map describes the {MODE_TAG.upper()} information set. Re-run with the other "
+      f"mode and diff the tables above.", flush=True)
 print("DEGENERACY_MAP_DONE", flush=True)

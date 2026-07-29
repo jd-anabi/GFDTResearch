@@ -14,6 +14,9 @@ class NadrowskiSimulator(simulator.Simulator):
     def _set_up_model(self):
         try:
             self.sde = nadrowski_model.NadrowskiModel(*torch.unbind(self._params, dim=1), self._force, batch_size=self._batch_size, device=self._device, dtype=self._dtype)
-        except (Warning, Exception) as e:
-            print(f"{e}")
-            exit()
+        # NOT BaseException: a cooperative streams.WorkerCancelled must sail through (see
+        # simulator.SimulationError for why this is a raise and no longer a print + exit()).
+        except Exception as e:
+            raise simulator.SimulationError(
+                f"NadrowskiModel construction failed (batch={self._batch_size}, "
+                f"device={self._device}): {type(e).__name__}: {e}") from e

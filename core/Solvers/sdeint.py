@@ -45,7 +45,11 @@ class Solver:
 
             batch_size, d = x0.shape
 
-            xs = torch.zeros((n, batch_size, d), dtype=x0.dtype, device=x0.device)
+            # empty, not zeros: row 0 is assigned immediately below and _step_iter is range(n-1), so
+            # the loop writes every remaining row. The zero-fill was a full memset of a buffer that
+            # is overwritten in its entirety -- ~2.5 GB per segment, x segments x runs x 5000
+            # training batches.
+            xs = torch.empty((n, batch_size, d), dtype=x0.dtype, device=x0.device)
             xs[0, :, :] = x0
 
             # Pre-allocated dW buffer reused every step.
@@ -65,51 +69,6 @@ class Solver:
                     dW_buf.normal_()
                     eta = g * dW_buf * sqrt_dt
                     xs[i + 1, :, :] = x_curr + sde.f(x_curr, i) * dt + eta
-
-            return xs
-
-        def implicit_euler(sde: Any, x0: torch.Tensor, ts: tuple[float, float], n: int, max_iter: int = 10, tol: float = 1e-6) -> torch.Tensor:
-            """
-            Implicit Euler-Maruyama SDE solver
-            :param sde: SDE class containing drift and diffusion functions
-            :param x0: initial conditions; shape: (batch size, d)
-            :param ts: times span to solve SDEs for
-            :param n: number of time steps
-            :param max_iter: maximum number of iterations when performing the update step x_{n+1} = x_n + f(t_{n+1}, x_{n+1})dt + g(t_n, x_n)dW
-            :param tol: tolerance to check for convergence
-            :return: tensor of the solution; shape: (n, batch size, d)
-            """
-            x0 = x0.to(sde.device)
-
-            # time info
-            t = torch.linspace(*ts, n)
-            dt = t[1].item() - t[0].item() # fixed time step
-
-            # create tensor of the solution
-            batch_size, d = x0.shape
-            xs = torch.zeros((n, batch_size, d), dtype=x0.dtype, device=x0.device)
-            xs[0, :, :] = x0
-
-            # time and state independent drift
-            g = sde.g()
-
-            # pre-compute constants
-            sqrt_dt = math.sqrt(dt)
-
-            # Pre-allocated dW buffer reused every step.
-            dW_buf = torch.empty((batch_size, d), dtype=x0.dtype, device=x0.device)
-
-            for i in _step_iter(n, batch_size):
-                x_curr = xs[i, :, :]
-                dW_buf.normal_()
-                eta = g * dW_buf * sqrt_dt
-                x_next = x_curr.clone()
-                for _ in range(max_iter):
-                    x_temp = x_curr + sde.f(x_next, i) * dt + eta
-                    if torch.norm(x_temp - x_next) < tol:
-                        break
-                    x_next = x_temp
-                xs[i + 1, :, :] = x_next
 
             return xs
 
@@ -134,7 +93,8 @@ class Solver:
 
             batch_size, d = x0.shape
 
-            xs = torch.zeros((n, batch_size, d), dtype=x0.dtype, device=x0.device)
+            # empty, not zeros -- same reasoning as the eager euler above.
+            xs = torch.empty((n, batch_size, d), dtype=x0.dtype, device=x0.device)
             xs[0, :, :] = x0
 
             step = sde.compiled_step
@@ -151,5 +111,4 @@ class Solver:
             return xs
 
         self.euler = euler
-        self.implicit_euler = implicit_euler
         self.euler_compiled = euler_compiled

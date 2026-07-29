@@ -45,7 +45,7 @@ import csv
 import os
 import sys
 import time
-import warnings; warnings.filterwarnings("ignore")
+import _common; _common.enable_warnings()
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)

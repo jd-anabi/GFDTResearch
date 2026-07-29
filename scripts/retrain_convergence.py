@@ -1,5 +1,5 @@
 """
-Step 3 part B (sbi_calibration_handoff.txt): convergence retrain.
+Step 3 part B (PRISM_HANDOFF.md, Appendix A): convergence retrain.
 
 Trains a NEW posterior non-interactively and saves its per-epoch train/validation loss
 curve (via the part-A capture in train_nn -> build_posterior), so we can read whether the
@@ -35,7 +35,6 @@ Run (more patience + capacity):
 """
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -44,9 +43,9 @@ import torch
 import matplotlib; matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from core import cli, orchestrator
+import _common
+from core import orchestrator
 from core.config import (
-    SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device, NADROWSKI_LABELS,
     POSTERIOR_PATH, PLOT_PATH,
     DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS, NSF_NUM_BINS,
     TRAINING_NUM_ROUNDS, TRAINING_BATCH_SIZE, TRAINING_LEARNING_RATE,
@@ -58,7 +57,8 @@ from core.SBI.reparam import build_inferred_bijection
 from core.Helpers import visualizers
 
 # ---- knobs ----
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
+_common.enable_warnings()
+CELL = os.environ.get("CELL", _common.DEFAULT_CELL)   # resolved again by _common.script_cfg()
 BASE_POST = os.environ.get("BASE_POST", "posterior_3d.pt")
 NAME = os.environ.get("NAME", "posterior_convergence")
 HIDDEN = int(os.environ.get("HIDDEN", str(NSF_HIDDEN_FEATURES)))
@@ -73,12 +73,7 @@ print(f"[cfg] CELL={CELL} BASE_POST={BASE_POST} NAME={NAME} HIDDEN={HIDDEN} "
       flush=True)
 
 # ---- build cfg non-interactively; T_obs is irrelevant for training (T sampled per batch) ----
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c,
-                t_max_exp=T_MAX_EXP_S * s2c, T_obs=T_MIN_EXP_S * s2c, hw=detect_device())
+cfg = _common.script_cfg()
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 
@@ -108,7 +103,9 @@ force_prior = orchestrator._build_forcing_prior(cfg)
 sbi_prior = sbi_prior_wrapper.SBIPriorWrapper(latent_inferred_prior)
 
 # ---- embedding net (mirror orchestrator.build_posterior) ----
-forcing_dim = len(cfg.force_params_dict)
+# Via the SHARED width rule, so this cannot drift from what build_posterior/the sidecar use. The old
+# hard-coded len(cfg.force_params_dict) silently trained a FORCED-width network even with chi on.
+forcing_dim = orchestrator.expected_forcing_dim(cfg)
 input_dim = len(statistics.FEATURE_LABELS) + 1          # 41 summary stats + log(T)
 embedded_net = embedded_network.EmbeddedNet(
     input_dim, 3 * input_dim // 2,
@@ -124,11 +121,17 @@ training_params = {
     "steady_idx": cfg.steady_idx, "dt_nd_min": cfg.dt_nd_min,
     "dt_exp": cfg.dt_exp, "t_min_exp": cfg.t_min_exp, "t_max_exp": cfg.t_max_exp,
     "t_scale_bounds": cfg.t_scale_bounds, "state_dep_drift": cfg.state_dep_drift,
+    # Observation mode. train_nn reads these with .get(..., False/None), so omitting them (as this
+    # script used to) silently took the forced branch no matter what the config said.
+    "spontaneous_only": cfg.observation_mode == "spontaneous",
+    "chi_mode": cfg.chi_mode, "chi_n_freqs": cfg.chi_n_freqs, "chi_f0": cfg.chi_f0,
+    "chi_freq_bounds": cfg.chi_freq_bounds, "n_vars": cfg.inits_tensor.shape[-1],
     "dtype": cfg.hw.dtype, "device": cfg.hw.device,
 }
 
-print(f"[wiring] device={device} input_dim={input_dim} forcing_dim={forcing_dim} nd_dim={nd_dim} "
-      f"run_size={cfg.hw.batch_size} latent_prior_dim={_z.shape[-1]}", flush=True)
+print(f"[wiring] device={device} mode={cfg.observation_mode.upper()} input_dim={input_dim} "
+      f"forcing_dim={forcing_dim} nd_dim={nd_dim} run_size={cfg.hw.batch_size} "
+      f"latent_prior_dim={_z.shape[-1]}", flush=True)
 if DRY:
     print("[DRY] setup OK; skipping train_nn.", flush=True)
     sys.exit(0)
@@ -147,7 +150,13 @@ posterior_latent, diag = pipeline.train_nn(
 )
 
 # ---- persist posterior + loss curve ----
-torch.save(posterior_latent, str(POSTERIOR_PATH / (NAME + ".pt")))
+# Through save_posterior_artifacts, so the ".rot.pt" sidecar recording the OBSERVATION MODE is
+# written too. A bare torch.save (what this used to do) leaves an artifact that is
+# indistinguishable on disk from the legacy forced posteriors beside it -- and this script trains
+# with the plain, unrotated path, so V is None and the old "only save a sidecar if V or log params"
+# rule skipped it entirely. Loss artifacts below are kept as-is: this script writes its own
+# stop_after_epochs fallback and then reads the curve back for its convergence verdict.
+orchestrator.save_posterior_artifacts(NAME, posterior_latent, None, None, cfg)
 val = diag.get("validation_loss") or []
 train = diag.get("training_loss") or []
 np.savez(str(PLOT_PATH / (NAME + ".loss.npz")),

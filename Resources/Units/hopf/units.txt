@@ -1,2 +1,2 @@
 # Units
-nm ms pN Hz
+nm ms pN kHz

@@ -96,8 +96,11 @@ def sweep_f_max(
                 row["y_star"] = fp.y_star
                 row["c_star"] = fp.c_star
                 row["g"] = fp.g
-            except ValueError:
-                pass
+            except ValueError as e:
+                # RECORD it. A bare `pass` left the fixed-point columns simply absent from this row,
+                # so a sweep with every fixed-point solve failing looked identical to one that had
+                # not been asked for them.
+                row["fixed_point_error"] = f"{type(e).__name__}: {e}"
             prev_record = None
 
         rows.append(row)

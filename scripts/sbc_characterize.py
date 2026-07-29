@@ -1,5 +1,5 @@
 """
-Step 2 (sbi_calibration_handoff.txt): full characterization of the t_offset SBC anomaly.
+Step 2 (PRISM_HANDOFF.md, Appendix A): full characterization of the t_offset SBC anomaly.
 
 t_offset's SBC KS p-value swung 0.762 -> 0.001 between training runs, unlike the
 persistently-bad cluster (kappa/lambda/beta). This repeats SBC K times at a raised
@@ -34,7 +34,6 @@ import math
 import os
 import sys
 import time
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -44,28 +43,26 @@ import matplotlib; matplotlib.use("Agg")          # headless: savefig only, no d
 from matplotlib import pyplot as plt
 from sbi.diagnostics import run_sbc, check_sbc
 
-from core import cli, orchestrator
-from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
-                         NADROWSKI_LABELS, POSTERIOR_PATH, PLOT_PATH)
+import _common
+from core import orchestrator
+from core.config import POSTERIOR_PATH, PLOT_PATH
 from core.SBI import analysis
-from core.SBI.reparam import TransformedPosterior, load_eval_bijection, UnitToBoxTransform, OrthogonalTransform
+from core.SBI.reparam import UnitToBoxTransform, OrthogonalTransform
 
-# ---- knobs ----
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
+_common.enable_warnings()
+
+# ---- knobs ---- (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_cfg)
 POST = os.environ.get("POST", "posterior_3d.pt")
 K = int(os.environ.get("K", "10"))
 N_CAL = int(os.environ.get("N_CAL", "2000"))
 NPS = int(os.environ.get("NPS", "1000"))
 SEED = int(os.environ.get("SEED", "0"))
-print(f"[cfg] CELL={CELL}  POST={POST}  K={K}  N_CAL={N_CAL}  NPS={NPS}  SEED={SEED}", flush=True)
+print(f"[cfg] POST={POST}  K={K}  N_CAL={N_CAL}  NPS={NPS}  SEED={SEED}", flush=True)
 
-# ---- build cfg non-interactively (mirror diagnose_fmax.py); T_obs is irrelevant for SBC ----
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c,
-                t_max_exp=T_MAX_EXP_S * s2c, T_obs=T_MIN_EXP_S * s2c, hw=detect_device())
+# T_obs is irrelevant for SBC; the mode (spontaneous / forced / chi) is NOT -- it decides the width of
+# the conditioning vector gen_cal_data must produce, and a mismatch with POST used to surface only
+# after the whole calibration set had been simulated.
+cfg = _common.script_cfg()
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 labels = cfg.inferred_labels
@@ -79,17 +76,18 @@ else:
           f"(no t_offset in this cell; skipping t_offset-specific diagnostics)", flush=True)
 
 # ---- load posterior + extract its EXACT training (latent) prior ----
-post_latent = torch.load(str(POSTERIOR_PATH / POST), weights_only=False)
+# load_posterior verifies POST's observation mode against cfg FIRST and exits loudly on a mismatch.
+# Without that check the run generated K x N_CAL simulations and only then died on a raw matrix-shape
+# RuntimeError inside EmbeddedNet's first Linear.
+post_latent, T_eval, posterior, _sidecar = _common.load_posterior(POST, cfg)
 latent_inferred_prior = post_latent.prior.gen_dist          # latent prior; RotatedLatentPrior if trained rotated
-# Reconstruct the EXACT training bijection from POST's sidecar (log box + optional rotation),
-# self-describing so eval is correct regardless of the current config.
-T_eval = load_eval_bijection(cfg, POST, POSTERIOR_PATH)
 _rot = any(isinstance(p, OrthogonalTransform) for p in T_eval.parts)
 _box = next((p for p in T_eval.parts if isinstance(p, UnitToBoxTransform)), None)
 _nlog = int(_box.log_mask.sum()) if _box is not None else 0
 print(f"[reparam] POST={POST}: rotation={'on' if _rot else 'off'}, log-box dims={_nlog}/{len(labels)}",
       flush=True)
-posterior = TransformedPosterior(post_latent, T_eval)       # physical-space posterior
+# None for a SPONTANEOUS or CHI config -- neither samples a drive prior. gen_cal_data is told which
+# branch to take below, so it never dereferences this.
 force_prior = orchestrator._build_forcing_prior(cfg)
 
 _z = latent_inferred_prior.sample((2,))
@@ -114,7 +112,14 @@ for r in range(K):
         nd_dim=nd_dim, forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
         dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
         t_scale_bounds=cfg.t_scale_bounds, theta_transform=T_eval,
-        state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=device,
+        state_dep_drift=cfg.state_dep_drift,
+        # Thread the OBSERVATION MODE through. Omitting these let gen_cal_data default to the forced
+        # branch, so a spontaneous config hit `forcing_prior.sample` on a None and a chi config built
+        # a 46-wide conditioning vector for a network expecting 42+3K.
+        spontaneous_only=(cfg.observation_mode == "spontaneous"),
+        chi_mode=cfg.chi_mode, chi_n_freqs=cfg.chi_n_freqs, chi_f0=cfg.chi_f0,
+        chi_freq_bounds=cfg.chi_freq_bounds, n_vars=cfg.inits_tensor.shape[-1],
+        dtype=dtype, device=device,
     )
     n_valid = theta_star.shape[0]
     ranks, dap = run_sbc(

@@ -70,6 +70,37 @@ def _cossin(theta: torch.Tensor) -> torch.Tensor:
     return torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
 
 
+def _resolve_dt(dt) -> float:
+    """The scalar sampling interval, REJECTING a genuinely per-sample one instead of averaging it.
+
+    Every frequency axis, ACF decay time and Group-G lock-in phase in this class is built from ONE
+    shared grid, so a single scalar is structural, not incidental. This used to read
+    ``dt.float().mean()``, which silently answered a per-sample tensor with a number that was right
+    for no row in it -- and ``gen_stats`` genuinely does accept and sub-batch a ``(B,)`` dt, so the
+    feature looked supported.
+
+    Supporting it for real means per-sample frequency grids, which breaks the batched-FFT design in
+    ``_build_spectral`` and the shared ACF/lock-in axes -- a redesign for a caller that does not yet
+    exist. So: accept a UNIFORM tensor (the live callers all pass one value broadcast over the batch)
+    and refuse a non-uniform one loudly.
+    """
+    if not torch.is_tensor(dt):
+        return float(dt)
+    flat = dt.detach().reshape(-1).float()
+    if flat.numel() == 0:
+        raise ValueError("dt tensor is empty")
+    lo, hi = float(flat.min()), float(flat.max())
+    # rtol chosen to pass float32 round-trips of one value, not to tolerate a real spread.
+    if hi - lo > 1e-6 * max(abs(hi), 1e-30):
+        raise ValueError(
+            f"SummaryStatistics needs ONE sampling interval: got a non-uniform per-sample dt "
+            f"(min={lo:g}, max={hi:g}). Every feature here shares a single frequency grid, ACF axis "
+            f"and lock-in phase, so there is no correct scalar to use -- averaging it (which this "
+            f"used to do) produces features that are wrong for every row. Batch the rows by dt and "
+            f"call once per group.")
+    return float(flat[0])
+
+
 class SummaryStatistics:
     def __init__(self, x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.Tensor,
                  drive_amp, drive_freq, drive_phase,
@@ -78,8 +109,9 @@ class SummaryStatistics:
         """
         :param x_spont: unforced (spontaneous) trajectory for Groups A-F, shape (B, n).
         :param x_forced: forced (driven) trajectory for Group G, shape (B, n). Same shape as x_spont.
-        :param dt: sampling interval (scalar; a per-sample tensor is collapsed to its mean
-                   for the shared frequency grid).
+        :param dt: sampling interval. A scalar, or a per-sample tensor whose entries are all EQUAL
+                   (``gen_stats`` sub-batches a ``(B,)`` dt, so the tensor form is legitimate). A
+                   genuinely non-uniform dt is REJECTED -- see ``_resolve_dt``.
         :param drive_amp/drive_freq/drive_phase: dimensional drive params, scalar or (B,).
         :param band_halfwidth: spectral band half-width in FFT bins (B7 / E2 harmonic powers).
         :param bp_lo, bp_hi: envelope band-pass edges as fractions of the centre frequency.
@@ -91,7 +123,7 @@ class SummaryStatistics:
         self.B, self.n = x_spont.shape
         self.device = x_spont.device
         self.dtype = x_spont.dtype
-        self.dt = float(dt.float().mean().item()) if torch.is_tensor(dt) else float(dt)
+        self.dt = _resolve_dt(dt)
 
         self.amp = self._as_col(drive_amp)      # (B, 1)
         self.f = self._as_col(drive_freq)       # (B, 1)
@@ -182,6 +214,14 @@ class SummaryStatistics:
         """Cache PSD / peak frequency from the demeaned SPONTANEOUS trajectory (no notch)."""
         xf = torch.fft.rfft(self.x_spont, dim=-1)                    # (B, nfr)
         self.psd = (xf.abs().clamp(max=1e15) ** 2) * self.dt / self.n
+        # This clone (one (B, n/2+1) float, ~246 MB at batch 2048 x n=60k) was flagged as removable
+        # "since psd_nodc is read in only two places, both of which could mask the DC bin at use".
+        # DELIBERATELY KEPT. self.psd is read on its own at _band_power and _build_spectral, so the
+        # DC-zeroed variant genuinely has to be a separate tensor. And the two consumers are not
+        # equivalent to masking at use: the local-maxima scan below compares psd_nodc[1] against
+        # psd_nodc[0], so whether bin 1 counts as a maximum depends on the zeroing -- and the peak
+        # argmax differs on a degenerate all-zero spectrum. Both feed CONDITIONING features, and a
+        # 246 MB saving is not worth a silent drift in one.
         psd_nodc = self.psd.clone()
         psd_nodc[:, 0] = 0.0
         self.psd_nodc = psd_nodc
@@ -207,12 +247,29 @@ class SummaryStatistics:
         fpk = self.f_peak.unsqueeze(1)                               # (B, 1)
 
         # B1 quality factor from FWHM of the spontaneous peak
+        # FWHM of THE PEAK, found by walking outward from the argmax to the first bin that drops to
+        # half power on each side.
+        #
+        # This used to take the global min and max index over `psd > half` across the WHOLE spectrum,
+        # with no requirement that they connect to the peak. Any second lobe or harmonic above half
+        # the main peak's power stretched the "width" across both, so B1_log_Q read the separation
+        # between two lobes rather than the resonance width -- systematically under-estimating Q for
+        # exactly the bimodal / harmonic-rich bundles that are interesting. For a clean single peak
+        # the two agree bin-for-bin.
         half = (self.peak_pwr / 2).unsqueeze(1)
-        above = psd > half
+        below = psd <= half
         idxs = torch.arange(fr.numel(), device=self.device)
-        first = torch.where(above, idxs, torch.full_like(idxs, fr.numel())).min(dim=-1).values
-        last = torch.where(above, idxs, torch.full_like(idxs, -1)).max(dim=-1).values
-        fwhm = (last - first).clamp(min=0).to(self.dtype) * self.df
+        peak_idx = psd.argmax(dim=-1, keepdim=True)                      # (B, 1)
+        n_fr = fr.numel()
+        # First sub-half bin to the RIGHT of the peak (n_fr if the peak never drops below half).
+        right = torch.where(below & (idxs > peak_idx), idxs,
+                            torch.full_like(idxs, n_fr)).min(dim=-1).values
+        # Last sub-half bin to the LEFT of the peak (-1 if it never drops below half).
+        left = torch.where(below & (idxs < peak_idx), idxs,
+                           torch.full_like(idxs, -1)).max(dim=-1).values
+        # The contiguous above-half band is [left+1, right-1]; its span matches the old
+        # last_above - first_above convention so a single-peak spectrum is unchanged.
+        fwhm = (right - left - 2).clamp(min=0).to(self.dtype) * self.df
         q = torch.where(fwhm > 0, self.f_peak / fwhm, torch.zeros_like(self.f_peak))
 
         # B2 peak-to-floor ratio (median over positive frequencies as the floor)
@@ -358,10 +415,19 @@ class SummaryStatistics:
         t = t.unsqueeze(0)                                          # (1, n)
         two_pi_ft = 2 * math.pi * self.f * t                       # (B, n)
 
+        # Lock-in as two REAL reductions per harmonic, not a complex exponential.
+        #
+        # The old form built, per k: a (B,n) zeros, a (B,n) scaled angle, a (B,n) COMPLEX from
+        # torch.complex, the (B,n) complex exp of it, and the (B,n) complex product -- five
+        # allocations, three of them complex (8 bytes/element), to produce three scalars per row.
+        # exp(-i*k*theta) = cos(k*theta) - i*sin(k*theta), so summing x*cos and x*sin separately is
+        # the same arithmetic at a third of the bytes and no complex dtype at all.
         r = []
         for k in (1, 2, 3):
-            cexp = torch.exp(torch.complex(torch.zeros_like(two_pi_ft), -k * two_pi_ft))
-            r.append((2.0 / self.n) * (self.x0_forced * cexp).sum(dim=-1))   # (B,) complex
+            ang = k * two_pi_ft
+            re = (self.x0_forced * torch.cos(ang)).sum(dim=-1)
+            im = (self.x0_forced * torch.sin(ang)).sum(dim=-1)
+            r.append((2.0 / self.n) * torch.complex(re, -im))                # (B,) complex
         r1, r2, r3 = r
         mag1, mag2, mag3 = r1.abs(), r2.abs(), r3.abs()
         ang1, ang3 = torch.angle(r1), torch.angle(r3)

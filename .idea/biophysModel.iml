@@ -20,7 +20,7 @@
       <excludeFolder url="file://$MODULE_DIR$/sbi-logs" />
       <excludeFolder url="file://$MODULE_DIR$/.claude" />
     </content>
-    <orderEntry type="jdk" jdkName="/opt/homebrew/Caskroom/miniforge/base/envs/biophys-arm" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="biophys-env" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="PackageRequirementsSettings">

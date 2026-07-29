@@ -21,6 +21,20 @@ CTL_H = 32              # standard Fluent control height
 CTL_H_SM = 28
 SPACE = (4, 8, 12, 16, 20, 24)
 
+# ── Layout sizing ─────────────────────────────────────────────────────────────────────────────────
+# The controls column had a hard 460px MAXIMUM, which no amount of window-widening could escape, so
+# any form wider than that got a permanent horizontal scrollbar. The cap is gone; these set the floor
+# and the starting split instead, and the user's own drag is remembered from there.
+CONTROLS_MIN_W = 360      # narrower than this and the two-field composite rows stop being readable
+DEFAULT_SPLIT = (420, 880)  # initial (controls, results) split; overridden by the saved layout
+FIELD_MIN_W = 96          # a numeric field must show ~8 characters; "0.033333" used to scroll inside
+                          # a 3-6 character box and could not be read back without clicking into it
+PATH_FIELD_MIN_W = 220    # path fields hold absolute paths, so they need materially more
+DEFAULT_RESULTS_SPLIT = (520, 200)  # initial (figures, log) split in the results column
+HELP_VIEWER_MIN_H = 260   # Settings' help viewer: tall enough to be usable, it scrolls itself
+LABEL_MAX_W = 190         # ceiling on a form's label column: one long option name (e.g. "F0 (ND
+                          # forcing amplitude)") used to narrow every field in the same form
+
 # Type ramp: (pixel size, weight). Weight 600 = SemiBold (Fluent's "Strong"/heading weight).
 TYPE = {
     "caption":     (12, 400),
@@ -176,10 +190,10 @@ def build_palette(dark: bool, accent: "str | None" = None) -> QPalette:
 # $-substitution (string.Template) so CSS braces stay literal.
 _QSS = Template("""
 /* ---- type ramp (replaces the old inline font-size stylesheets) ---- */
-QLabel[type="title"]       { font-size: 28px; font-weight: 600; }
-QLabel[type="subtitle"]    { font-size: 20px; font-weight: 600; }
-QLabel[type="heading"]     { font-size: 16px; font-weight: 600; }
-QLabel[type="caption"]     { font-size: 12px; color: $text_2nd; }
+QLabel[type="title"]       { font-size: ${fs_title}px; font-weight: 600; }
+QLabel[type="subtitle"]    { font-size: ${fs_subtitle}px; font-weight: 600; }
+QLabel[type="heading"]     { font-size: ${fs_heading}px; font-weight: 600; }
+QLabel[type="caption"]     { font-size: ${fs_caption}px; color: $text_2nd; }
 
 /* ---- push buttons: neutral + accent variant ---- */
 QPushButton {
@@ -200,7 +214,7 @@ QPushButton[accent="true"]:focus   { border: 1px solid $text; }
 QPushButton[accent="true"]:disabled{ background: $mid; border-color: $mid; color: $text_disabled; }
 /* compact square icon buttons (e.g. the picker refresh) -- override the wide default padding so a
    fixed-width glyph button isn't squeezed to a sliver, and match the adjacent input height. */
-QPushButton#iconButton { padding: 0px; min-height: ${ctl_h_sm}px; font-size: 18px; }
+QPushButton#iconButton { padding: 0px; min-height: ${ctl_h_sm}px; font-size: ${fs_icon_btn}px; }
 
 /* ---- text inputs (covers FloatField/IntField/PathField.edit subclasses of QLineEdit) ---- */
 QLineEdit, QPlainTextEdit {
@@ -257,10 +271,10 @@ QProgressBar::chunk { border-radius: 3px; background: $accent; }
 QToolButton { border: none; background: transparent; border-radius: ${radius_sm}px; color: $text; }
 QToolButton:hover   { background: $button_hover; }
 QToolButton:pressed { background: $button_press; }
-QToolButton#navBack, QToolButton#navSettings { font-size: 20px; padding: 2px 6px; }
+QToolButton#navBack, QToolButton#navSettings { font-size: ${fs_nav_btn}px; padding: 2px 6px; }
 QToolButton#helpBadge {
     border: 1px solid $mid; border-radius: 8px; color: $text_2nd;
-    font-size: 13px; padding: 0px; background: transparent;
+    font-size: ${fs_badge}px; padding: 0px; background: transparent;
 }
 QToolButton#helpBadge:hover { border-color: $accent; color: $accent; }
 
@@ -287,14 +301,58 @@ QToolTip {
 """)
 
 
+def ui_scale() -> float:
+    """How much larger the ACTUAL application font is than this file's design baseline (BODY_PX).
+
+    Every control height and font size here is a literal pixel value tuned at a 14px body font. That
+    ignores the OS "Make text bigger" setting entirely: at a larger system font the text grows but the
+    32px control height does not, so labels clip, the 16px "?" badge crops its glyph, and forms
+    overflow the viewport. Scaling the tokens by the real font size keeps the proportions.
+
+    Clamped: below 1.0 there is nothing to gain and rounding starts to bite; above 2.0 the layout
+    stops being a layout. Returns 1.0 with no QApplication (import-time use, headless tests), so this
+    module stays pure and testable without a display.
+    """
+    try:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return 1.0
+        font = app.font()
+        px = font.pixelSize()
+        if px <= 0:                                   # point-sized font: convert via logical DPI
+            from PySide6.QtGui import QGuiApplication
+            screen = QGuiApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInch() if screen is not None else 96.0
+            px = font.pointSizeF() * dpi / 72.0
+        if px <= 0:
+            return 1.0
+        return min(2.0, max(1.0, px / BODY_PX))
+    except Exception:                                 # noqa: BLE001 -- styling must never break startup
+        return 1.0
+
+
+def scaled(px: int) -> int:
+    """A design pixel value in the user's actual text scale."""
+    return int(round(px * ui_scale()))
+
+
 def _qss_vars(dark: bool, accent: "str | None" = None) -> dict:
     t = tokens(dark, accent)
     return {
         **t,
         "radius_sm": RADIUS_SM,
         "radius_md": RADIUS_MD,
-        "ctl_h": CTL_H,
-        "ctl_h_sm": CTL_H_SM,
+        "ctl_h": scaled(CTL_H),
+        "ctl_h_sm": scaled(CTL_H_SM),
+        # Type ramp, so the QSS sizes track the OS text setting instead of being frozen literals.
+        "fs_title": scaled(TYPE["title"][0]),
+        "fs_subtitle": scaled(TYPE["subtitle"][0]),
+        "fs_heading": scaled(TYPE["heading"][0]),
+        "fs_caption": scaled(TYPE["caption"][0]),
+        "fs_icon_btn": scaled(18),
+        "fs_nav_btn": scaled(20),
+        "fs_badge": scaled(13),
     }
 
 

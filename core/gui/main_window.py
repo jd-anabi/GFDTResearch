@@ -24,12 +24,66 @@ from .screens.section_screen import SectionScreen
 from .screens.settings_screen import SettingsScreen
 
 
+# ── screen-geometry guards ────────────────────────────────────────────────────
+# All three degrade to the requested value if Qt cannot tell us about the screen (offscreen tests),
+# so they are safe to call unconditionally.
+def _available(widget=None):
+    """The usable desktop rect (excludes the taskbar), or None when there is no screen."""
+    from PySide6.QtGui import QGuiApplication
+    screen = (widget.screen() if widget is not None and widget.screen() else
+              QGuiApplication.primaryScreen())
+    return screen.availableGeometry() if screen is not None else None
+
+
+def _fits_on_screen(w: int, h: int) -> tuple:
+    """Shrink a preferred size to what the screen can actually show, leaving a small margin."""
+    rect = _available()
+    if rect is None:
+        return w, h
+    return min(w, rect.width() - 40), min(h, rect.height() - 60)
+
+
+def _on_a_visible_screen(widget) -> bool:
+    """True when the window's frame actually intersects some attached screen.
+
+    Geometry saved on an external monitor restores off-screen once that monitor is gone -- the window
+    exists, is 'open', and cannot be reached.
+    """
+    from PySide6.QtGui import QGuiApplication
+    frame = widget.frameGeometry()
+    screens = QGuiApplication.screens()
+    if not screens:
+        return True                      # headless: nothing to validate against
+    return any(s.availableGeometry().intersects(frame) for s in screens)
+
+
+def _centre_on_primary(widget) -> None:
+    rect = _available(widget)
+    if rect is None:
+        return
+    frame = widget.frameGeometry()
+    frame.moveCenter(rect.center())
+    widget.move(frame.topLeft())
+
+
 class MainWindow(QMainWindow):
+    """The application shell: a NavShell over Home plus the five section screens.
+
+    Always opens on Home -- the last screen is deliberately not restored. Owns the only QSettings
+    WRITE site (``_save_state``, reached from closeEvent), so panel selections and layouts persist
+    from here; appearance settings are written eagerly instead, as they are applied immediately.
+    """
     def __init__(self, appearance=None):
         super().__init__()
         self.appearance = appearance         # theming.Appearance or None (tests build without one)
         self.setWindowTitle("PRISM")
-        self.resize(1300, 820)
+        # 820px exceeded the usable height of a 1366x768 laptop and of 1920x1080 at 150% scaling, so
+        # the action buttons started below the fold. Open at the smaller of the preference and what
+        # the screen can actually show.
+        self.resize(*_fits_on_screen(1300, 820))
+        # A window can always be made this small; without it Qt lets the user (or a restored
+        # geometry) shrink the shell until the controls column is unusable.
+        self.setMinimumSize(900, 600)
 
         self.nav = NavShell()
         self.setCentralWidget(self.nav)
@@ -86,7 +140,13 @@ class MainWindow(QMainWindow):
         qs = settings.settings()
         geom = qs.value("window/geometry")
         if geom is not None:
-            self.restoreGeometry(geom)
+            # CHECK the return value, and then check the RESULT. restoreGeometry returns False for an
+            # unusable blob, and even on success it will happily restore a window onto a monitor that
+            # is no longer attached -- geometry saved on an external display came back off-screen with
+            # no way to reach it.
+            if not self.restoreGeometry(geom) or not _on_a_visible_screen(self):
+                self.resize(*_fits_on_screen(1300, 820))
+                _centre_on_primary(self)
 
     def _build_settings_menu(self, current_mode):
         """Attach the gear's appearance popover: exclusive Light/Dark/Auto/System + 'Full settings…'."""

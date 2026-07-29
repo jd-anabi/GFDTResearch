@@ -11,6 +11,6 @@ t_scale in (1, 40)
 # Forcing Parameters
 amp in (0, 500)
 amp_y in (0, 500)
-freq in (1, 100)
+freq in (0.0011, 0.11)
 phase in (0, 6.283185307)
 offset in (-50, 50)

@@ -24,7 +24,11 @@ def psd_welch(x: torch.Tensor, dt: float, nperseg: int, overlap: float = 0.5) ->
     :param overlap: fractional segment overlap. SciPy default is 0.5.
     :return: (omegas, G) -- omegas shape (nperseg//2 + 1,), G one-sided PSD shape (nperseg//2 + 1,).
     """
-    x = x.to(torch.float64)
+    # NOT `x = x.to(torch.float64)`. Promoting the WHOLE ensemble up front doubles a tensor that is
+    # ~1.6 GB at Campaign-1 defaults, when only the (M, nperseg) slice inside the loop is ever
+    # arithmetic -- ~33 MB. FDT runs on host RAM (cpu_device()), so that was 1.6 GB of resident
+    # working set for a diagnostic. The promotion moves onto `seg` below; every accumulation,
+    # the window and the output stay float64, so the result is unchanged.
     M, T_total = x.shape
     step = max(1, int(nperseg * (1 - overlap)))
     n_segs = 1 + (T_total - nperseg) // step
@@ -36,7 +40,7 @@ def psd_welch(x: torch.Tensor, dt: float, nperseg: int, overlap: float = 0.5) ->
 
     psd_accum = torch.zeros(nperseg // 2 + 1, dtype=torch.float64, device=x.device)
     for i in range(n_segs):
-        seg = x[:, i * step : i * step + nperseg]
+        seg = x[:, i * step : i * step + nperseg].to(torch.float64)   # promote the SLICE, not x
         seg = seg - seg.mean(dim=-1, keepdim=True)   # detrend each segment
         seg = seg * window
         X = torch.fft.rfft(seg, dim=-1)              # (M, nperseg//2 + 1)

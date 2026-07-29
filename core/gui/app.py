@@ -64,7 +64,7 @@ def build_app(argv=None):
     except Exception as e:                   # noqa: BLE001 -- a construction failure must still show
         box = QMessageBox(None)
         box.setIcon(QMessageBox.Critical)
-        box.setWindowTitle("GFDT could not start")
+        box.setWindowTitle("PRISM could not start")
         box.setText(f"The application failed to start:\n{e}")
         box.setDetailedText(traceback.format_exc())
         box.exec()

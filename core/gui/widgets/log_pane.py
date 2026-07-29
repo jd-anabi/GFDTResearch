@@ -13,7 +13,10 @@ class LogPane(QPlainTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setMaximumBlockCount(5000)          # cap memory on very long runs
-        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        # WRAP. Panels write long single-line diagnostics (the f_scale warning is ~230 chars), and
+        # with NoWrap the user saw the first ~60 characters and had to scroll horizontally to reach
+        # the part that says what to do about it.
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
 
     def append_line(self, text: str, level: str = "info"):
         self.appendPlainText(_PREFIX.get(level, "") + text)

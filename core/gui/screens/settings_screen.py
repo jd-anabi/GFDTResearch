@@ -11,10 +11,11 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-                               QRadioButton, QScrollArea, QVBoxLayout, QWidget)
+                               QRadioButton, QScrollArea, QTextBrowser, QVBoxLayout, QWidget)
 
 from core import registry
 
+from ..design import HELP_VIEWER_MIN_H
 from ..theming import MODE_LABELS
 
 # (module path, human title) for the five user-facing sections, in display order. Each module opens with
@@ -105,7 +106,17 @@ class SettingsScreen(QWidget):
 
         help_box = QGroupBox("Help — what each section does")
         hv = QVBoxLayout(help_box)
-        hv.addWidget(self._build_help())
+        help_label = self._build_help()
+        # A word-wrapped QLabel does not propagate heightForWidth through the intervening layouts of a
+        # setWidgetResizable QScrollArea, so this blob (five module docstrings plus every HELP dict,
+        # several thousand characters) got a height computed for the wrong width and the BOTTOM WAS
+        # UNREACHABLE. A QTextBrowser lays out its own rich text and scrolls itself, which sidesteps
+        # the propagation problem entirely -- and it makes the help selectable, which a QLabel is not.
+        viewer = QTextBrowser()
+        viewer.setHtml(help_label.text())
+        viewer.setOpenExternalLinks(True)
+        viewer.setMinimumHeight(HELP_VIEWER_MIN_H)
+        hv.addWidget(viewer)
 
         inner = QWidget()
         iv = QVBoxLayout(inner)

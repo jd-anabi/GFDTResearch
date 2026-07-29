@@ -5,6 +5,8 @@ Each check runs a mini measurement and asserts a numerical property that would
 catch a common bug class. Run them BEFORE the production sweep.
 """
 import math
+import warnings
+
 import numpy as np
 import torch
 
@@ -20,7 +22,14 @@ from core.FDT.plots import plot_eff_temp_ratio
 
 
 def _interp_log(x_new: torch.Tensor, x_old: torch.Tensor, y_old: torch.Tensor) -> torch.Tensor:
-    """1-D linear interpolation in log-x. Aligns PSD onto the chi frequency grid."""
+    """1-D linear INTERPOLATION in log-x, NaN outside the grid. Aligns PSD onto the chi grid.
+
+    The clamp below bounds the INDEX, not the VALUE. Left as it was, a frequency outside the Welch
+    grid's span got ``frac < 0`` or ``frac > 1`` -- a linear EXTRAPOLATION off the two edge bins,
+    returned silently as if it were data. ``eff_temp_ratio`` then divides by it, so widening
+    ``freq_bounds`` past the PSD resolution grew a smooth, plausible-looking, entirely fabricated
+    T_eff/T tail. Out-of-range now yields NaN and the callers report how many points that cost.
+    """
     x_new = x_new.to(torch.float64)
     x_old = x_old.to(torch.float64).clamp(min=1e-30)
     y_old = y_old.to(torch.float64)
@@ -30,7 +39,9 @@ def _interp_log(x_new: torch.Tensor, x_old: torch.Tensor, y_old: torch.Tensor) -
     x0, x1 = log_x_old[idx - 1], log_x_old[idx]
     y0, y1 = y_old[idx - 1], y_old[idx]
     frac = (log_x_new - x0) / (x1 - x0)
-    return y0 + frac * (y1 - y0)
+    out = y0 + frac * (y1 - y0)
+    in_range = (log_x_new >= log_x_old[0]) & (log_x_new <= log_x_old[-1])
+    return torch.where(in_range, out, torch.full_like(out, float("nan")))
 
 
 def check_passive_baseline(cfg: FDTConfig, save_plot_path=None) -> tuple[bool, dict]:
@@ -73,8 +84,24 @@ def check_passive_baseline(cfg: FDTConfig, save_plot_path=None) -> tuple[bool, d
     prefactor = observable_noise_prefactor(passive)
     ratio = eff_temp_ratio(G_at_om, chis.imag, omegas.to(torch.float64), prefactor).cpu().numpy()
 
+    # _interp_log returns NaN off the PSD grid rather than extrapolating (it used to fabricate a
+    # plausible tail). Judge on the frequencies that are actually covered, and SAY how many were not
+    # -- a check that quietly evaluated fewer points than it printed would be its own version of the
+    # bug this replaces.
     devs = np.abs(ratio - 1.0)
-    med_dev, max_dev = float(np.median(devs)), float(np.max(devs))
+    n_off = int(np.isnan(devs).sum())
+    if n_off:
+        warnings.warn(
+            f"check_passive_baseline: {n_off}/{devs.size} probe frequencies fall outside the Welch "
+            f"PSD grid ({float(freqs_psd.min()):g}..{float(freqs_psd.max()):g}) and were EXCLUDED. "
+            f"Narrow cfg.freq_bounds, or lengthen the passive run so the PSD resolves them.",
+            stacklevel=2)
+    covered = devs[~np.isnan(devs)]
+    if covered.size == 0:
+        raise ValueError(
+            "check_passive_baseline: every probe frequency lies outside the PSD grid, so the FDT "
+            "ratio is unmeasurable here. Narrow cfg.freq_bounds or lengthen the passive run.")
+    med_dev, max_dev = float(np.median(covered)), float(np.max(covered))
     passed = (med_dev < 0.2) and (max_dev < 0.4)
 
     if save_plot_path is not None:
@@ -126,10 +153,25 @@ def check_high_freq_fdt(cfg: FDTConfig) -> tuple[bool, dict]:
     prefactor = observable_noise_prefactor(high_freq_cfg)
     ratio = eff_temp_ratio(G_at_om, chis.imag, omegas.to(torch.float64), prefactor).cpu().numpy()
 
+    # This check reads all_omegas[-3:] -- the TOP of the probe grid, i.e. precisely where the PSD is
+    # most likely to run out. It was therefore the most exposed to _interp_log's old silent
+    # extrapolation: it could pass or fail on fabricated numbers. Excluded points are now reported.
     devs = np.abs(ratio - 1.0)
-    med_dev, max_dev = float(np.median(devs)), float(np.max(devs))
+    n_off = int(np.isnan(devs).sum())
+    if n_off:
+        warnings.warn(
+            f"check_high_freq_fdt: {n_off}/{devs.size} of the top probe frequencies fall outside the "
+            f"Welch PSD grid ({float(freqs_psd.min()):g}..{float(freqs_psd.max()):g}) and were "
+            f"EXCLUDED. This check previously extrapolated there, so a past pass at these "
+            f"frequencies was not evidence. Lower cfg.freq_bounds' upper edge or raise psd_T_obs_nd.",
+            stacklevel=2)
+    covered = devs[~np.isnan(devs)]
+    if covered.size == 0:
+        return False, {"median_dev": float("nan"), "max_dev": float("nan"), "n_off_grid": n_off,
+                       "error": "all high-frequency probes lie outside the PSD grid"}
+    med_dev, max_dev = float(np.median(covered)), float(np.max(covered))
     passed = (med_dev < 0.15) and (max_dev < 0.3)
-    return passed, {"median_dev": med_dev, "max_dev": max_dev,
+    return passed, {"median_dev": med_dev, "max_dev": max_dev, "n_off_grid": n_off,
                     "ratios": ratio.tolist(), "omegas": omegas.cpu().tolist()}
 
 

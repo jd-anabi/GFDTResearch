@@ -16,6 +16,36 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QScrollArea, QT
                                QWidget)
 
 
+class _FitLabel(QLabel):
+    """A QLabel that scales its pixmap DOWN to the available width, keeping aspect ratio.
+
+    Never scales UP past 1:1 -- enlarging a raster figure only blurs it. The full-resolution pixmap
+    is retained, so the "Pop out" window still gets the original.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._source = None
+        self.setMinimumSize(1, 1)
+
+    def set_source(self, pix: QPixmap) -> None:
+        self._source = pix
+        self._rescale()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._source is None or self._source.isNull():
+            return
+        avail = max(1, self.width())
+        if self._source.width() <= avail:
+            super().setPixmap(self._source)          # already fits: show it 1:1
+            return
+        super().setPixmap(self._source.scaledToWidth(avail, Qt.SmoothTransformation))
+
+
 class FigureStack(QTabWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -40,12 +70,16 @@ class FigureStack(QTabWidget):
         self._add_tab(title, QPixmap(str(path)), fig_pickle=None, png_path=str(path))
 
     def _add_tab(self, title: str, pix: QPixmap, *, fig_pickle, png_path):
-        label = QLabel()
+        # FIT TO WIDTH. Stage figures are rendered at dpi=110 with bbox_inches="tight", routinely
+        # 1200-1800px wide, and were shown at full resolution in a scroll area with no scaling -- so
+        # an embedded figure was ALWAYS scrolled in both axes, while only the pop-out window had
+        # Fit/100% controls. Downscale-only (never enlarge past 1:1, which would just blur it).
+        label = _FitLabel()
         label.setAlignment(Qt.AlignCenter)
         if pix.isNull():
             label.setText(f"(could not render figure: {title})")
         else:
-            label.setPixmap(pix)
+            label.set_source(pix)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(label)

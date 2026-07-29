@@ -5,8 +5,39 @@ from typing import Any
 
 
 @dataclass
+class ConfigDraft:
+    """The MODEL-level choices made in the Config tab, before a bounds file exists.
+
+    A SimConfig cannot be built without bounds -- the bounds file is what declares which parameters are
+    inferred, in what order, and over what range (and hence the observation mode). So Config records
+    intent here, and the Prior tab turns it into a SimConfig once a bounds file is chosen.
+    """
+    model: str
+    labels: Any
+    state_dep_drift: bool
+    units_override: Any = None          # units file path / token tuple; None => the per-model default
+    chi_mode: bool = False
+    chi_n_freqs: Any = None
+    chi_f0: Any = None
+    chi_freq_bounds: Any = None
+    reparam_rotate: Any = None
+
+    def make_config(self, bounds_path: str = None, *, bounds_dicts=None):
+        """Turn this draft + a bounds source into a SimConfig (the Prior tab's first act).
+
+        Pass either a bounds FILE path or hand-entered ``bounds_dicts`` -- exactly one."""
+        from core import cli
+        return cli.make_sim_config(
+            self.model, self.labels, self.state_dep_drift, bounds_path, bounds_dicts=bounds_dicts,
+            units_override=self.units_override, chi_mode=self.chi_mode,
+            chi_n_freqs=self.chi_n_freqs, chi_f0=self.chi_f0,
+            chi_freq_bounds=self.chi_freq_bounds, reparam_rotate=self.reparam_rotate)
+
+
+@dataclass
 class SbiSession:
-    cfg: Any = None                 # SimConfig (bounds-only until a cell injects ground truth)
+    draft: Any = None               # ConfigDraft from the Config tab (model + units + knobs)
+    cfg: Any = None                 # SimConfig (built at the Prior stage, once bounds are chosen)
     inf_prior: Any = None           # physical inferred product prior (from build_prior)
     force_prior: Any = None         # forcing prior (from build_prior)
     posterior: Any = None           # TransformedPosterior (from build_posterior)

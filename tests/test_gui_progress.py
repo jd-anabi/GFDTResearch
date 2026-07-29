@@ -758,8 +758,9 @@ def test_cancel_is_not_consumed_by_a_non_worker_thread():
 
 
 def test_inference_config_restore_with_a_stale_model_does_not_desync_the_bounds_picker():
-    """A corrupt/version-skewed .ini with an unknown model must not point the Config bounds picker at a
-    nonexistent folder while the combo shows a real default."""
+    """A corrupt/version-skewed .ini with an unknown model must not leave the (Prior-tab) bounds picker
+    pointing at a nonexistent folder while the Config combo shows a real default. The picker is repointed
+    when the model is APPLIED, so drive that path."""
     from core.gui import settings as st
     from core.gui.screens.inference_screen import InferenceScreen
 
@@ -772,11 +773,13 @@ def test_inference_config_restore_with_a_stale_model_does_not_desync_the_bounds_
         qs.endGroup()
         qs.sync()
 
-        cfg_panel = InferenceScreen().config_panel
-        model = cfg_panel.model_combo.currentText()
+        screen = InferenceScreen()
+        model = screen.config_panel.model_combo.currentText()
         assert model in ("BP", "NADROWSKI", "HOPF"), model
-        assert cfg_panel.bounds_picker.base_path.name == model.lower()
-        assert cfg_panel.bounds_picker.combo.count() > 0, "the bounds picker was left empty by a stale model"
+        screen.config_panel._build_config()                 # apply -> new_draft -> repoint the picker
+        picker = screen.prior_panel.bounds_picker
+        assert picker.base_path.name == model.lower()
+        assert picker.combo.count() > 0, "the bounds picker was left empty by a stale model"
     finally:
         st.use_ini_file(None)
 
@@ -1137,16 +1140,21 @@ def test_inference_tab_gates_follow_the_session():
     inf = InferenceScreen()
 
     def enabled():
-        return [inf.tabs.isTabEnabled(i) for i in range(6)]   # Config Simulate Prior Posterior Validate Infer
+        return [inf.tabs.isTabEnabled(i) for i in range(5)]   # Config Prior Posterior Validate Infer
 
     inf.session = SbiSession(); inf.refresh_gates()
-    assert enabled() == [True, False, False, False, False, False]
+    assert enabled() == [True, False, False, False, False]
+    # A DRAFT (model applied) unlocks Prior -- which is where the bounds file builds the config.
+    inf.session.draft = object(); inf.refresh_gates()
+    assert enabled() == [True, True, False, False, False]
     inf.session.cfg = object(); inf.refresh_gates()
-    assert enabled() == [True, True, True, True, False, False]
+    assert enabled() == [True, True, True, False, False]
     inf.session.posterior = object(); inf.refresh_gates()
-    assert enabled() == [True, True, True, True, False, True], "Infer needs only a posterior; Validate needs priors"
-    inf.session.inf_prior = object(); inf.session.force_prior = object(); inf.refresh_gates()
-    assert enabled() == [True, True, True, True, True, True]
+    assert enabled() == [True, True, True, False, True], "Infer needs only a posterior; Validate needs a prior"
+    # force_prior stays None on purpose: it is None for every no-forcing model, and requiring it used to
+    # make Validate permanently unreachable for them.
+    inf.session.inf_prior = object(); inf.refresh_gates()
+    assert enabled() == [True, True, True, True, True]
 
 
 def test_posterior_from_scratch_is_gated_on_a_prior():
@@ -1166,22 +1174,181 @@ def test_posterior_from_scratch_is_gated_on_a_prior():
     assert pp.btn_post.isEnabled(), "with a prior, training from scratch is allowed"
 
 
-def test_inference_cell_pickers_repoint_after_config_is_built():
-    """The Simulate/Infer cell pickers follow the BUILT config's model (there is no model combo in those
-    tabs), so new_session must repoint them."""
+def test_inference_pickers_repoint_from_draft_and_config():
+    """The Prior tab's BOUNDS picker follows the applied model (new_draft), and the Infer tab's CELL
+    picker follows the BUILT config's model (install_config) -- neither tab has its own model combo."""
     from core.gui.screens.inference_screen import InferenceScreen
+    from core.gui.session import ConfigDraft
 
     _app()
     inf = InferenceScreen()
 
+    inf.new_draft(ConfigDraft(model="HOPF", labels=[], state_dep_drift=False))
+    assert inf.prior_panel.bounds_picker.base_path.name == "hopf"
+    assert inf.session.cfg is None, "a draft alone must not produce a config"
+
     class Cfg:
         model = "HOPF"
+        params_dict = {}      # the Infer tab validates a picked cell against these
+        rescale_params = {}
         force_params_dict = {}
         has_forcing = False   # mirrors SimConfig.has_forcing (empty force_params_dict)
+        chi_mode = False      # mirrors SimConfig.chi_mode
+        observation_mode = "spontaneous"
 
-    inf.new_session(Cfg())
-    assert inf.simulate_panel.cell_picker.base_path.name == "hopf"
+    inf.install_config(Cfg())
     assert inf.infer_panel.cell_picker.base_path.name == "hopf"
+    assert inf.session.draft is not None, "install_config must not wipe the draft/session"
+
+
+def test_config_units_control_declares_units_and_validates_them():
+    """Units DECLARE what the numbers in the files mean (never converting them). Typed units must reach
+    the built config, and unusable tokens must be rejected when the model is applied -- not mid-run."""
+    from core.config import BOUNDS_PATH
+    from core.gui.screens.inference_screen import InferenceScreen
+
+    _app()
+    screen = InferenceScreen()
+    cfgp = screen.config_panel
+    cfgp.model_combo.setCurrentText("NADROWSKI")
+    cfgp._on_model_changed("NADROWSKI")
+
+    cfgp.units_toggle.set_direct(False)                       # model's units file
+    assert cfgp._units_override() is None
+
+    cfgp.units_toggle.set_direct(True)                        # typed
+    cfgp.units_text.setText("nm s pN Hz")
+    assert cfgp._units_override() == ("nm", "s", "pN", "Hz")
+    cfgp._build_config()
+    draft = screen.session.draft
+    assert draft is not None and draft.units_override == ("nm", "s", "pN", "Hz")
+
+    bounds = BOUNDS_PATH / "nadrowski" / "cell_2.txt"
+    if bounds.exists():
+        cfg = draft.make_config(str(bounds))
+        assert (cfg.time_unit, cfg.freq_unit) == ("s", "Hz")
+        # Hz alongside s IS self-consistent (unlike Hz alongside ms), so no warning
+        assert cfg.check_unit_consistency() == []
+        assert abs(30.0 * cfg.freq_si_to_cell - 30.0) < 1e-12, "in an `s` cell, 30 Hz stays 30"
+
+    before = screen.session.draft
+    cfgp.units_text.setText("notaunit")                       # must be refused, draft left alone
+    cfgp._build_config()
+    assert screen.session.draft is before
+
+
+def test_direct_entry_grids_round_trip_their_files():
+    """Hand-entered bounds/values must reproduce the parsed file exactly (same names, same ORDER --
+    simulators bind parameter columns positionally), and must refuse unparseable or inverted input."""
+    from collections import OrderedDict
+    from core.config import BOUNDS_PATH, CELL_PATH
+    from core.Helpers import file_manager
+    from core.gui.widgets.param_grid import BoundsGrid, ValuesGrid
+
+    _app()
+    bounds = BOUNDS_PATH / "nadrowski" / "cell_2.txt"
+    cell = CELL_PATH / "nadrowski" / "cell_2.txt"
+    if not (bounds.exists() and cell.exists()):
+        return                                                   # environment without Resources: skip
+
+    p, r, f, _ = file_manager.parse_bounds_file(str(bounds))
+    grid = BoundsGrid()
+    assert grid.problems(), "an unloaded grid must report a problem rather than build nothing"
+    grid.load(p, r, f)
+    assert grid.problems() == []
+    gp, gr, gf = grid.to_dicts()
+    for got, want in ((gp, p), (gr, r), (gf, f)):
+        assert list(got) == list(want), "parameter ORDER must survive the round trip"
+        for name in want:
+            assert got[name][1] == want[name][1], name
+
+    grid._rows[("PARAM", "k")].lo.setText("")                    # unparseable -> refused, not 0.0
+    assert any("k" in m for m in grid.problems())
+    grid._rows[("PARAM", "k")].lo.setText("9")                   # min > max -> refused
+    grid._rows[("PARAM", "k")].hi.setText("1")
+    assert any("less than" in m for m in grid.problems())
+
+    inits, vp, vr, vf = file_manager.parse_values_file(str(cell))
+    vgrid = ValuesGrid()
+    vgrid.load(inits, vp, vr, vf)
+    assert vgrid.problems() == []
+    gi, gvp, gvr, gvf = vgrid.to_dicts()
+    assert list(gvp) == list(vp) and list(gi) == list(inits)
+    assert all(abs(gvp[n] - vp[n]) < 1e-12 for n in vp)
+    assert isinstance(gvp, OrderedDict)
+
+
+def test_overlay_alignment_and_best_fit_rankings():
+    """Phase alignment must recover a known lag; both best-fit rankings must find a planted match; and
+    the trace ranking must be invariant to rolling the reference (absolute phase carries no info)."""
+    import math
+    import numpy as np
+    import torch
+    from core.SBI import overlay
+
+    torch.manual_seed(0)
+    n, dt, f = 2048, 1e-3, 7.5
+    t = torch.arange(n, dtype=torch.float32) * dt
+
+    # unambiguous (non-periodic) reference -> the lag is exact
+    chirp = torch.sin(2 * math.pi * (2.0 + 6.0 * t) * t) * torch.hann_window(n)
+    shifts = torch.tensor([0, 37, -91])
+    rolled = torch.stack([torch.roll(chirp, int(s)) for s in shifts])
+    aligned, lags = overlay.align_to(chirp, rolled)
+    assert torch.equal(lags, shifts), (lags, shifts)
+    assert float((aligned - chirp.unsqueeze(0)).abs().max()) < 1e-5
+
+    gt = torch.sin(2 * math.pi * f * t) + 0.05 * torch.randn(n)
+    cand = torch.stack([torch.sin(2 * math.pi * (f * 1.3) * t),      # wrong frequency
+                        0.4 * torch.sin(2 * math.pi * f * t),        # wrong amplitude
+                        torch.roll(gt, 123)])                        # the planted match, phase-shifted
+    order, _rmse, _al = overlay.rank_by_trace(gt, cand)
+    assert int(order[0]) == 2, "the planted draw must win on waveform"
+    order2, _, _ = overlay.rank_by_trace(torch.roll(gt, -500), cand)
+    assert int(order2[0]) == 2, "ranking must not depend on the reference's absolute phase"
+
+    # summary-stat ranking: exact match wins, and the CONSTANT conditioning column is ignored
+    obs = torch.tensor([[1.0, 2.0, 3.0, 42.0]])
+    sim = torch.tensor([[9.0, 9.0, 9.0, 42.0], [1.0, 2.0, 3.0, 42.0], [1.5, 2.5, 2.0, 42.0]])
+    o, d = overlay.rank_by_stats(sim, obs)
+    assert int(o[0]) == 1 and float(d[1]) < 1e-9
+
+    # phase-invariant summaries are well-formed
+    freqs, lo, med, hi = overlay.psd_band(cand, dt)
+    assert bool((lo <= hi).all()) and abs(float(freqs[med.argmax()]) - f) < 2.0
+    centres, mean, clo, chi_ = overlay.cycle_average(gt.unsqueeze(0), dt, f)
+    good = torch.isfinite(mean)
+    assert int(good.sum()) > 0.8 * len(mean)
+    assert 1.5 < float(mean[good].max() - mean[good].min()) < 2.5, "should recover the unit amplitude"
+    assert overlay.cycle_window(n, dt, f, 15) == 2000
+
+
+def test_overlay_figures_render_and_are_picklable():
+    """Each new Infer-tab figure must build and survive pickling (the 'Pop out' path unpickles it)."""
+    import pickle
+    import numpy as np
+    from core.Helpers import visualizers
+
+    _app()
+    t = np.linspace(0, 2, 400)
+    y = np.sin(2 * np.pi * 7.5 * t)
+    labels_ = [f"$p_{{{i}}}$" for i in range(13)]
+    vals = list(range(13))
+    figs = [
+        visualizers.plot_best_fit_overlay(t, y, y * 1.05, param_labels=labels_, param_values=vals,
+                                          ground_truth=vals, criterion="closest summary statistics",
+                                          score_text="RMS z = 0.4"),
+        visualizers.plot_overlay_band(t, y, y - 0.2, y, y + 0.2, n_used=20),
+        visualizers.plot_psd_overlay(np.linspace(0.1, 100, 50), np.ones(50), np.ones(50) * 0.5,
+                                     np.ones(50), np.ones(50) * 2),
+        visualizers.plot_cycle_average(np.linspace(0, 2 * np.pi, 48), np.zeros(48), np.zeros(48),
+                                       -np.ones(48), np.ones(48)),
+    ]
+    for fig in figs:
+        assert fig.axes, "figure has no axes"
+        pickle.loads(pickle.dumps(fig))                  # must not raise
+    # the 13-row parameter table gets its own axes, never the title
+    assert len(figs[0].axes) == 2
 
 
 def test_help_badge_carries_its_text():
@@ -1190,9 +1357,10 @@ def test_help_badge_carries_its_text():
     assert HelpBadge("what this does").toolTip() == "what this does"
 
 
-def test_simulated_preview_runner_emits_the_ground_truth_figure():
-    """The Simulate tab's runner produces a 'Ground-truth trace' figure. A real SDE sim is too slow for
-    a unit test, so stub the heavy pieces and assert the fig_sink wiring."""
+def test_simulated_inference_runner_emits_the_ground_truth_figure():
+    """The simulated-inference runner shows the 'Ground-truth trace' figure before inferring (the old
+    Simulate tab did only the first half; the tab is gone, the figure is not). A real SDE sim is too slow
+    for a unit test, so stub the heavy pieces and assert the fig_sink wiring."""
     import torch
     from core import cli, orchestrator
     from core.gui.panels import inference_tabs
@@ -1207,15 +1375,18 @@ def test_simulated_preview_runner_emits_the_ground_truth_figure():
 
     seen = []
     real_gt, real_go = cli.load_and_validate_gt, orchestrator.generate_observations
-    cli.load_and_validate_gt = lambda cfg, path: None
+    real_iv = orchestrator.infer_and_visualize
+    cli.load_and_validate_gt = lambda cfg, path: []
     orchestrator.generate_observations = lambda cfg: (
         torch.zeros(1, 5), None, torch.linspace(0, 1, 5).unsqueeze(0))
+    orchestrator.infer_and_visualize = lambda *a, **k: None
     try:
-        inference_tabs._run_simulated_preview(
-            Cfg(), "cell.txt", 0.1, fig_sink=lambda title, fig: seen.append(title))
+        inference_tabs._run_simulated_inference(
+            Cfg(), object(), "cell.txt", 0.1, fig_sink=lambda title, fig: seen.append(title))
     finally:
         cli.load_and_validate_gt = real_gt
         orchestrator.generate_observations = real_go
+        orchestrator.infer_and_visualize = real_iv
 
     assert seen == ["Ground-truth trace"], seen
 
@@ -1530,7 +1701,11 @@ def test_simconfig_units_and_inferred_labels_are_latex():
         return                                                             # environment without Resources: skip
     cfg = cli.make_sim_config("NADROWSKI", VALID_LABELS[VALID_MODELS.index("NADROWSKI")], True, str(bounds))
     cli.load_and_validate_gt(cfg, str(cell))
-    assert (cfg.length_unit, cfg.time_unit, cfg.force_unit, cfg.freq_unit) == ("nm", "ms", "pN", "Hz")
+    # freq is declared kHz, NOT Hz: drive frequency is consumed as INVERSE CELL TIME (1/ms = kHz), so a
+    # declared "Hz" against an `ms` cell is a 1000x lie. See SimConfig.freq_si_to_cell.
+    assert (cfg.length_unit, cfg.time_unit, cfg.force_unit, cfg.freq_unit) == ("nm", "ms", "pN", "kHz")
+    assert cfg.check_unit_consistency() == [], "nadrowski units must be self-consistent"
+    assert abs(30.0 * cfg.freq_si_to_cell - 0.03) < 1e-12, "30 Hz must be 0.03 cycles/ms in an ms cell"
     labels = cfg.inferred_labels
     assert all(l.startswith("$") for l in labels), labels
     assert any("nm/ND" in l for l in labels), "x_scale should carry nm/ND"
@@ -1680,6 +1855,120 @@ def test_export_animation_background_stays_white_under_dark_theme():
         frame0 = imageio.mimread(path)[0]
         corner = frame0[0, 0][:3]                                  # top-left = figure background margin
         assert min(int(c) for c in corner) > 230, corner          # near-white, not the dark theme bg
+
+
+def test_panel_splitter_is_sized_and_not_collapsible():
+    """Every panel opens with a usable controls column that cannot be dragged to nothing.
+
+    BasePanel builds the app's only QSplitter and there are nine live instances. It used to be a
+    LOCAL with no setSizes and no setChildrenCollapsible, so every launch started at the minimum and
+    one slip past the left edge collapsed the controls to zero width, recoverable only by finding a
+    5px handle at x=0.
+    """
+    app = _app()
+    from core.gui.panels.base_panel import BasePanel
+
+    class P(BasePanel):
+        pass
+
+    panel = P()
+    panel.resize(1300, 820)
+    _pump(app, 0.15)
+    assert not panel.splitter.childrenCollapsible(), \
+        "the controls column can still be collapsed to zero width"
+    assert all(s > 0 for s in panel.splitter.sizes()), \
+        f"splitter opened with a zero-width pane: {panel.splitter.sizes()}"
+    # The old hard 460px cap could not be escaped by widening the window, so any wider form got a
+    # permanent horizontal scrollbar in the left column.
+    assert panel.controls_scroll.maximumWidth() > 1000, \
+        f"controls column is still hard-capped at {panel.controls_scroll.maximumWidth()}px"
+
+
+def test_panel_layout_round_trips_through_settings():
+    """The splitter position must survive a restart -- 'I have to re-drag it every launch' is the
+    complaint. Uses saveState/restoreState, which work before the widget is shown or polished."""
+    app = _app()
+    from core.gui import settings as st
+    from core.gui.panels.base_panel import BasePanel
+
+    class P(BasePanel):
+        pass
+
+    path = _temp_settings()
+    try:
+        a = P()
+        a.resize(1300, 820)
+        _pump(app, 0.15)
+        a.splitter.setSizes([500, 700])
+        _pump(app, 0.05)
+        want = a.splitter.sizes()
+        qs = st.settings()
+        a.save_layout(qs)
+        qs.sync()
+
+        b = P()                                   # restore_layout runs in __init__
+        b.resize(1300, 820)
+        _pump(app, 0.15)
+        assert b.splitter.sizes() == want, \
+            f"layout did not round-trip: saved {want}, restored {b.splitter.sizes()}"
+    finally:
+        st.use_ini_file(None)
+        os.unlink(path)
+
+
+def test_forms_grow_their_fields_and_numeric_boxes_have_a_floor():
+    """Pins both halves of the 'input boxes are cut off' fix, across every form in every panel.
+
+    Qt's Windows default is FieldsStayAtSizeHint: the field takes its size hint and stops, so numeric
+    boxes rendered 3-6 characters wide and typing "0.033333" scrolled inside the box. Repo-wide there
+    were ZERO setFieldGrowthPolicy calls over 18 QFormLayout sites. Asserting over discovered forms
+    (not a fixed list) means a newly added form is covered too.
+    """
+    from PySide6.QtWidgets import QFormLayout, QLineEdit
+    from core.gui.panels.crossval_panel import CrossValPanel
+    from core.gui.panels.fdt_panel import FdtPanel
+    from core.gui.panels.reduction_panel import ReductionPanel
+    from core.gui.widgets.labeled_inputs import FloatField, IntField
+
+    _app()
+    path = _temp_settings()
+    try:
+        panels = [CrossValPanel(), FdtPanel(), ReductionPanel()]
+        forms = [f for p in panels for f in p.findChildren(QFormLayout)]
+        assert forms, "no QFormLayouts discovered — the test is not exercising anything"
+        bad = [f for f in forms
+               if f.fieldGrowthPolicy() != QFormLayout.AllNonFixedFieldsGrow]
+        assert not bad, f"{len(bad)}/{len(forms)} forms do not grow their fields"
+
+        narrow = [w for p in panels for w in p.findChildren(QLineEdit)
+                  if isinstance(w, (FloatField, IntField)) and w.minimumWidth() < 80]
+        assert not narrow, \
+            f"{len(narrow)} numeric field(s) have no usable minimum width (e.g. " \
+            f"{narrow[0].minimumWidth()}px)"
+    finally:
+        st_mod = __import__("core.gui.settings", fromlist=["settings"])
+        st_mod.use_ini_file(None)
+        os.unlink(path)
+
+
+def test_long_diagnostics_are_readable_without_horizontal_scrolling():
+    """Panels emit long single-line diagnostics; the log pane must wrap them, and the crossval cell
+    label (which receives an unbounded str(e)) must not force the whole column wider."""
+    from PySide6.QtWidgets import QPlainTextEdit
+    from core.gui.panels.crossval_panel import CrossValPanel
+    from core.gui.widgets.log_pane import LogPane
+
+    _app()
+    assert LogPane().lineWrapMode() == QPlainTextEdit.WidgetWidth, \
+        "log pane still truncates long lines instead of wrapping them"
+    path = _temp_settings()
+    try:
+        assert CrossValPanel().cell_values.wordWrap(), \
+            "the crossval cell-values label does not wrap, so a long error widens the whole column"
+    finally:
+        st_mod = __import__("core.gui.settings", fromlist=["settings"])
+        st_mod.use_ini_file(None)
+        os.unlink(path)
 
 
 if __name__ == "__main__":

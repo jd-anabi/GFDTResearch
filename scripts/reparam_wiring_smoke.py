@@ -11,12 +11,12 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/reparam
 """
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
+import _common
 from core import cli, orchestrator
 from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device, NADROWSKI_LABELS,
                          POSTERIOR_PATH, DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS,
@@ -27,11 +27,8 @@ from core.SBI.reparam import (build_inferred_bijection, build_rotated_bijection,
                               TransformedPosterior)
 
 torch.manual_seed(0)
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell("Resources/Cells/nadrowski/cell_2.txt")
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale, force_params_dict=forcing,
-                units_dict=units, si_factors=si, dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c,
-                t_max_exp=T_MAX_EXP_S * s2c, T_obs=T_MIN_EXP_S * s2c, hw=detect_device())
+_common.enable_warnings()
+cfg = _common.script_cfg("Resources/Cells/nadrowski/cell_2.txt")
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 T = build_inferred_bijection(cfg)
@@ -46,7 +43,7 @@ print(f"[smoke] V shape={tuple(V.shape)}  orthogonality err={(V.T @ V - torch.ey
 rotated_prior = RotatedLatentPrior(base, V)
 T_train = build_rotated_bijection(T, V)
 
-forcing_dim = len(cfg.force_params_dict)
+forcing_dim = orchestrator.expected_forcing_dim(cfg)   # shared width rule (chi-aware)
 input_dim = len(statistics.FEATURE_LABELS) + 1
 net = embedded_network.EmbeddedNet(input_dim, 3 * input_dim // 2, (5 * input_dim // 2, 2 * input_dim),
                                    forcing_dim=forcing_dim, forcing_layer_dims=(forcing_dim * 4, forcing_dim * 2),
@@ -72,6 +69,7 @@ V2 = torch.load(str(POSTERIOR_PATH / "_smoke_rot.rot.pt"), weights_only=False)
 post2 = TransformedPosterior(pl2, build_rotated_bijection(T, V2))
 
 # sample at a fabricated conditioning vector (plumbing only): [41 stats | logT | forcing]
+# Width from the MODE, not from the drive params: in chi mode the block is 3K wide.
 x = torch.randn(1, input_dim + forcing_dim, dtype=dtype, device=device)
 s = post2.sample((16,), x=x)
 lows = torch.tensor([b[0] for _, b in cfg.params_dict.values()] + [b[0] for _, b in cfg.rescale_params.values()], dtype=dtype, device=device)

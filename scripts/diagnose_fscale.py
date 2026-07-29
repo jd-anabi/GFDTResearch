@@ -23,13 +23,13 @@ Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/diagnos
 """
 import os
 import sys
-import warnings; warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
 
+import _common
 from core import cli, orchestrator
 from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_device,
                          NADROWSKI_LABELS, POSTERIOR_PATH)
@@ -39,12 +39,8 @@ CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
 POST = os.environ.get("POST", "posterior_07012026.pt")
 NS = int(os.environ.get("NS", "20000"))
 
-inits, params, rescale, forcing, units, si, s2c = cli._parse_cell(CELL)
-cfg = SimConfig(model="NADROWSKI", labels=NADROWSKI_LABELS, state_dep_drift=True,
-                inits_dict=inits, params_dict=params, rescale_params=rescale,
-                force_params_dict=forcing, units_dict=units, si_factors=si,
-                dt_exp=DT_EXP_S * s2c, t_min_exp=T_MIN_EXP_S * s2c, t_max_exp=T_MAX_EXP_S * s2c,
-                T_obs=T_MIN_EXP_S * s2c, hw=detect_device())
+_common.enable_warnings()
+cfg = _common.script_cfg()
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 rnames = list(cfg.rescale_params.keys())               # e.g. [x_scale, t_scale, f_scale]

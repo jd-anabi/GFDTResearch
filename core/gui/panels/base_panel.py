@@ -3,11 +3,12 @@ progress pane + log pane), plus ``dispatch()`` to run a callable on a background
 output wired to those widgets."""
 import weakref
 
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, QTimer
 from PySide6.QtWidgets import (QHBoxLayout, QMessageBox, QPushButton, QScrollArea, QSplitter,
                                QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 
+from ..design import CONTROLS_MIN_W, DEFAULT_RESULTS_SPLIT, DEFAULT_SPLIT
 from ..plot_watcher import NewPngWatcher
 from ..streams import CancelToken
 from ..widgets.figure_stack import FigureStack
@@ -47,6 +48,18 @@ def _png_fig_sink(figure_signal):
 
 
 class BasePanel(QWidget):
+    """Shared scaffolding for every run-a-thing panel: a controls column, a results column, and
+    ``dispatch()`` to run work on a background thread with its output wired to both.
+
+    Nine of these exist (Reduction, FDT, CrossVal, Simulate + the five inference tabs). Three class
+    attributes carry app-wide state and are class-level ON PURPOSE -- see their comments: ``_running``
+    (only one panel may run at a time, because stream redirection is process-wide), ``_active_cancel``
+    and ``_instances``.
+
+    Persists: nothing here. Subclasses override ``save_settings``/``restore_settings`` for their own
+    selections; the splitter geometry goes through the separate ``save_layout``/``restore_layout``
+    pair, because 8 of the 9 subclasses override save_settings without calling super().
+    """
     # Class-level, deliberately: redirect_streams swaps sys.stdout/stderr PROCESS-WIDE (see
     # core/gui/streams.py), so only ONE panel may run at a time -- a per-panel guard would let the FDT
     # tab start a run while the SBI tab is training, and the two would fight over the console. The
@@ -76,11 +89,16 @@ class BasePanel(QWidget):
         self.controls = QWidget()
         self.controls_layout = QVBoxLayout(self.controls)
         self.controls_layout.setAlignment(Qt.AlignTop)
-        controls_scroll = QScrollArea()
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setWidget(self.controls)
-        controls_scroll.setMinimumWidth(340)
-        controls_scroll.setMaximumWidth(460)
+        # Kept on self so save_layout/restore_layout can reach them (both used to be locals, which is
+        # why nothing could persist or even inspect the splitter).
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setWidget(self.controls)
+        self.controls_scroll.setMinimumWidth(CONTROLS_MIN_W)
+        # No maximum. The old hard 460px cap could not be escaped by widening the window, so ANY form
+        # wider than that got a permanent horizontal scrollbar in the left column -- one of the two
+        # halves of the "input boxes are cut off" report. Width is now governed by the splitter, which
+        # the user can drag and which now remembers where they put it.
 
         # Right: figures over a progress pane over a log. Progress lives in its own widget -- one row
         # per live tqdm bar -- and never touches the log, which only ever appends completed lines.
@@ -101,21 +119,49 @@ class BasePanel(QWidget):
 
         # Stored as attributes so a subclass can insert its own primary view above the figure stack
         # (e.g. SimulatePanel mounts a live pyqtgraph view here and hides the static figure stack).
+        # The results column is a VERTICAL SPLITTER, not a fixed 3:0:1 stretch. The log pane used to
+        # hold ~25% of the height whether it had one line in it or a thousand, with no handle to drag
+        # -- that is the other half of "panes have to be dragged to show everything": here there was
+        # nothing to drag at all. The progress row stays outside the splitter (it is a fixed-height
+        # strip and a handle around it would be noise).
+        self.results_split = QSplitter(Qt.Vertical)
+        self.results_split.addWidget(self.figure_stack)
+        self.results_split.addWidget(self.log_pane)
+        self.results_split.setStretchFactor(0, 3)
+        self.results_split.setStretchFactor(1, 1)
+        self.results_split.setChildrenCollapsible(False)
+        self.results_split.setSizes(list(DEFAULT_RESULTS_SPLIT))
+
         self.right = QWidget()
         self.right_layout = QVBoxLayout(self.right)
         self.right_layout.setContentsMargins(0, 0, 0, 0)
-        self.right_layout.addWidget(self.figure_stack, 3)
+        self.right_layout.addWidget(self.results_split, 1)
         self.right_layout.addWidget(progress_row)
-        self.right_layout.addWidget(self.log_pane, 1)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(controls_scroll)
-        splitter.addWidget(self.right)
-        splitter.setStretchFactor(1, 1)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(self.controls_scroll)
+        self.splitter.addWidget(self.right)
+        self.splitter.setStretchFactor(1, 1)
+        # A drag past the left edge used to collapse the controls column to zero width, recoverable
+        # only by finding a 5px handle at x=0.
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setSizes(list(DEFAULT_SPLIT))
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
-        outer.addWidget(splitter)
+        outer.addWidget(self.splitter)
+
+        # Persist the split as the user drags it, not only on a clean quit: save_settings runs from
+        # MainWindow.closeEvent alone, so a crash -- or answering "don't quit" -- lost everything, and
+        # "I have to re-drag it every launch" is the actual complaint.
+        self._layout_save_timer = QTimer(self)
+        self._layout_save_timer.setSingleShot(True)
+        self._layout_save_timer.setInterval(1500)
+        self._layout_save_timer.timeout.connect(self._persist_layout)
+        self.splitter.splitterMoved.connect(lambda *_: self._layout_save_timer.start())
+        self.results_split.splitterMoved.connect(lambda *_: self._layout_save_timer.start())
+
+        self.restore_layout()
 
     # ── background dispatch ──────────────────────────────────────────────────
     def dispatch(self, fn, *args, provide_fig_sink: bool = False, provide_stream: bool = False,
@@ -245,6 +291,61 @@ class BasePanel(QWidget):
         completes. Distinct from the tab-level greying an InferenceScreen does via setTabEnabled."""
 
     # ── persistence (subclasses override; keys are namespaced under group() by MainWindow) ──────────
+    def insert_result_widget(self, index: int, widget, stretch: int = 1) -> None:
+        """Mount a panel-specific primary view in the results column, above the figure stack.
+
+        SimulatePanel puts a live pyqtgraph view here and hides the static figure stack. It used to
+        reach into ``right_layout`` with ``insertWidget(0, view, 5)`` directly; now that the results
+        column is a QSplitter that call would land the widget in the wrong parent, so this is the
+        supported seam. Going through it also means the live view gets a drag handle like everything
+        else in that column.
+        """
+        self.results_split.insertWidget(index, widget)
+        self.results_split.setStretchFactor(index, stretch)
+
+    # ── layout persistence ───────────────────────────────────────────────────
+    # DELIBERATELY SEPARATE from save_settings/restore_settings. Two reasons, and the first is fatal:
+    #   1. save_settings is overridden by 8 of the 9 panels WITHOUT calling super(), so anything
+    #      hooked there would silently never run for them. This pair is driven from BasePanel itself
+    #      (restore) and MainWindow._save_state (save), so a subclass cannot break it by forgetting.
+    #   2. Layout is not a user *selection*. A panel that resets its pickers should not lose the
+    #      column widths the user set.
+    def layout_key(self) -> str:
+        """Settings key for this panel's layout. Distinct per panel -- there are nine independent
+        splitters. Subclasses that share a class name would override this; today all nine differ."""
+        return type(self).__name__
+
+    def save_layout(self, qs) -> None:
+        """Persist the splitter geometry. Called by MainWindow._save_state and the debounce timer."""
+        qs.setValue(f"layout/{self.layout_key()}/splitter", self.splitter.saveState())
+        qs.setValue(f"layout/{self.layout_key()}/results", self.results_split.saveState())
+
+    def restore_layout(self, qs=None) -> None:
+        """Restore the splitter geometry, if any was stored.
+
+        saveState/restoreState rather than sizes(): restoreState works before the widget is shown or
+        polished, which setSizes does not do reliably. The return value MUST be checked -- it is
+        False when the stored state does not match the current child count, and silently ignoring
+        that is exactly the bug L9 describes for restoreGeometry.
+        """
+        from .. import settings as _settings
+        qs = qs or _settings.settings()
+        blob = qs.value(f"layout/{self.layout_key()}/splitter")
+        if blob is not None and not self.splitter.restoreState(blob):
+            self.splitter.setSizes(list(DEFAULT_SPLIT))     # stale/incompatible -> sane default
+        # The results split has a variable child count (SimulatePanel inserts a live view), so
+        # restoreState legitimately fails after such a change -- fall back rather than ignore.
+        rblob = qs.value(f"layout/{self.layout_key()}/results")
+        if rblob is not None and not self.results_split.restoreState(rblob):
+            self.results_split.setSizes(list(DEFAULT_RESULTS_SPLIT))
+
+    def _persist_layout(self) -> None:
+        """Debounced write from splitterMoved. Touches ONLY this panel's layout key."""
+        from .. import settings as _settings
+        qs = _settings.settings()
+        self.save_layout(qs)
+        qs.sync()
+
     def save_settings(self, qs) -> None:
         """Persist this panel's user selections. Base is a no-op; subclasses override."""
 
@@ -258,7 +359,8 @@ class BasePanel(QWidget):
 
         Deliberately catches broadly at the call sites: cli's builders raise a bare ValueError (NOT
         UnitParseError) for the two most plausible user mistakes -- a cell with no sibling bounds file
-        (core/cli.py:331) and a cell missing a param the bounds file requires (core/cli.py:268). A
+        (cli._parse_cell) and a cell missing a param the bounds file requires
+        (cli.load_and_validate_gt -> SimConfig.inject_ground_truth). A
         narrow `except cli.UnitParseError` lets those escape the clicked slot and surface as a raw
         traceback in app.py's last-resort excepthook, with nothing in the panel's own log.
         """

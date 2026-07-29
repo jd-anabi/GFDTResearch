@@ -25,6 +25,7 @@ from ..widgets.artifact_picker import ArtifactPicker
 from ..widgets.help_badge import add_help_row
 from ..widgets.labeled_inputs import FloatField, IntField
 from ..widgets.live_hair_bundle import LiveHairBundleView
+from ..widgets.forms import make_form
 
 HELP = {
     "model": "Which hair-cell model to simulate. The cell list follows this choice.",
@@ -40,19 +41,30 @@ HELP = {
 
 
 class SimulatePanel(BasePanel):
+    """Drives a live streaming simulation, plotted frame-by-frame, with video export.
+
+    The only panel that replaces the static figure stack with its own primary view: a live pyqtgraph
+    trace, mounted through ``BasePanel.insert_result_widget`` so it sits inside the results splitter.
+    Runs batch-1 on CPU (``cfg.hw = cpu_device()``) -- the per-frame loop is CPU-optimal and every
+    tensor must share one device.
+
+    Persists (group "simulate"): model, cell picker, and the frame/duration knobs.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._record = []          # emitted (k,2) [t,x] frames of the last/current run, for video export
         # The live view is this panel's primary surface: mount it above the (unused) static figure stack.
         self.live_view = LiveHairBundleView()
-        self.right_layout.insertWidget(0, self.live_view, 5)
+        # Via the BasePanel seam: the results column is a QSplitter now, so inserting into
+        # right_layout would put this outside it (and give it no drag handle).
+        self.insert_result_widget(0, self.live_view, stretch=5)
         self.figure_stack.setVisible(False)
         self._build_controls()
         self.restore_settings(settings.settings())
 
     def _build_controls(self):
         box = QGroupBox("Live simulation")
-        form = QFormLayout(box)
+        form = make_form(box)
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(VALID_MODELS)

@@ -4,7 +4,10 @@ import contextlib
 import io
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QWidget
+
+_TOOLTIP_ROLE = Qt.ToolTipRole
 
 from core.Helpers import file_manager
 from core.gui import icons
@@ -44,6 +47,10 @@ class ArtifactPicker(QWidget):
         for entry in entries:
             # display forward-slashed for subfoldered layouts; keep the raw relpath as data
             self.combo.addItem(entry.replace("\\", "/"), userData=entry)
+            # Per-item tooltip: AdjustToContentsOnFirstShow sizes the combo to whatever was present
+            # at first show, and refresh() adds entries LATER (after a save, or a model change), so
+            # those get silently elided with no way to read them.
+            self.combo.setItemData(self.combo.count() - 1, entry.replace("\\", "/"), _TOOLTIP_ROLE)
 
     def selected(self):
         """Return (entry_or_None, is_new). ``entry`` is the path relative to base_path."""

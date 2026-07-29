@@ -134,6 +134,13 @@ def parse_bounds_file(file_name: str) -> tuple:
 
     :return: (parameters, rescale_params, forcing_params, collected_units) where each param dict maps
              {name: (None, (lo, hi))} -- the value slot is None until a cell file fills it.
+
+    NOTE on ``collected_units``: inline ``(units)`` annotations are parsed but ALL THREE callers
+    (``cli._parse_cell``, ``cli.make_sim_config``, ``inference_tabs``) discard the
+    result, and no shipped bounds file carries them -- units are declared centrally (the per-model units
+    file, or the Config tab's units control) precisely so one declaration governs every file. It is
+    returned for backward compatibility; do not start relying on per-line units here, or a bounds file
+    could silently disagree with the config's declared units.
     """
     parameters, rescale_params, forcing_params = OrderedDict(), OrderedDict(), OrderedDict()
     collected_units = set()

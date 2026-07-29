@@ -5,7 +5,6 @@ import torch
 from sbi import utils
 from tqdm import tqdm
 
-from core.Helpers import helpers
 from core.Simulator import hopf_simulator
 from core.SBI.Priors import prior
 
@@ -101,4 +100,6 @@ class HopfPrior(prior.Prior):
                 del x
         added_params_progress_bar.close()
 
-        return list(accepted_params)
+        # SORTED, not list(): see nadrowski_prior for the rationale -- set iteration order over float
+        # tuples is unspecified, and this feeds the clustering + GMM fit in prior.py.
+        return sorted(accepted_params)

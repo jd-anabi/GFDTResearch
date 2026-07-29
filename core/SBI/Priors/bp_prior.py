@@ -38,7 +38,7 @@ class BPPrior(prior.Prior):
             n_params -= 1
 
         init_pos = np.random.randint(0, 10, size=(curr_batch_size, 2))
-        init_probs = np.random.randint(0, 1, size=(curr_batch_size, 3))
+        init_probs = np.zeros((curr_batch_size, 3), dtype=int)   # randint(0,1) is ALWAYS 0
         inits = helpers.concat(init_pos, init_probs)  # size: (BATCH_SIZE, 5)
         inits = torch.tensor(inits, dtype=self.dtype, device=self.device)
         # Single-channel forcing: shape (batch, 1, T) per the unified force convention.
@@ -80,7 +80,7 @@ class BPPrior(prior.Prior):
             n_params -= 1
 
         # SDE variable
-        inits = helpers.concat(np.random.randint(0, 10, size=(batch_size, 2)), np.random.randint(0, 1, size=(batch_size, 3)))  # size: (BATCH_SIZE, 5)
+        inits = helpers.concat(np.random.randint(0, 10, size=(batch_size, 2)), np.zeros((batch_size, 3), dtype=int))  # size: (BATCH_SIZE, 5)
         inits = torch.tensor(inits, dtype=dtype, device=device)
         # Single-channel forcing: shape (batch, 1, T) per the unified force convention.
         force = torch.zeros((batch_size, 1, t.shape[0]), dtype=dtype, device=device)
@@ -107,4 +107,6 @@ class BPPrior(prior.Prior):
                 del x
         added_params_progress_bar.close()
 
-        return list(accepted_params)
+        # SORTED, not list(): see nadrowski_prior for the rationale -- set iteration order over float
+        # tuples is unspecified, and this feeds the clustering + GMM fit in prior.py.
+        return sorted(accepted_params)

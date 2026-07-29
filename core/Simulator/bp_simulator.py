@@ -21,6 +21,9 @@ class BPSimulator(simulator.Simulator):
                     self.sde = bp_model.BPModel(*torch.unbind(self._params, dim=1), self._force, batch_size=self._batch_size, device=self._device, dtype=self._dtype)
                 else:
                     raise ValueError("Can't not mix and match steady and non-steady models; finite time constant in the parameter batch must all be zero or all non-zero")
-        except (Warning, Exception) as e:
-            print(f"{e}")
-            exit()
+        # NOT BaseException: a cooperative streams.WorkerCancelled must sail through (see
+        # simulator.SimulationError for why this is a raise and no longer a print + exit()).
+        except Exception as e:
+            raise simulator.SimulationError(
+                f"BP model construction failed (batch={self._batch_size}, "
+                f"device={self._device}): {type(e).__name__}: {e}") from e

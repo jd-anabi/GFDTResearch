@@ -25,6 +25,9 @@ from core.Solvers import sdeint
 from ..panels.base_panel import BasePanel
 from ..widgets.help_badge import add_help_row
 from ..widgets.labeled_inputs import FloatField
+from ..widgets.field_row import LabeledFieldRow
+from ..widgets.forms import make_form
+from ..widgets.adaptive_stack import AdaptiveStack
 
 HELP = {
     "name": "The model's name as it appears in every model dropdown. Letters/digits/_ (max 24).",
@@ -57,7 +60,7 @@ class _VarRow(QGroupBox):
     def __init__(self, var_name: str, parent=None):
         super().__init__(f"d{var_name}/dt", parent)
         self.var_name = var_name
-        form = QFormLayout(self)
+        form = make_form(self)
 
         self.drift = QLineEdit()
         self.drift.setPlaceholderText(f"e.g. mu*{var_name} - {var_name}^3")
@@ -67,12 +70,15 @@ class _VarRow(QGroupBox):
         self.force_kind = QComboBox()
         for _, label in _FORCE_KINDS:
             self.force_kind.addItem(label)
-        self.force_stack = QStackedWidget()
+        # AdaptiveStack: there is ONE of these per state variable, and the "None" page is empty while
+        # the "exponential" page is three fields plus a radio row -- so every unforced variable used
+        # to reserve the tallest page's height.
+        self.force_stack = AdaptiveStack()
         self._force_fields = {}                      # kind -> {pname: FloatField}
         self._exp_grow = None
         for kind, _ in _FORCE_KINDS:
             page = QWidget()
-            pf = QFormLayout(page)
+            pf = make_form(page)
             pf.setContentsMargins(0, 0, 0, 0)
             if kind:
                 fields = {}
@@ -138,14 +144,13 @@ class _ParamRow(QWidget):
         self.auto = QCheckBox("auto")
         self.lo = FloatField(0.0)
         self.hi = FloatField(0.0)
+        # A falsy caption omits the label, so the unlabelled "auto" checkbox sits in the same row
+        # machinery as the labelled fields.
+        row = LabeledFieldRow((("value", self.value), ("", self.auto),
+                               ("min", self.lo), ("max", self.hi)))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("value"))
-        layout.addWidget(self.value, 1)
-        layout.addWidget(self.auto)
-        for label, field in (("min", self.lo), ("max", self.hi)):
-            layout.addWidget(QLabel(label))
-            layout.addWidget(field, 1)
+        layout.addWidget(row)
         self.auto.toggled.connect(self._on_auto)
         self.set_spec(value, lo, hi)
 
@@ -196,7 +201,7 @@ class ModelBuilderScreen(QWidget):
         heading.setProperty("type", "heading")
 
         definition = QGroupBox("Definition")
-        dform = QFormLayout(definition)
+        dform = make_form(definition)
         self.name_edit = QLineEdit()
         self.vars_edit = QLineEdit()
         self.vars_edit.setPlaceholderText("x, y")
@@ -216,12 +221,12 @@ class ModelBuilderScreen(QWidget):
         pv = QVBoxLayout(params_box)
         btn_detect = QPushButton("Detect parameters")
         btn_detect.clicked.connect(self._detect_params)
-        self._params_form = QFormLayout()
+        self._params_form = make_form()
         pv.addWidget(btn_detect)
         pv.addLayout(self._params_form)
 
         scales_box = QGroupBox("Display scales")
-        sform = QFormLayout(scales_box)
+        sform = make_form(scales_box)
         self.x_scale = FloatField(10.0)
         self.t_scale = FloatField(0.01)
         add_help_row(sform, "x_scale (nm)", self.x_scale, HELP["x_scale"])
@@ -251,15 +256,27 @@ class ModelBuilderScreen(QWidget):
         iv.addWidget(params_box)
         iv.addWidget(scales_box)
         iv.addWidget(self.status)
-        iv.addLayout(btns)
         iv.addStretch(1)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(inner)
+
+        # STICKY ACTION BAR, outside the scroll area. Validate/Save used to be the last thing INSIDE
+        # the scrolled column, below one _VarRow per state variable and one _ParamRow per parameter --
+        # both unbounded. With ~15 parameters they sat a full screen below the fold, which is why the
+        # Save button was reported as missing entirely. Actions must not be something you have to
+        # hunt for.
+        action_bar = QWidget()
+        action_bar.setObjectName("actionBar")
+        ab = QHBoxLayout(action_bar)
+        ab.setContentsMargins(8, 6, 8, 6)
+        ab.addLayout(btns)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(action_bar)
 
     # ── dynamic rows ──────────────────────────────────────────────────────────
     def _set_variables(self):

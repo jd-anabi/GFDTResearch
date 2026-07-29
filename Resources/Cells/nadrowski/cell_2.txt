@@ -21,7 +21,7 @@ t_scale = 3.73
 f_scale = 10
 
 # Forcing Parameters
-amp = 0
-freq = 0
+amp = 2
+freq = 0.0076
 phase = 0
 offset = 0
