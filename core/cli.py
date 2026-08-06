@@ -361,20 +361,50 @@ def _merge_vals_bounds(vals: dict, bounds: OrderedDict,
     return merged
 
 
+#: Bounds file every cell in a model folder falls back to when it has no same-named sibling.
+#: Named, not guessed: a folder with several cells sharing one box needs a declared default, and
+#: silently picking "the only file present" would break the moment a second one appeared.
+MASTER_BOUNDS_NAME = "master.txt"
+
+
+def resolve_bounds_for_cell(cell_file: str, model: str | None = None) -> Path | None:
+    """Bounds file governing ``cell_file``, or None if neither candidate exists.
+
+    Resolution order:
+      1. the same-named sibling ``Bounds/<model>/<cell>.txt`` -- the original one-box-per-cell
+         convention, so every pre-existing cell resolves exactly as it always did;
+      2. ``Bounds/<model>/master.txt`` -- the shared box, for a model whose cells are variations on
+         one parameter set (the three Nadrowski master cells differ only in their Forcing section,
+         and giving each a byte-identical copy of the same box is what let the old per-cell files
+         drift apart in the first place).
+
+    Returning None rather than raising keeps the LEGACY inline-bounds path reachable: a cell that
+    carries its own bounds has no file in Bounds/ at all, and that is not an error.
+    """
+    p = Path(cell_file)
+    model = (model or p.parent.name).lower()
+    sibling = BOUNDS_PATH / model / p.name
+    if sibling.exists():
+        return sibling
+    master = BOUNDS_PATH / model / MASTER_BOUNDS_NAME
+    return master if master.exists() else None
+
+
 def _parse_cell(cell_file: str, model: str | None = None):
     """
     Parse a cell file into the 7-tuple used by the FDT/REDUCTION/CROSSVAL config builders and the
     diagnostic scripts, then run pint unit conversion.
 
     Cell files hold VALUES only (bounds + units are decoupled) and live in per-model subfolders:
-    Resources/Cells/<model>/<cell>.txt. If the sibling Resources/Bounds/<model>/<cell>.txt AND
-    Resources/Units/<model>/units.txt both exist, use the DECOUPLED path: the bounds file defines the
-    param set + order, the cell supplies the values, units come from the units file. Otherwise fall
-    back to the legacy parse_model_file (bounds + units read inline from the cell).
+    Resources/Cells/<model>/<cell>.txt. If a bounds file RESOLVES for the cell (see
+    :func:`resolve_bounds_for_cell`) AND Resources/Units/<model>/units.txt exists, use the DECOUPLED
+    path: the bounds file defines the param set + order, the cell supplies the values, units come
+    from the units file. Otherwise fall back to the legacy parse_model_file (bounds + units read
+    inline from the cell).
 
     :param cell_file: path to the cell file (Resources/Cells/<model>/<cell>.txt).
     :param model: model name for resolving the bounds/units files; derived from the cell's parent
-                  folder (e.g. '.../Cells/nadrowski/cell_2.txt' -> 'nadrowski') when None.
+                  folder (e.g. '.../Cells/nadrowski/master_weak.txt' -> 'nadrowski') when None.
     :return: (inits_dict, params_dict, rescale_params, force_params_dict,
              units_dict, si_factors, s_to_cell)
     """
@@ -383,10 +413,10 @@ def _parse_cell(cell_file: str, model: str | None = None):
         model = p.parent.name
     model = model.lower()
 
-    bounds_path = BOUNDS_PATH / model / p.name       # Bounds/<model>/<cell>.txt (sibling of the cell)
+    bounds_path = resolve_bounds_for_cell(cell_file, model)
     units_path = UNITS_PATH / model / "units.txt"    # Units/<model>/units.txt
 
-    if bounds_path.exists() and units_path.exists():
+    if bounds_path is not None and units_path.exists():
         # Decoupled path: bounds file = param set + order; cell = values; units file = units.
         b_params, b_rescale, b_forcing, _ = file_manager.parse_bounds_file(str(bounds_path))
         inits_dict, v_params, v_rescale, v_forcing = file_manager.parse_values_file(cell_file)
@@ -450,6 +480,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
                     bounds_dicts=None, units_override=None,
                     chi_mode: bool | None = None, chi_n_freqs: int | None = None,
                     chi_f0: float | None = None, chi_freq_bounds: tuple | None = None,
+                    chi_k_pad: int | None = None,
                     reparam_rotate: bool | None = None) -> SimConfig:
     """
     Build a bounds-only SimConfig (no prompts) from a chosen model + bounds file. Ground-truth values,
@@ -500,6 +531,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         chi_f0=config.CHI_F0 if chi_f0 is None else float(chi_f0),
         chi_freq_bounds=(config.CHI_FREQ_BOUNDS if chi_freq_bounds is None
                          else tuple(chi_freq_bounds)),
+        chi_k_pad=config.CHI_K_PAD if chi_k_pad is None else int(chi_k_pad),
         reparam_rotate=(config.REPARAM_ROTATE if reparam_rotate is None else bool(reparam_rotate)),
         dt_exp=DT_EXP_S * s_to_cell,
         t_min_exp=T_MIN_EXP_S * s_to_cell,

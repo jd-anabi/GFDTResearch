@@ -1,15 +1,15 @@
 # Non-dimensional Initial Conditions
-x_init = 0.0
-xa_init = -1.21
+x_init = -0.11
+xa_init = -1.32
 c_init = 0.5
 
 # Non-dimensional Parameters
 k = 0.8
 lam = 3.57
-f_max = 7.55
+f_max = 1.32
 tau = 0.027
 tau_c = 0.268
-s = 0.65
+s = 0.95
 delta_E = 10
 beta = 14.1
 n = 50
@@ -22,6 +22,6 @@ f_scale = 10
 
 # Forcing Parameters
 amp = 2
-freq = 0.0076
+freq = 0.03164
 phase = 0
 offset = 0

@@ -292,7 +292,7 @@ def load_experimental_data(file_path: str, dtype: torch.dtype = torch.float32) -
 
     return torch.tensor(arr, dtype=dtype)
 
-def save_mix_dist(dist, filename: str):
+def save_mix_dist(dist, filename: str, *, model: str = None, param_keys: list = None):
     """
     Serializes a (possibly transformed) ND prior.
 
@@ -300,6 +300,14 @@ def save_mix_dist(dist, filename: str):
     saves the base GMM's means/covariances/weights plus the (lows, highs) that define
     the bijection. If dist is a bare MixtureSameFamily (legacy), saves GMM only.
     load_mix_dist discriminates on the presence of 'lows'/'highs' keys.
+
+    ``model`` and ``param_keys`` make the file SELF-DESCRIBING. The GMM is fit in the box's own
+    coordinate, so a prior is only meaningful against the exact (model, parameter set + ORDER, box)
+    it was built for -- but nothing on the load path used to check any of that, and the file gives no
+    hint either: means are latent, and lows/highs alone cannot say which parameter each column is.
+    A prior built for one cell's box therefore loaded silently against another's, and the resulting
+    posterior was describable only by comparing GMM component counts after the fact. Both are
+    optional so legacy files still load; ``build_prior`` treats absence as "unverifiable, warn".
     """
     from torch.distributions.transforms import AffineTransform, ComposeTransform
     from core.SBI.reparam import UnitToBoxTransform
@@ -341,7 +349,23 @@ def save_mix_dist(dist, filename: str):
             'covariances': dist.component_distribution.covariance_matrix,
             'weights':     dist.mixture_distribution.probs,
         }
+    if model is not None:
+        data_to_save['model'] = str(model)
+    if param_keys is not None:
+        data_to_save['param_keys'] = [str(k) for k in param_keys]
     torch.save(data_to_save, filename)
+
+def read_prior_metadata(filename: str) -> dict:
+    """The identity of a saved ND prior: ``model``, ``param_keys``, ``lows``, ``highs``, ``log_mask``.
+
+    Separate from :func:`load_mix_dist` on purpose -- the caller that VALIDATES a prior against a
+    config wants the metadata before paying to reconstruct the distribution, and load_mix_dist's
+    return type (a Distribution) has several callers that must not change. Keys are absent for
+    files written before they were recorded; the caller decides whether that is fatal.
+    """
+    data = torch.load(filename, map_location='cpu')
+    return {k: data[k] for k in ('model', 'param_keys', 'lows', 'highs', 'log_mask') if k in data}
+
 
 def load_mix_dist(filename: str, device: torch.device = torch.device('cpu')):
     """

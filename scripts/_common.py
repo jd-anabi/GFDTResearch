@@ -22,8 +22,9 @@ config via :func:`require_mode`, which fails before the simulation spend rather 
 shape error thousands of simulations later.
 
 Env knobs honoured here (each script documents its own on top of these):
-  CELL      cell file path            (default Resources/Cells/nadrowski/cell_2.txt)
-  BOUNDS    bounds file path          (default: the cell's sibling in Resources/Bounds/<model>/)
+  CELL      cell file path            (default Resources/Cells/nadrowski/master_spont.txt)
+  BOUNDS    bounds file path          (default: the cell's sibling in Resources/Bounds/<model>/,
+                                      else that model's shared master.txt)
   MODEL     override the model name   (default: derived from the cell's parent folder)
   TOBS_S    observation duration in SECONDS
   CHI       1/0 -- enable chi(omega) mode
@@ -40,13 +41,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from core import cli, config, registry
+from core import cli, config, orchestrator, registry
 from core.config import (SimConfig, BOUNDS_PATH, CELL_PATH, POSTERIOR_PATH, T_MIN_EXP_S,
                          VALID_LABELS, VALID_MODELS)
 from core.SBI.reparam import (TransformedPosterior, load_eval_bijection, posterior_mode,
                               read_sidecar)
 
-DEFAULT_CELL = str(CELL_PATH / "nadrowski" / "cell_2.txt")
+DEFAULT_CELL = str(CELL_PATH / "nadrowski" / "master_spont.txt")
+# Several diagnostics read cfg.forcing_idx["amp"] unconditionally, so they need a bounds file that
+# DECLARES a Forcing section -- which, per section 3.3, is a property of the CELL you point them at.
+# master_weak resolves (sibling-first, then the folder's master.txt) to the forced 13-dim box; the
+# spontaneous default above resolves to master_spont.txt and would KeyError on 'amp'.
+FORCED_DEFAULT_CELL = str(CELL_PATH / "nadrowski" / "master_weak.txt")
 
 
 def enable_warnings() -> None:
@@ -99,17 +105,25 @@ def model_for_cell(cell: str, override: str | None = None) -> str:
 
 
 def default_bounds_for(cell: str, model: str) -> str:
-    """The cell's sibling bounds file. Bounds define the parameter SET, ORDER and ranges -- and hence
-    the observation mode -- so this pairing is what makes a script's config match the cell."""
-    path = BOUNDS_PATH / model.lower() / Path(cell).name
-    if not path.exists():
+    """The bounds file governing ``cell``. Bounds define the parameter SET, ORDER and ranges -- and
+    hence the observation mode -- so this pairing is what makes a script's config match the cell.
+
+    Delegates to ``cli.resolve_bounds_for_cell`` so scripts and the CLI/GUI agree on the answer:
+    same-named sibling first, then the model's shared ``master.txt``. Duplicating the rule here is
+    exactly how the two would drift.
+    """
+    path = cli.resolve_bounds_for_cell(cell, model)
+    if path is None:
         raise SystemExit(
-            f"No bounds file for cell '{cell}': expected {path}. Bounds declare which parameters are "
-            f"inferred, in what order, so one is required. Pass BOUNDS=<path> to override.")
+            f"No bounds file for cell '{cell}': tried the sibling "
+            f"{BOUNDS_PATH / model.lower() / Path(cell).name} and the shared "
+            f"{BOUNDS_PATH / model.lower() / cli.MASTER_BOUNDS_NAME}. Bounds declare which "
+            f"parameters are inferred, in what order, so one is required. Pass BOUNDS=<path>.")
     return str(path)
 
 
-def script_cfg(cell: str | None = None, *, bounds: str | None = None, model: str | None = None,
+def script_cfg(cell: str | None = None, *, default_cell: str | None = None,
+               bounds: str | None = None, model: str | None = None,
                t_obs_s: float | None = None, chi: bool | None = None, chi_k: int | None = None,
                chi_f0: float | None = None, chi_bounds: tuple | None = None,
                load_gt: bool = True, quiet: bool = False) -> SimConfig:
@@ -118,11 +132,17 @@ def script_cfg(cell: str | None = None, *, bounds: str | None = None, model: str
     Explicit arguments win over env vars, which win over the ``config.CHI_*`` module defaults (that
     last fallback is ``make_sim_config``'s own -- deliberately not duplicated here).
 
+    :param cell:         an explicit cell path. WINS over the ``CELL`` env var -- so a script that
+                         wants a different *default* must use ``default_cell``, not this. Passing a
+                         literal here is what made ``reparam_wiring_smoke`` unrunnable when its cell
+                         file was archived: ``CELL=`` could not override it.
+    :param default_cell: the fallback when ``CELL`` is unset. For the forced-only diagnostics, see
+                         :data:`FORCED_DEFAULT_CELL`.
     :param load_gt: inject the cell's ground-truth VALUES. Off for the handful of checks that only
                     need the bounds geometry.
     :param quiet:   suppress the resolved-configuration banner.
     """
-    cell = cell or os.environ.get("CELL", DEFAULT_CELL)
+    cell = cell or os.environ.get("CELL", default_cell or DEFAULT_CELL)
     model = model_for_cell(cell, model or os.environ.get("MODEL"))
     bounds = bounds or os.environ.get("BOUNDS") or default_bounds_for(cell, model)
 
@@ -167,7 +187,8 @@ def describe(cfg: SimConfig, *, cell: str = None, bounds: str = None, ignored=()
         print(f"[cfg] bounds={bounds}", flush=True)
     if cfg.chi_mode:
         print(f"[cfg] chi: K={cfg.chi_n_freqs} F0={cfg.chi_f0} range={cfg.chi_freq_bounds} "
-              f"x Omega_0  -> conditioning block = {3 * cfg.chi_n_freqs} features", flush=True)
+              f"x Omega_0  -> {cfg.chi_k_pad} probe slots, conditioning block = "
+              f"{orchestrator.expected_forcing_dim(cfg)} features", flush=True)
     print(f"[cfg] ND order:      {list(cfg.params_dict.keys())}", flush=True)
     print(f"[cfg] rescale order: {list(cfg.rescale_params.keys())}", flush=True)
     if cfg.force_params_dict:
@@ -217,7 +238,8 @@ def require_mode(cfg: SimConfig, posterior_latent, sidecar: dict | None = None,
         return cfg.observation_mode, None, None
 
     want_mode = cfg.observation_mode
-    want_dim = (3 * cfg.chi_n_freqs) if cfg.chi_mode else len(cfg.force_params_dict)
+    # ONE width rule, shared with build_posterior and the sidecar -- this used to be a third copy.
+    want_dim = orchestrator.expected_forcing_dim(cfg)
     detail = f", K={k}" if k else ""
     print(f"[mode] {name}: {mode.upper()}{detail}, forcing/chi block = {forcing_dim} features",
           flush=True)
@@ -261,7 +283,11 @@ def feature_labels(cfg: SimConfig) -> list:
     from core.SBI.statistics import FEATURE_LABELS
     if not cfg.chi_mode:
         return list(FEATURE_LABELS)
-    return ([FEATURE_LABELS[i] for i in summary_keep_idx()] + _chi.chi_labels(cfg.chi_n_freqs))
+    # The FISHER channel set (log|chi|, cos, sin, logcyc), not the conditioning one: these diagnostics
+    # build a Jacobian, and the conditioning block's `u` and `mask` columns are theta-independent
+    # there -- see chi.CHI_FISHER_CHANNELS for what that does to a central difference.
+    return ([FEATURE_LABELS[i] for i in summary_keep_idx()]
+            + _chi.chi_labels(cfg.chi_n_freqs, _chi.CHI_FISHER_CHANNELS))
 
 
 def n_features(cfg: SimConfig) -> int:
@@ -273,7 +299,7 @@ def describe_features(cfg: SimConfig) -> None:
     """One banner line so a result can never be read without knowing which information set made it."""
     if cfg.chi_mode:
         n_sp = len(summary_keep_idx())
-        print(f"[mode] CHI: feature rows = {n_sp} spontaneous + {3 * cfg.chi_n_freqs} chi "
+        print(f"[mode] CHI: feature rows = {n_sp} spontaneous + {4 * cfg.chi_n_freqs} chi "
               f"= {n_features(cfg)}  (Group G dropped: it is zeroed in this mode)", flush=True)
         print("[mode] NOTE f_scale is informative here (chi drives at amp = F0 * f_scale).", flush=True)
     else:
@@ -291,7 +317,7 @@ def assert_not_chi(cfg: SimConfig, what: str) -> None:
         raise SystemExit(
             f"{what} has not been generalised to chi(omega) mode: it measures the single-frequency "
             f"41-feature information set, while a chi posterior conditions on "
-            f"{n_features(cfg)} different features (Group G zeroed, {3 * cfg.chi_n_freqs} chi "
+            f"{n_features(cfg)} different features (Group G zeroed, {4 * cfg.chi_n_freqs} chi "
             f"features added). Running it here would produce a confident, meaningless answer.\n"
             f"  -> unset CHI to analyse the forced information set, or use scripts/degeneracy_map.py, "
             f"which is chi-aware.")
@@ -304,3 +330,18 @@ def assert_nadrowski(cfg: SimConfig, why: str = "") -> None:
         raise SystemExit(
             f"This diagnostic is Nadrowski-specific{(' (' + why + ')') if why else ''}, but the "
             f"config is for {cfg.model}. It would run and produce meaningless numbers.")
+
+
+def assert_forced(cfg: SimConfig, what: str) -> None:
+    """Guard for diagnostics that read the cell's own drive (``cfg.forcing_idx["amp"]`` and friends).
+
+    Whether a drive EXISTS is a property of the bounds file, not the cell values (section 3.3), so
+    pointing one of these at a spontaneous cell used to surface as a bare ``KeyError: 'amp'`` twenty
+    lines below the config banner. Say which file to point at instead.
+    """
+    if not cfg.has_forcing:
+        raise SystemExit(
+            f"{what} measures the response to the cell's OWN drive, but this config is "
+            f"{cfg.observation_mode.upper()}: its bounds file declares no Forcing section, so there "
+            f"is no amp/freq/phase to read.\n"
+            f"  -> point it at a forced cell, e.g. CELL={FORCED_DEFAULT_CELL}")

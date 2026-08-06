@@ -366,23 +366,49 @@ def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_s
 
     return prior
 
-def gen_chi_block(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_spont_dim: torch.Tensor,
-                  t_fine: torch.Tensor, inits: torch.Tensor, rescale_idx: dict,
-                  n_segs: int, steady_idx: int, subsample, N_points: int, dt_exp: float,
-                  multipliers: torch.Tensor, f0_nd: float, state_dep_drift: bool = False,
-                  fixed_dict: dict = None, dtype: torch.dtype = torch.float32,
-                  device: torch.device = torch.device('cpu')) -> torch.Tensor:
+def _subset_probe_rows(block: torch.Tensor, mask: torch.Tensor, k_pad: int, generator) -> torch.Tensor:
+    """Randomly keep a PREFIX of each row's live probes, in place, and re-zero what is dropped.
+
+    Half the rows keep their full set; the rest keep Uniform{1..n} of them. The drive set is shared
+    across the batch (one simulation per probe serves every row), so this costs nothing and is the
+    only way to decouple the per-row probe count from the batch's (t_scale, T) stratum -- otherwise
+    the flow could read K off the batch's other conditioning and the encoder would never have to
+    generalise. Dropping a PREFIX is safe because pack_probe_block already ordered the live probes
+    contiguously; the survivors stay contiguous and frequency-ordered.
     """
-    K single-tone forced runs -> the chi(omega) conditioning block (B, 3K). Generalizes the
-    single-frequency Group-G lock-in to a K-frequency susceptibility curve (see config.CHI_MODE +
-    core/SBI/chi.py). One forced simulation per multiplier = the "single-tone x K recordings" protocol.
+    B = block.shape[0]
+    e = block.reshape(B, k_pad, config.CHI_ELEM_W).clone()
+    n = mask.sum(dim=1)                                                   # (B,) live probes per row
+    full = torch.rand(B, generator=generator) < 0.5
+    frac = torch.rand(B, generator=generator).to(n.device)
+    keep = torch.where(full.to(n.device), n, (frac * n.to(frac.dtype)).floor().long() + 1)
+    keep = torch.minimum(keep, n).clamp(min=0)
+    slots = torch.arange(k_pad, device=block.device).unsqueeze(0)         # (1, k_pad)
+    alive = slots < keep.unsqueeze(1).to(slots.device)                    # (B, k_pad)
+    return (e * alive.unsqueeze(-1).to(e.dtype)).reshape(B, k_pad * config.CHI_ELEM_W)
+
+
+def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_spont_dim: torch.Tensor,
+                t_fine: torch.Tensor, inits: torch.Tensor, rescale_idx: dict,
+                n_segs: int, steady_idx: int, subsample, N_points: int, dt_exp: float,
+                multipliers: torch.Tensor, f0_nd: float, state_dep_drift: bool = False,
+                fixed_dict: dict = None,
+                absolute_freqs: bool = False, resolution_filter: bool = True,
+                duration_frac=None, dtype: torch.dtype = torch.float32,
+                device: torch.device = torch.device('cpu')) -> tuple:
+    """
+    K single-tone forced runs -> the RAW probe measurements
+    ``(chi (B,K) complex, u (B,K), logcyc (B,K), valid (B,K) bool)``. Generalizes the single-frequency
+    Group-G lock-in to a susceptibility CURVE (see config.CHI_MODE + core/SBI/chi.py). One forced
+    simulation per probe = the "single-tone x K recordings" protocol.
+
+    Exactly K simulations run, never k_pad -- padding is free.
 
     Drives at a FIXED ND amplitude f0_nd by passing dimensional amp = f0_nd * f_scale to
-    build_nondim_sin_force_tensor (which divides it back to f0_nd), so linearity + lock-in SNR are
-    uniform across the f_scale prior. chi = redimensionalized response / dimensional drive =
-    (x_scale/f_scale)*chi_nd carries the physical scale magnitude (like Group-G's gain); its SHAPE over
-    omega carries the ND resonance. Frequencies omega_k = mult_k * Omega_0, Omega_0 = the spontaneous
-    peak of x_spont_dim, clamped below the dt_exp Nyquist (an experiment can't probe past its frame rate).
+    build_nondim_sin_force_tensor (which divides it back to f0_nd), so lock-in SNR is uniform across
+    the f_scale prior. chi = redimensionalized response / dimensional drive = (x_scale/f_scale)*chi_nd
+    carries the physical scale magnitude (like Group-G's gain); its SHAPE over omega carries the ND
+    resonance.
 
     :param params_nd: (B, n_nd) ND params (the inferred ND block).
     :param rescale: (B, n_rescale) PHYSICAL rescale params (x_scale/t_scale/f_scale...).
@@ -392,9 +418,20 @@ def gen_chi_block(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_
     :param subsample: fine->dt_exp downsample factor. A scalar int (uniform t_scale: training batches,
                       a single GT) OR a (B,) per-sample tensor (posterior samples in PPC, whose t_scale
                       differs per sample); applied via gather so both cases share one code path.
-    :param multipliers: (K,) relative-frequency multipliers of Omega_0 (chi.chi_multipliers()).
+    :param multipliers: (K,) or (B, K). Relative multipliers of each row's own measured Omega_0, or --
+                        with ``absolute_freqs`` -- frequencies in cell freq units. ABSOLUTE is what the
+                        experimental path and the PPC use: the experiment fixed the drive frequencies,
+                        and re-deriving them per posterior sample from that sample's own f_peak would
+                        simulate a different experiment and make the PPC agree for the wrong reason.
     :param f0_nd: ND drive amplitude (config.CHI_F0).
-    :return: (B, 3K) chi feature block on ``device``.
+    :param resolution_filter: mark probes below config.CHI_MIN_CYCLES drive cycles invalid. **Pass
+                              False for the Fisher.** The filter depends on f_peak, which depends on
+                              theta, so a probe can CROSS the threshold between the +dz and -dz arms
+                              of a central difference -- a step of 1 divided by fnoise's 1e-9 floor
+                              puts ~1e9 into the Jacobian, and V becomes that discontinuity.
+    :param duration_frac: (K,) fractions of N_points to lock each probe in over. None = full length.
+    :return: (chi (B,K) complex, u (B,K), logcyc (B,K), valid (B,K) bool). Use
+             :func:`gen_chi_block` for the padded conditioning block.
     """
     B = params_nd.shape[0]
     f_peak = chi.peak_freq(x_spont_dim, dt_exp)                         # (B,) cell freq units
@@ -430,9 +467,38 @@ def gen_chi_block(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_
                  ).clamp_(max=n_avail - 1)                              # (B, N_points), clamped in place
     fidx = {"amp": 0, "freq": 1, "phase": 2, "offset": 3}
     n_force_ch = _forcing.n_force_channels(model, fidx, inits.shape[-1])
-    chis = []
-    for mult in multipliers.tolist():
-        freq_k = torch.clamp(mult * f_peak, max=0.9 * nyq)             # (B,) below Nyquist -> no aliasing
+
+    # Resolve the probe frequencies ONCE, before the loop. `multipliers` may be relative (the usual
+    # case: mult_k * the passive trace's own peak) or ABSOLUTE cell-frequency values, which is what
+    # the experimental path and the PPC need -- there the drive frequencies were fixed by the
+    # experiment, and re-deriving them per posterior sample from that sample's own f_peak would
+    # simulate a different experiment.
+    mults = multipliers if torch.is_tensor(multipliers) else torch.as_tensor(multipliers)
+    mults = mults.to(device=device, dtype=f_peak.dtype)
+    if mults.dim() == 1:
+        mults = mults.unsqueeze(0)                                      # (1, K) -> broadcast over B
+    freqs = mults if absolute_freqs else mults * f_peak.unsqueeze(1)    # (B, K) or (1, K)
+    freqs = freqs.expand(B, -1)
+    K = freqs.shape[1]
+
+    chis, u_list, logcyc_list = [], [], []
+    # Per-probe validity. A probe is never MOVED and never silently dropped -- it is masked, and the
+    # caller is told how many. Clamping to Nyquist (what this used to do) relabels a probe as a
+    # different frequency than the one requested, which is invisible downstream.
+    valid = torch.ones((B, K), dtype=torch.bool, device=device)
+    for k in range(K):
+        freq_k = freqs[:, k].contiguous()                              # (B,) absolute, cell freq units
+        valid[:, k] &= torch.isfinite(freq_k) & (freq_k > 0) & (freq_k < 0.9 * nyq)
+        # Per-probe duration: lock in over a PREFIX of the trace. Free (the samples already exist) and
+        # it makes the (duration, frequency) trade-off -- what a real session actually varies -- an
+        # axis of the training distribution rather than a constant.
+        N_k = N_points if duration_frac is None else max(1, int(round(float(duration_frac[k]) * N_points)))
+        T_k = N_k * dt_exp
+        if resolution_filter:
+            # A lock-in over a fraction of a cycle returns the demeaned trace's residual drift plus
+            # spontaneous 1/f content: finite, in range, and REPRODUCIBLE -- which is exactly why it
+            # survived a CV screen -- but it is not a susceptibility.
+            valid[:, k] &= (freq_k * T_k) >= config.CHI_MIN_CYCLES
         forcing_params = torch.zeros((B, 4), dtype=dtype, device=device)
         forcing_params[:, 0] = amp_dim
         forcing_params[:, 1] = freq_k
@@ -452,17 +518,45 @@ def gen_chi_block(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_
                        state_dep_drift=state_dep_drift, batch_size=B, var_idx=0,
                        dtype=dtype, device=device)[0, :, :]
         x_sub = x_nd[:, ::s_int][:, :N_points] if idx_c is None else torch.gather(x_nd, 1, idx_c)
-        x_dim = helpers.rescale(x_sub, x_scale, x_offset)               # (B, N_points), a FRESH tensor
+        x_dim = helpers.rescale(x_sub[:, :N_k], x_scale, x_offset)      # (B, N_k), a FRESH tensor
         # Release the simulation BEFORE the lock-in: x_nd is a view and so pins its whole base, and
         # force is a (B, n_force_ch, T_fine) tensor of its own. helpers.rescale has already
         # materialised x_dim, so nothing below reads any of them. (idx_c is loop-invariant --
         # do NOT drop it.)
         del force, x_nd, x_sub
-        chis.append(chi.lock_in_batched(x_dim, 2.0 * math.pi * freq_k, amp_dim, T_obs, dt_exp))
+        chis.append(chi.lock_in_batched(x_dim, 2.0 * math.pi * freq_k, amp_dim, T_k, dt_exp))
+        # The frequency ACTUALLY locked in at, and the cycles actually seen -- both carried as
+        # features rather than implied by slot index, which is what makes placement free.
+        u_list.append(torch.log(freq_k / f_peak.clamp(min=1e-30)))
+        logcyc_list.append(torch.log(torch.clamp(freq_k * T_k, min=1e-30)))
         del x_dim
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    return chi.chi_features(torch.stack(chis, dim=1))                   # (B, 3K)
+
+    return (torch.stack(chis, dim=1), torch.stack(u_list, dim=1),
+            torch.stack(logcyc_list, dim=1), valid)
+
+
+def gen_chi_block(*args, k_pad: int = None, bounds: tuple = None, **kwargs) -> tuple:
+    """``gen_chi_raw`` + :func:`core.SBI.chi.pack_probe_block` -> the padded CONDITIONING block.
+
+    Split from the raw lock-in deliberately: the Fisher (``SBI/decorrelate.feats``) needs the
+    susceptibilities WITHOUT the frequency and mask channels, because both are theta-independent
+    there and poison the Jacobian -- see CHI_FISHER_CHANNELS. Sharing the simulation loop keeps the
+    two feature sets provably from drifting apart.
+
+    :return: ((B, CHI_ELEM_W*k_pad) block, (B, k_pad) bool mask).
+    """
+    chi_stack, u, logcyc, valid = gen_chi_raw(*args, **kwargs)
+    block, mask = chi.pack_probe_block(chi_stack, u, logcyc, valid, k_pad=k_pad, bounds=bounds)
+    B, K = chi_stack.shape
+    dropped = int((~mask[:, :K]).sum())
+    if dropped:
+        # Silent attrition is what made the first chi posterior inexplicable. Make it a number.
+        warnings.warn(
+            f"chi: {dropped}/{B * K} probes masked (below {config.CHI_MIN_CYCLES} drive cycles, "
+            f"at/above Nyquist, out of band, or a non-finite lock-in).", stacklevel=2)
+    return block, mask
 
 
 def gen_training_data(model: str, prior: torch.distributions.Distribution, forcing_prior: torch.distributions.Distribution,
@@ -473,8 +567,10 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                       proposal: DirectPosterior = None, theta_transform: Transform | None = None,
                       fixed_dict: dict = None, state_dep_drift: bool = False,
                       spontaneous_only: bool = False, chi_mode: bool = False,
-                      chi_n_freqs: int | None = None, chi_f0: float | None = None,
-                      chi_freq_bounds: tuple | None = None, n_vars: int | None = None,
+                      chi_f0: float | None = None,
+                      chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
+                      chi_k_fixed: int | None = None,
+                      n_vars: int | None = None,
                       dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> tuple:
     """
     Generate synthetic training data for the SBI posterior using batch-by-scale strategy.
@@ -519,6 +615,17 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     :param fixed_dict: Optional dict mapping ND parameter indices to fixed values for
                        conditional posterior estimation.
     :param state_dep_drift: Whether the model uses state-dependent drift.
+    :param chi_k_fixed: hold the probe COUNT at this value instead of drawing it per batch, and skip
+                        the per-row subsetting. **For a STRATIFIED CALIBRATION, not for training** --
+                        training's whole point is that K varies, and fixing it would train a network
+                        that has only ever seen one probe count. A pooled SBC over a mixture of
+                        counts can be flat while each count is miscalibrated in compensating
+                        directions, which is why validating one count at a time needs a lever at all.
+                        Placement stays jittered (``chi.sample_multipliers``) so only the count
+                        differs from the training distribution. Note there is deliberately NO
+                        ``chi_n_freqs`` here: that is the count an OBSERVATION supplies, and honouring
+                        it during data generation would destroy the K-agnosticism the padded probe-set
+                        layout exists to provide.
     :param dtype: Tensor data type. Defaults to torch.float32.
     :param device: Computation device. Defaults to CPU.
     :return: Tuple of (training_data, thetas) where training_data has shape
@@ -575,12 +682,24 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     # chi(omega) mode: precompute the relative-frequency multipliers + drive amplitude once. K / bounds /
     # F0 come from the CALLER (carried on the SimConfig) so a run is self-describing; None falls back to
     # the live module defaults for direct/CLI callers.
-    chi_mults = None
+    chi_gen = None
     if chi_mode:
         from core import config as _config
-        chi_mults = chi.chi_multipliers(dtype=dtype, device=device,
-                                        n_freqs=chi_n_freqs, bounds=chi_freq_bounds)
         chi_f0 = _config.CHI_F0 if chi_f0 is None else chi_f0
+        chi_freq_bounds = _config.CHI_FREQ_BOUNDS if chi_freq_bounds is None else chi_freq_bounds
+        chi_k_pad = _config.CHI_K_PAD if chi_k_pad is None else int(chi_k_pad)
+        if chi_k_fixed is not None:
+            chi_k_fixed = int(chi_k_fixed)
+            if not (1 <= chi_k_fixed <= chi_k_pad):
+                raise ValueError(
+                    f"chi_k_fixed={chi_k_fixed} is outside 1..chi_k_pad={chi_k_pad}. A calibration "
+                    f"stratum cannot ask for more probes than the network has slots, and 0 probes is "
+                    f"an all-masked observation the experimental path refuses outright.")
+        # A DEDICATED generator for the probe draw. Never the global RNG: the chi block is surrounded
+        # by deliberate manual_seed() calls (trap X3's common-random-numbers), and a placement drawn
+        # from the global stream would be re-randomised -- or worse, frozen -- by them.
+        chi_gen = torch.Generator(device="cpu")
+        chi_gen.manual_seed(20260805)
 
     # --- Stratified sampling of batch-level (t_scale, T) pairs with pre-filter ---
     t_scale_lo, t_scale_hi = t_scale_bounds
@@ -697,11 +816,38 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     warnings.simplefilter("ignore")
                     training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
                                                device=device, spontaneous_only=True)   # (run, 41), G zeroed
-                chi_block = gen_chi_block(
+                # --- THE PROBE SET FOR THIS BATCH ---
+                # K is drawn per batch and the placement is stratified-jittered, so the encoder is
+                # trained ACROSS probe counts and frequencies rather than memorising one grid. A fixed
+                # grid would leave `u` taking only K distinct values in the entire training set, and an
+                # experimentalist's 0.07x recording would then be an out-of-distribution input to an
+                # MLP that extrapolates linearly and confidently.
+                k_b = (chi_k_fixed if chi_k_fixed is not None else
+                       int(torch.randint(config.CHI_K_MIN_TRAIN, chi_k_pad + 1, (1,),
+                                         generator=chi_gen).item()))
+                b_mults = chi.sample_multipliers(k_b, chi_freq_bounds, generator=chi_gen,
+                                                 dtype=dtype, device=device)
+                # Per-probe duration: free (the samples already exist) and it makes the
+                # (duration, frequency) trade-off an axis of the training distribution.
+                dfrac = torch.where(torch.rand(k_b, generator=chi_gen) < 0.6,
+                                    torch.ones(k_b),
+                                    torch.exp(torch.rand(k_b, generator=chi_gen)
+                                              * (math.log(1.0) - math.log(0.3)) + math.log(0.3)))
+                chi_block, chi_mask = gen_chi_block(
                     model, curr_thetas_nd, curr_thetas_rescale, x_spont_dim, t_fine, inits, rescale_idx,
                     n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
-                    chi_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
+                    b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
+                    k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
                     dtype=dtype, device=device)
+                # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
+                # rows that keep the probe -- and it is the only way to decouple the probe count from
+                # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
+                # drive set and different subsets, which is a direct regulariser toward K-agnosticism.
+                #   SKIPPED under chi_k_fixed: subsetting is exactly what makes the per-row count
+                #   vary, so leaving it on would silently turn a "K = 6" calibration stratum into a
+                #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
+                if chi_k_fixed is None:
+                    chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
                 log_T_k_tensor = torch.full((run_size, 1), math.log(T_k), dtype=dtype)
                 training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
                 training_data.append(training_stats)
@@ -842,7 +988,15 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
     if num_rounds > 1 and x_obs is None:
         raise ValueError("x_obs must be specified for SNPE algorithm")
 
+    # sbi's default z_score_x="independent" fits a PER-COLUMN affine over the conditioning vector.
+    # Under the chi SET layout that is permutation-BREAKING (two orderings of one probe set would be
+    # scaled differently, destroying the encoder's whole guarantee), and the near-constant mask column
+    # becomes a ~1e7 amplifier under sbi's 1e-7 min-std clamp. The chi net standardizes itself instead
+    # -- per channel, over live probes only. Derived from the net, never a separate argument, so the
+    # standardizer and the encoder cannot be configured apart.
+    _owns = getattr(embedding_net, "owns_standardization", False)
     neural_posterior = posterior_nn(model=model, embedding_net=embedding_net,
+                                    z_score_x=("none" if _owns else "independent"),
                                     hidden_features=hidden_features, num_transforms=num_transforms,
                                     num_bins=num_bins)
     infer = SNPE(prior=prior, density_estimator=neural_posterior, device=str(device))
@@ -872,9 +1026,10 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             state_dep_drift=training_params.get("state_dep_drift", False),
             spontaneous_only=training_params.get("spontaneous_only", False),
             chi_mode=training_params.get("chi_mode", False),
-            chi_n_freqs=training_params.get("chi_n_freqs", None),
             chi_f0=training_params.get("chi_f0", None),
             chi_freq_bounds=training_params.get("chi_freq_bounds", None),
+            chi_k_pad=training_params.get("chi_k_pad", None),
+            chi_k_fixed=training_params.get("chi_k_fixed", None),
             n_vars=training_params.get("n_vars", None),
             dtype=training_params["dtype"], device=training_params["device"],
         )
@@ -901,6 +1056,15 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             )
         thetas = thetas[valid_idx]
         data = data[valid_idx]
+
+        # Fit OUR standardizers, once, on the post-filter data. posterior_nn was already called (it is
+        # constructed before any data exists), so this has to happen here -- before append_simulations,
+        # because build_nsf/get_numel run the net inside infer.train(). Unfitted, 41 raw statistics
+        # spanning log-variances, nm-scale means and PLVs would reach the flow unscaled and the only
+        # symptom would be a worse loss curve, days later; the encoder raises rather than allow it.
+        if _owns and not embedding_net.standardization_fitted:
+            embedding_net.fit_standardization(data)
+            assert embedding_net.standardization_fitted, "chi standardization silently did not fit"
 
         infer.append_simulations(thetas, data, proposal=proposal)
         density_estimator = infer.train(

@@ -7,3 +7,15 @@
 /sbc_run.log
 *.pyc
 __pycache__/
+
+# Resources/ GENERATED OUTPUTS (PRISM_HANDOFF 9.7).
+# Resources/ interleaves the hand-written inputs a user edits -- Bounds/ Cells/ Units/ Models/ --
+# with everything the pipeline writes, so the two were indistinguishable in the same tree. The
+# directories below are outputs only; the input .txt/.json files stay tracked.
+# Some of these are still TRACKED from before this rule; untracking them is a separate, deliberate
+# step (same reasoning as sbc_run.log above), and ignoring them stops NEW ones being added.
+/Resources/Plots/
+/Resources/Priors/
+/Resources/Posteriors/
+/Resources/CrossValidation/
+/Resources/ReductionMap/

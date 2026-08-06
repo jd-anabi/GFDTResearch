@@ -60,8 +60,10 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
                  t_scale_bounds: tuple[float, float] = None, theta_transform: Transform | None = None,
                  fixed_dict: dict = None, state_dep_drift: bool = False,
                  spontaneous_only: bool = False, chi_mode: bool = False,
-                 chi_n_freqs: int | None = None, chi_f0: float | None = None,
-                 chi_freq_bounds: tuple | None = None, n_vars: int | None = None,
+                 chi_f0: float | None = None,
+                 chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
+                 chi_k_fixed: int | None = None,
+                 n_vars: int | None = None,
                  dtype: torch.dtype = torch.float32,
                  device: torch.device = torch.device('cpu')) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -108,8 +110,9 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
         t_scale_bounds=t_scale_bounds, proposal=None,
         theta_transform=theta_transform,  # <-- NEW
         fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-        spontaneous_only=spontaneous_only, chi_mode=chi_mode, chi_n_freqs=chi_n_freqs,
-        chi_f0=chi_f0, chi_freq_bounds=chi_freq_bounds, n_vars=n_vars,
+        spontaneous_only=spontaneous_only, chi_mode=chi_mode,
+        chi_f0=chi_f0, chi_freq_bounds=chi_freq_bounds, chi_k_pad=chi_k_pad,
+        chi_k_fixed=chi_k_fixed, n_vars=n_vars,
         dtype=dtype, device=device,
     )
 

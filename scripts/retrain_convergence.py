@@ -18,7 +18,7 @@ Workflow:
      then re-check SBC (scripts/sbc_characterize.py POST=<NAME>.pt) on {kappa,lambda,beta,...}.
 
 Env knobs:
-  CELL       cell file                              (default Resources/Cells/nadrowski/cell_2.txt)
+  CELL       cell file                              (default Resources/Cells/nadrowski/master_spont.txt)
   BASE_POST  posterior to inherit the prior from    (default posterior_3d.pt)
   NAME       output posterior name (no extension)   (default posterior_convergence)
   HIDDEN     NSF hidden features                    (default config.NSF_HIDDEN_FEATURES=128)
@@ -107,13 +107,9 @@ sbi_prior = sbi_prior_wrapper.SBIPriorWrapper(latent_inferred_prior)
 # hard-coded len(cfg.force_params_dict) silently trained a FORCED-width network even with chi on.
 forcing_dim = orchestrator.expected_forcing_dim(cfg)
 input_dim = len(statistics.FEATURE_LABELS) + 1          # 41 summary stats + log(T)
-embedded_net = embedded_network.EmbeddedNet(
-    input_dim, 3 * input_dim // 2,
-    (5 * input_dim // 2, 2 * input_dim),
-    forcing_dim=forcing_dim,
-    forcing_layer_dims=(forcing_dim * 4, forcing_dim * 2),
-    merge_layer_dim=2 * input_dim,
-)
+# ONE construction site, shared with build_posterior -- the sizing arithmetic used to be duplicated
+# here and in reparam_wiring_smoke, so a layout change had three places to be wrong in.
+embedded_net = orchestrator.build_embedding_net(cfg, input_dim, forcing_dim)
 
 training_params = {
     "model": cfg.model, "prior": latent_inferred_prior, "t": cfg.t,
@@ -124,8 +120,12 @@ training_params = {
     # Observation mode. train_nn reads these with .get(..., False/None), so omitting them (as this
     # script used to) silently took the forced branch no matter what the config said.
     "spontaneous_only": cfg.observation_mode == "spontaneous",
-    "chi_mode": cfg.chi_mode, "chi_n_freqs": cfg.chi_n_freqs, "chi_f0": cfg.chi_f0,
-    "chi_freq_bounds": cfg.chi_freq_bounds, "n_vars": cfg.inits_tensor.shape[-1],
+    # chi_n_freqs is deliberately absent: it is the OBSERVATION's probe count, and training draws K
+    # per batch so one posterior serves any count. chi_k_pad comes from the config, not from
+    # gen_training_data's module fallback -- it is frozen into the saved artifact (trap CHI7).
+    "chi_mode": cfg.chi_mode, "chi_f0": cfg.chi_f0,
+    "chi_freq_bounds": cfg.chi_freq_bounds, "chi_k_pad": cfg.chi_k_pad,
+    "n_vars": cfg.inits_tensor.shape[-1],
     "dtype": cfg.hw.dtype, "device": cfg.hw.device,
 }
 

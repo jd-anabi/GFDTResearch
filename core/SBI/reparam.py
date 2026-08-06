@@ -14,6 +14,8 @@ from __future__ import annotations
 import warnings
 
 import torch
+
+from core import config
 from torch.distributions import constraints
 from torch.distributions.transforms import (
     AffineTransform, SigmoidTransform, ComposeTransform, Transform,
@@ -352,17 +354,23 @@ def posterior_mode(posterior_latent, sidecar: dict | None = None) -> tuple[str, 
     from chi at K=2), which is exactly why tier 1 exists and why the sidecar is now always written.
     Built-in drives declare at most 5 forcing parameters, so the threshold below is safe for them.
     """
+    # The third slot is K_PAD (the network's slot capacity), NOT the probe count -- a chi posterior
+    # deliberately has no single K.
     if sidecar:
         mode, fdim = sidecar.get("mode"), sidecar.get("forcing_dim")
         if mode is not None and fdim is not None:
-            return str(mode), int(fdim), sidecar.get("chi_n_freqs")
+            return str(mode), int(fdim), sidecar.get("chi_k_pad")
 
     est = getattr(posterior_latent, "posterior_estimator", None)
     fdim = None
     net = getattr(est, "embedding_net", None)
     if net is not None:
         # embedding_net is typically Sequential(Standardize, EmbeddedNet); find the part that knows.
+        # Under chi the net carries chi_layout/chi_k_pad too, so tier 2 is unambiguous.
         parts = list(net) if hasattr(net, "__iter__") else [net]
+        for p in parts:
+            if getattr(p, "chi_layout", 0) >= 2:
+                return "chi", int(p.forcing_dim), int(p.chi_k_pad)
         fdim = next((getattr(p, "forcing_dim") for p in parts if hasattr(p, "forcing_dim")), None)
     if fdim is None:
         cond = getattr(est, "condition_shape", None)
@@ -378,8 +386,17 @@ def posterior_mode(posterior_latent, sidecar: dict | None = None) -> tuple[str, 
     fdim = int(fdim)
     if fdim == 0:
         return "spontaneous", 0, None
-    if fdim >= 6 and fdim % 3 == 0:
-        return "chi", fdim, fdim // 3
+    # NO chi branch here. The old `fdim >= 6 and fdim % 3 == 0 -> chi` numerology is gone: it decoded
+    # any 6-parameter drive as chi, and under the set layout width cannot identify a layout anyway
+    # (6*K_PAD at K_PAD=5 is exactly 30, the same as the retired 3*K at K=10). A chi posterior is
+    # identified by its sidecar's chi_layout or by the net's own attributes, both handled above; a
+    # width this large with neither is unidentifiable and must say so rather than guess.
+    if fdim > 8:
+        raise ValueError(
+            f"Cannot determine this posterior's observation mode: forcing_dim={fdim} is too wide for "
+            f"any built-in drive (at most 5 parameters), and it carries neither a chi_layout sidecar "
+            f"key nor a chi-aware embedding net. It is most likely a chi posterior from a build that "
+            f"predates layout {config.CHI_LAYOUT}; retrain it.")
     return "forced", fdim, None
 
 
@@ -391,11 +408,19 @@ def load_eval_bijection(cfg, choice: str, posterior_dir) -> ComposeTransform:
     and the offline diagnostic scripts — keep in sync with build_posterior's save side.
 
     Sidecar '<name>.rot.pt' (written by build_posterior):
-      - dict {"V": tensor|None, "log_params": [names]}   (current format)
+      - dict {"V": tensor|None, "log_params": [names], "nd_lows"/"nd_highs"/"rescale_lows"/
+        "rescale_highs": tensors}                         (current format)
+      - dict without the bound tensors                    (pre-2026-08-05: box taken from cfg)
       - bare tensor V                                     (legacy: rotation only, linear box)
     No sidecar => posterior predates the reparam work => plain LINEAR box (backward compatible).
 
-    :param cfg:           SimConfig (provides param bounds/order to rebuild the box).
+    THE BOX COMES FROM THE SIDECAR when it is recorded there. The docstring always claimed eval was
+    self-describing, but the box itself was rebuilt from ``cfg`` -- so a posterior trained against one
+    bounds file and evaluated against another silently decoded every latent sample through the wrong
+    edges, changing the physical value of every reported parameter with nothing raised. ``cfg`` is
+    still the fallback for older files, and a divergence between the two WARNS.
+
+    :param cfg:           SimConfig (fallback box for legacy sidecars; also supplies device/dtype).
     :param choice:        posterior filename (e.g. "posterior_new.pt").
     :param posterior_dir: directory holding the posterior + its .rot.pt sidecar (a Path).
     """
@@ -405,7 +430,28 @@ def load_eval_bijection(cfg, choice: str, posterior_dir) -> ComposeTransform:
     if obj is None:
         return build_inferred_bijection(cfg, log_params=[])        # legacy: linear box, no rotation
     V, log_params = obj.get("V", None), obj.get("log_params", [])
-    T = build_inferred_bijection(cfg, log_params=log_params)
+
+    if all(k in obj for k in ("nd_lows", "nd_highs", "rescale_lows", "rescale_highs")):
+        lows = torch.cat([obj["nd_lows"], obj["rescale_lows"]]).to(cfg.hw.device, cfg.hw.dtype)
+        highs = torch.cat([obj["nd_highs"], obj["rescale_highs"]]).to(cfg.hw.device, cfg.hw.dtype)
+        names = list(obj.get("param_keys") or (list(cfg.params_dict) + list(cfg.rescale_params)))
+        cfg_lows = torch.tensor([b[0] for _, b in cfg.params_dict.values()]
+                                + [b[0] for _, b in cfg.rescale_params.values()],
+                                dtype=lows.dtype, device=lows.device)
+        if cfg_lows.shape == lows.shape:
+            cfg_highs = torch.tensor([b[1] for _, b in cfg.params_dict.values()]
+                                     + [b[1] for _, b in cfg.rescale_params.values()],
+                                     dtype=highs.dtype, device=highs.device)
+            if not (torch.allclose(cfg_lows, lows) and torch.allclose(cfg_highs, highs)):
+                warnings.warn(
+                    f"Posterior '{choice}' was trained in a DIFFERENT box than the current config "
+                    f"declares; evaluating in the posterior's own box (the correct one). The config's "
+                    f"bounds file does not describe this posterior -- results are still in the "
+                    f"posterior's coordinate, but the two should not be mixed.", stacklevel=2)
+        T = build_box_bijection(lows, highs, _log_mask(names, lows, log_params))
+    else:
+        T = build_inferred_bijection(cfg, log_params=log_params)   # pre-box-recording sidecar
+
     return build_rotated_bijection(T, V) if V is not None else T
 
 

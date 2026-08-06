@@ -49,11 +49,12 @@ torch.manual_seed(SEED)
 print(f"[cfg] POST={POST} K={K} M={M} M_NOISE={M_NOISE} REL={REL} SD_ID={SD_ID} SEED={SEED}",
       flush=True)
 
-cfg = _common.script_cfg()
+cfg = _common.script_cfg(default_cell=_common.FORCED_DEFAULT_CELL)   # CELL env var wins
 # The Laplace marginal-SD verdict below is computed over the single-frequency 41-feature Fisher. A
 # chi posterior conditions on a different feature set entirely, so the same arithmetic would produce
 # a confident, meaningless "identified / not identified" call. Refuse rather than mislead.
 _common.assert_not_chi(cfg, "identifiability_offgt")
+_common.assert_forced(cfg, "identifiability_offgt")
 _common.describe_features(cfg)
 dtype, device = cfg.hw.dtype, cfg.hw.device
 N_obs = int(cfg.T_obs / cfg.dt_exp)

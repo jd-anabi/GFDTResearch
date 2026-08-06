@@ -27,11 +27,12 @@ M = int(os.environ.get("M", "16"))      # ensemble size per f_max point
 N_GRID = int(os.environ.get("NGRID", "13"))
 torch.manual_seed(0)
 
-cfg = _common.script_cfg(os.environ.get("CELL", "Resources/Cells/nadrowski/cell.txt"))
+cfg = _common.script_cfg(default_cell=_common.FORCED_DEFAULT_CELL)   # CELL env var wins
 # The whole point of this script is which of the 41 single-frequency features tracks f_max -- and
 # Group G, where much of that signal lives, is ZEROED in chi mode. Reporting a Group-G feature as the
 # best handle for a chi run would be actively misleading, so refuse rather than mislead.
 _common.assert_not_chi(cfg, "diagnose_fmax")
+_common.assert_forced(cfg, "diagnose_fmax")
 _common.assert_nadrowski(cfg, "FMAX_IDX below is a fixed Nadrowski column index")
 _common.describe_features(cfg)
 dtype, device = cfg.hw.dtype, cfg.hw.device

@@ -63,9 +63,15 @@ HELP = {
                 "ceiling: a single passive trace sees only the PRODUCTS D·A_nd and (λ/k)·τ, whereas "
                 "the shape of χ(ω) separates κ, λ, x_scale and t_scale individually. Costs about "
                 "(K+1)/2× the training time. Training and inference must both use it.",
-    "chi_k": "K — how many drive frequencies the χ(ω) curve is measured at (and therefore how many "
-             "forced recordings an experiment must supply). More frequencies resolve the curve better "
-             "but cost linearly more simulation.",
+    "chi_k": "How many drive frequencies THIS observation is measured at, and therefore how many "
+             "forced recordings an experiment must supply. More probes resolve the curve better but "
+             "cost linearly more simulation. It does NOT have to match the posterior: the network "
+             "conditions on a probe SET, so it accepts any count up to the slot capacity below.",
+    "chi_k_pad": "Probe SLOTS the network reserves — its capacity, not a probe count. Training draws "
+                 "probe counts from 2 up to this, so the encoder learns to handle any of them. It is "
+                 "FROZEN into every posterior trained with it (it fixes the input width), so raising "
+                 "it later means retraining; pick generously. Costs only input columns — the "
+                 "encoder's parameter count does not depend on it.",
     "chi_f0": "Non-dimensional drive amplitude for every χ probe. χ = response/drive is independent of "
               "amplitude in the linear regime, so this only needs to be small enough to stay linear "
               "(≲0.1) and large enough for the lock-in to beat the noise.",
@@ -98,8 +104,8 @@ HELP = {
                       "information — off is exactly the plain pipeline. Cost: computing the rotation runs "
                       "extra simulations at several operating points BEFORE training starts. Results so "
                       "far have been a redistribution rather than a clean win, so it is worth comparing "
-                      "SBC with it on and off. Unavailable in χ(ω) mode, which already targets that "
-                      "degeneracy directly.",
+                      "SBC with it on and off. Available in all three observation modes; under χ(ω) the "
+                      "Fisher is built over the χ features, which costs (K+1)/2× a forced-mode rotation.",
 }
 
 
@@ -219,9 +225,11 @@ class ConfigPanel(_StagePanel):
         self.chi_k = IntField(config.CHI_N_FREQS)
         self.chi_f0 = FloatField(config.CHI_F0)
         self.chi_range = _ChiRangeRow(*config.CHI_FREQ_BOUNDS)
+        self.chi_pad = IntField(config.CHI_K_PAD)
         self.chi_check.toggled.connect(lambda _on: self._sync_chi_enabled())
         form.addRow(with_badge(self.chi_check, HELP["chi_mode"]))
-        add_help_row(form, "χ frequencies K", self.chi_k, HELP["chi_k"])
+        add_help_row(form, "χ probes per observation", self.chi_k, HELP["chi_k"])
+        add_help_row(form, "χ probe slots (capacity)", self.chi_pad, HELP["chi_k_pad"])
         add_help_row(form, "χ drive F₀ (ND)", self.chi_f0, HELP["chi_f0"])
         add_help_row(form, "χ frequency range", self.chi_range, HELP["chi_range"])
 
@@ -234,16 +242,17 @@ class ConfigPanel(_StagePanel):
         self._sync_chi_enabled()
 
     def _sync_chi_enabled(self):
-        """The three χ knobs are meaningless unless χ-mode is on; the rotation is the other way round --
-        it is UNAVAILABLE in χ-mode, so grey it out rather than let a ticked box quietly do nothing."""
+        """The three χ knobs are meaningless unless χ-mode is on. The rotation is available in ALL
+        THREE observation modes -- it used to be greyed out under χ, on the assumption that χ already
+        decorrelated what the rotation targets; measured on the master cell, χ leaves k~x_scale at
+        0.95 (vs 0.98 forced), so that assumption was wrong and the exclusion is gone."""
         on = self.chi_check.isChecked()
-        for w in (self.chi_k, self.chi_f0, self.chi_range):
+        for w in (self.chi_k, self.chi_pad, self.chi_f0, self.chi_range):
             w.setEnabled(on)
-        self.rot_check.setEnabled(not on)
+        self.rot_check.setEnabled(True)
         self.rot_check.setToolTip(
-            "Not available in χ(ω) mode: χ already decorrelates the parameters the rotation targets, and "
-            "rotating a χ posterior would need the χ features in the Fisher (not implemented)." if on
-            else "")
+            "In χ(ω) mode the Fisher is built over the χ feature set, which costs (K+1)/2× what a "
+            "forced-mode rotation does." if on else "")
 
     def _show_model_units(self, model: str):
         """Reflect the model's declared units, and seed the direct-entry box from them so switching to
@@ -323,7 +332,8 @@ class ConfigPanel(_StagePanel):
         draft = ConfigDraft(
             model=model, labels=model_labels, state_dep_drift=state_dep_drift, units_override=units,
             chi_mode=chi_on, chi_n_freqs=self.chi_k.value(), chi_f0=self.chi_f0.value(),
-            chi_freq_bounds=self.chi_range.value(), reparam_rotate=self.rot_check.isChecked())
+            chi_freq_bounds=self.chi_range.value(), chi_k_pad=self.chi_pad.value(),
+            reparam_rotate=self.rot_check.isChecked())
         self._screen.new_draft(draft)                # replaces the session + repoints Prior + re-gates
         extras = []
         if chi_on:
@@ -351,6 +361,7 @@ class ConfigPanel(_StagePanel):
         settings.set_bool(qs, "chi_mode", self.chi_check.isChecked())
         settings.set_bool(qs, "reparam_rotate", self.rot_check.isChecked())
         settings.save_field(qs, "chi_k", self.chi_k)
+        settings.save_field(qs, "chi_k_pad", self.chi_pad)
         settings.save_field(qs, "chi_f0", self.chi_f0)
         settings.save_field(qs, "chi_lo", self.chi_range.lo)
         settings.save_field(qs, "chi_hi", self.chi_range.hi)
@@ -370,6 +381,7 @@ class ConfigPanel(_StagePanel):
         self.chi_check.setChecked(settings.get_bool(qs, "chi_mode", False))
         self.rot_check.setChecked(settings.get_bool(qs, "reparam_rotate", config.REPARAM_ROTATE))
         settings.restore_field(qs, "chi_k", self.chi_k)
+        settings.restore_field(qs, "chi_k_pad", self.chi_pad)
         settings.restore_field(qs, "chi_f0", self.chi_f0)
         settings.restore_field(qs, "chi_lo", self.chi_range.lo)
         settings.restore_field(qs, "chi_hi", self.chi_range.hi)

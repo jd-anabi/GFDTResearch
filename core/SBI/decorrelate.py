@@ -3,8 +3,16 @@ Simulation-based Fisher eigenbasis for the decorrelating reparameterization (Tra
 
 V = eigenvectors of the latent Fisher F = J^T J, where J is the standardized feature-Jacobian
 w.r.t. the flow's latent coordinate z at the ground-truth operating point (perturb z -> T(z) ->
-simulate spontaneous + forced -> 41 features). Rotating the flow's coordinate by V decorrelates
-the (near-degenerate) posterior so the flow can calibrate it.
+simulate -> features). Rotating the flow's coordinate by V decorrelates the (near-degenerate)
+posterior so the flow can calibrate it.
+
+The Jacobian is built over THE FEATURES THE POSTERIOR ACTUALLY CONDITIONS ON, which differ by
+observation mode:
+    spontaneous  41 features (Groups A-F; Group G is zero-padded and contributes zero rows)
+    forced       41 features (Group G populated by the drive response)
+    chi          41 + 3K -- Groups A-F plus the chi(omega) block
+Getting that wrong is silent: a Fisher built over the single-frequency feature set describes a
+different experiment than the one being run, so V would decorrelate the wrong thing.
 
 No trained posterior is needed -- F comes from the simulator alone, so this generalizes to any
 model. V = I (REPARAM_ROTATE=False) recovers the plain pipeline exactly. Validated end-to-end by
@@ -17,8 +25,8 @@ import torch
 
 from core import forcing as _forcing
 from core.config import CHUNK_LEN, REPARAM_FISHER_M, REPARAM_FISHER_DZ, REPARAM_FISHER_POINTS
+from core.SBI import chi as _chi
 from core.SBI import pipeline
-from core.SBI.statistics import FEATURE_LABELS
 from core.SBI.reparam import build_inferred_bijection, fisher_eigenbasis
 
 
@@ -88,8 +96,16 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
     # A SPONTANEOUS config (no Forcing section in its bounds) has no drive to probe. The rotation is
     # still well-defined there -- the Fisher just measures how Groups A-F respond to a latent
     # perturbation, which is exactly the information such a posterior conditions on -- so branch rather
-    # than refuse. chi-mode is excluded upstream (build_posterior), not here.
+    # than refuse.
+    #
+    # chi mode used to be excluded upstream in build_posterior, on the stated grounds that "chi(omega)
+    # already attacks the degeneracy the rotation targets". MEASURED FALSE (scripts/degeneracy_map.py,
+    # master cell, 2026-08-05): k~x_scale is 0.98 in forced mode and 0.95 in chi mode -- essentially
+    # untouched -- and k / x_scale still hold the two worst unique handles (0.102 / 0.147) under chi.
+    # The rotation exists for exactly that alias, so chi mode now gets one too, built over the chi
+    # feature set. chi IGNORES the cell's own drive, so it is checked BEFORE has_drive below.
     has_drive = cfg.has_forcing
+    chi_mults = _chi.chi_multipliers_for(cfg) if cfg.chi_mode else None
     base_inits = cfg.inits_tensor if cfg.has_ground_truth else _default_inits(cfg, dtype, device)
     n_vars = base_inits.shape[-1]
     n_force_ch = _forcing.n_force_channels(cfg.model, cfg.forcing_idx, n_vars)
@@ -146,6 +162,41 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
         # manual_seed reseeds both and the simulation noise is drawn on `device`.
         fork_devices = [device] if device.type == "cuda" else []
         with torch.random.fork_rng(devices=fork_devices):
+            if cfg.chi_mode:
+                # [S(41, Group G zeroed) | chi FISHER features (4K)] -- NOT the conditioning block.
+                #
+                # The conditioning block carries `u = log(f_k/f_peak)` and a `mask`, and BOTH poison a
+                # Fisher. Here the placement is a deterministic multiplier grid, so `u` is
+                # theta-INDEPENDENT by construction: across the ensemble it takes ~two distinct float32
+                # values with std ~2.5e-8, and `fnoise = max(std, 1e-9)` does not protect against that.
+                # The central difference then writes entries of ORDER 1 -- the magnitude of a real
+                # standardized feature -- into up to K x P cells of the Jacobian that defines the
+                # coordinate system the flow trains in, while V stays orthogonal to 1e-4 and every test
+                # passes. `logcyc` is kept: it varies genuinely with theta through f_peak.
+                zero = torch.zeros((mm, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                torch.manual_seed(2)
+                xs_d = xsc * s(zero).double() + xof
+                spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
+                                           device=device, spontaneous_only=True).numpy()
+                # SEED AGAIN, right here. gen_chi_block runs K MORE simulations that are otherwise
+                # completely unseeded, so the zp/zm arms of the central difference would see different
+                # chi noise and the derivative would be swamped -- a plausible-looking, meaningless V.
+                # Same trap as scripts/degeneracy_map.py (PRISM_HANDOFF trap X3).
+                torch.manual_seed(3)
+                # resolution_filter=False is MANDATORY here. The filter depends on f_peak, which
+                # depends on theta, so a probe can CROSS the threshold between the +dz and -dz arms --
+                # a mask step of 1 divided by fnoise's 1e-9 floor puts ~1e9 into J, and V becomes that
+                # discontinuity rather than the Fisher geometry.
+                chi_v, _u_v, logcyc_v, _valid_v = pipeline.gen_chi_raw(
+                    model=cfg.model, params_nd=nd, rescale=rv, x_spont_dim=xs_d.to(dtype),
+                    t_fine=t_fine, inits=base_inits.expand(mm, -1).contiguous(),
+                    rescale_idx=cfg.rescale_idx, n_segs=n_segs, steady_idx=cfg.steady_idx,
+                    subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
+                    multipliers=chi_mults, f0_nd=cfg.chi_f0,
+                    state_dep_drift=cfg.state_dep_drift, resolution_filter=False,
+                    dtype=dtype, device=device)
+                fisher_block = _chi.fisher_features(chi_v, logcyc_v)
+                return np.concatenate([spont, fisher_block.double().cpu().numpy()], axis=1)
             if has_drive:
                 force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(mm, -1), t_fine, rv,
                                                                cfg.forcing_idx, cfg.rescale_idx)
@@ -174,7 +225,9 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
             return None
         fnoise = np.maximum(f0.std(0), 1e-9)
         z0 = T.inv(theta_row)
-        J = np.zeros((len(FEATURE_LABELS), P))
+        # Row count from the ACTUAL feature width, not len(FEATURE_LABELS): chi mode returns 41 + 3K,
+        # and hardcoding 41 would have silently truncated the chi block out of the Jacobian.
+        J = np.zeros((f0.shape[1], P))
         for i in range(P):
             zp = z0.clone(); zp[i] += dz
             zm = z0.clone(); zm[i] -= dz

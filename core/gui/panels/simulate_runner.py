@@ -39,14 +39,20 @@ from ..streams import WorkerCancelled
 def build_stream_config(model: str, cell_path: str):
     """Build a ground-truth ``SimConfig`` from a model + cell pick, forced onto CPU.
 
-    Mirrors the inference simulated path (``inference_tabs._run_simulated_inference``): the bounds file is
-    the per-model sibling of the cell (``Bounds/<model>/<cell>.txt``), so no separate bounds pick is
-    needed. ``make_sim_config`` defaults ``hw`` to ``detect_device()`` (CUDA on a capable box); the
-    batch-1 sequential Euler loop is CPU-optimal AND every tensor here must share one device, so force
-    CPU right after building. Raises on a missing sibling bounds file / out-of-bounds cell -- the panel
-    catches it as a config error.
+    Mirrors the inference simulated path (``inference_tabs._run_simulated_inference``): the bounds file
+    is RESOLVED from the cell by ``cli.resolve_bounds_for_cell`` (same-named sibling, else the model's
+    shared ``master.txt``), so no separate bounds pick is needed. ``make_sim_config`` defaults ``hw``
+    to ``detect_device()`` (CUDA on a capable box); the batch-1 sequential Euler loop is CPU-optimal
+    AND every tensor here must share one device, so force CPU right after building. Raises on an
+    unresolvable bounds file / out-of-bounds cell -- the panel catches it as a config error.
     """
-    bounds_file = BOUNDS_PATH / model.lower() / Path(cell_path).name
+    bounds_file = cli.resolve_bounds_for_cell(cell_path, model)
+    if bounds_file is None:
+        raise ValueError(
+            f"No bounds file governs '{Path(cell_path).name}': tried the sibling "
+            f"{BOUNDS_PATH / model.lower() / Path(cell_path).name} and the shared "
+            f"{BOUNDS_PATH / model.lower() / cli.MASTER_BOUNDS_NAME}. Bounds declare which "
+            f"parameters are inferred and in what order, so one is required.")
     spec = registry.get(model)
     if spec is not None and spec.is_user_model:
         labels = list(spec.labels)

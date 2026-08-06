@@ -20,6 +20,7 @@ class ConfigDraft:
     chi_n_freqs: Any = None
     chi_f0: Any = None
     chi_freq_bounds: Any = None
+    chi_k_pad: Any = None               # probe-slot capacity; frozen into any posterior trained with it
     reparam_rotate: Any = None
 
     def make_config(self, bounds_path: str = None, *, bounds_dicts=None):
@@ -31,7 +32,8 @@ class ConfigDraft:
             self.model, self.labels, self.state_dep_drift, bounds_path, bounds_dicts=bounds_dicts,
             units_override=self.units_override, chi_mode=self.chi_mode,
             chi_n_freqs=self.chi_n_freqs, chi_f0=self.chi_f0,
-            chi_freq_bounds=self.chi_freq_bounds, reparam_rotate=self.reparam_rotate)
+            chi_freq_bounds=self.chi_freq_bounds, chi_k_pad=self.chi_k_pad,
+            reparam_rotate=self.reparam_rotate)
 
 
 @dataclass

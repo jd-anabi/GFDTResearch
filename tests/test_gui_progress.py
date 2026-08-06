@@ -550,12 +550,18 @@ def test_fdt_panel_guard_translates_model_error_and_gate_admits_builtins():
         assert registry.fdt_support(m) == (True, ""), m
 
 
-def test_a_cell_with_no_bounds_sibling_does_not_brick_the_gui():
-    """Dropping a cell into Resources/Cells/<model>/ WITHOUT a sibling Resources/Bounds/<model>/<same>
-    -- the natural 'add my cell' action -- makes cli._parse_cell raise a bare ValueError (NOT a
-    UnitParseError). CrossValPanel prefills from _parse_cell in __init__, so that exception used to
-    escape CrossValPanel() -> MainWindow() -> build_app(), and `python -m core.gui` died before the
-    window ever appeared -- before app.py's excepthook was even installed."""
+def test_an_unparseable_cell_does_not_brick_the_gui():
+    """Dropping a cell into Resources/Cells/<model>/ that cli._parse_cell cannot read makes it raise a
+    bare ValueError (NOT a UnitParseError). CrossValPanel prefills from _parse_cell in __init__, so
+    that exception used to escape CrossValPanel() -> MainWindow() -> build_app(), and
+    `python -m core.gui` died before the window ever appeared -- before app.py's excepthook was even
+    installed.
+
+    The probe used to be a cell with no sibling bounds file, which is no longer unparseable: a cell
+    without a sibling now resolves to the model's shared master.txt (cli.resolve_bounds_for_cell), so
+    the natural 'add my cell' action WORKS rather than merely degrading. The failure mode this test
+    guards still exists though -- a cell that omits a parameter its bounds file declares -- so probe
+    with that instead."""
     import shutil
     from pathlib import Path
 
@@ -563,11 +569,14 @@ def test_a_cell_with_no_bounds_sibling_does_not_brick_the_gui():
     from core.gui import settings as st
 
     _app()
-    src = Path(CELL_PATH) / "nadrowski" / "cell.txt"
+    src = Path(CELL_PATH) / "nadrowski" / "master_weak.txt"
     if not src.exists():
         return                                   # nothing to probe with
-    probe = src.with_name("aaa_probe_no_bounds.txt")   # sorts first => the picker selects it
-    shutil.copyfile(src, probe)
+    probe = src.with_name("aaa_probe_unparseable.txt")   # sorts first => the picker selects it
+    # Drop a declared ND parameter: bounds resolve fine, but the merge cannot fill the value.
+    kept = [ln for ln in src.read_text(encoding="utf-8").splitlines()
+            if not ln.strip().startswith("beta ")]
+    probe.write_text("\n".join(kept) + "\n", encoding="utf-8")
     try:
         # Isolate from the developer's real QSettings store. MainWindow() -> CrossValPanel.__init__
         # restores its saved cell selection; a cell saved from a previous GUI session would be reloaded
@@ -1177,6 +1186,7 @@ def test_posterior_from_scratch_is_gated_on_a_prior():
 def test_inference_pickers_repoint_from_draft_and_config():
     """The Prior tab's BOUNDS picker follows the applied model (new_draft), and the Infer tab's CELL
     picker follows the BUILT config's model (install_config) -- neither tab has its own model combo."""
+    from core import config
     from core.gui.screens.inference_screen import InferenceScreen
     from core.gui.session import ConfigDraft
 
@@ -1194,6 +1204,7 @@ def test_inference_pickers_repoint_from_draft_and_config():
         force_params_dict = {}
         has_forcing = False   # mirrors SimConfig.has_forcing (empty force_params_dict)
         chi_mode = False      # mirrors SimConfig.chi_mode
+        chi_k_pad = config.CHI_K_PAD    # mirrors SimConfig.chi_k_pad (probe-slot capacity)
         observation_mode = "spontaneous"
 
     inf.install_config(Cfg())
@@ -1223,7 +1234,7 @@ def test_config_units_control_declares_units_and_validates_them():
     draft = screen.session.draft
     assert draft is not None and draft.units_override == ("nm", "s", "pN", "Hz")
 
-    bounds = BOUNDS_PATH / "nadrowski" / "cell_2.txt"
+    bounds = BOUNDS_PATH / "nadrowski" / "master.txt"
     if bounds.exists():
         cfg = draft.make_config(str(bounds))
         assert (cfg.time_unit, cfg.freq_unit) == ("s", "Hz")
@@ -1246,8 +1257,8 @@ def test_direct_entry_grids_round_trip_their_files():
     from core.gui.widgets.param_grid import BoundsGrid, ValuesGrid
 
     _app()
-    bounds = BOUNDS_PATH / "nadrowski" / "cell_2.txt"
-    cell = CELL_PATH / "nadrowski" / "cell_2.txt"
+    bounds = BOUNDS_PATH / "nadrowski" / "master.txt"
+    cell = CELL_PATH / "nadrowski" / "master_weak.txt"
     if not (bounds.exists() and cell.exists()):
         return                                                   # environment without Resources: skip
 
@@ -1448,13 +1459,16 @@ def test_simulate_heatmap_center_stays_off_the_edge_when_oscillating():
 def test_simulate_plan_stream_matches_generate_observations_arithmetic():
     """plan_stream must reproduce the pipeline's subsample/steady/total arithmetic so a streamed trace
     matches the observation the SBI pipeline would build from the same cell."""
-    from core.config import BOUNDS_PATH, CELL_PATH
+    from core.cli import resolve_bounds_for_cell
+    from core.config import CELL_PATH
     from core.gui.panels.simulate_runner import build_stream_config, plan_stream
 
     _app()
     cdir = CELL_PATH / "nadrowski"
+    # Resolve through the shared rule, not a same-named-sibling glob: the master cells deliberately
+    # share ONE bounds file, so a sibling-only filter would silently skip most of them.
     cells = [c for c in sorted(cdir.glob("*.txt"))
-             if (BOUNDS_PATH / "nadrowski" / c.name).exists()] if cdir.exists() else []
+             if resolve_bounds_for_cell(str(c)) is not None] if cdir.exists() else []
     if not cells:
         return                                             # environment without Resources: skip, don't fail
 
@@ -1695,8 +1709,8 @@ def test_simconfig_units_and_inferred_labels_are_latex():
     from core import cli
     from core.config import BOUNDS_PATH, CELL_PATH, VALID_LABELS, VALID_MODELS
 
-    cell = CELL_PATH / "nadrowski" / "cell_2.txt"
-    bounds = BOUNDS_PATH / "nadrowski" / "cell_2.txt"
+    cell = CELL_PATH / "nadrowski" / "master_weak.txt"
+    bounds = BOUNDS_PATH / "nadrowski" / "master.txt"
     if not (cell.exists() and bounds.exists()):
         return                                                             # environment without Resources: skip
     cfg = cli.make_sim_config("NADROWSKI", VALID_LABELS[VALID_MODELS.index("NADROWSKI")], True, str(bounds))

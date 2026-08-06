@@ -55,7 +55,7 @@ from PIL import Image
 
 # --- CONFIG (env-overridable; see the Env: line above) --------------------------------------------
 MODEL       = "NADROWSKI"
-CELL        = "Resources/Cells/nadrowski/cell_2.txt"
+CELL        = "Resources/Cells/nadrowski/master_spont.txt"
 N_VIDEOS    = int(os.environ.get("N_VIDEOS", 5000))
 T_OBS_S     = float(os.environ.get("T_OBS_S", 5.0))       # seconds of steady state per video
 VIDEO_FPS   = float(os.environ.get("VIDEO_FPS", 500.0))   # TIFF pages per second of signal
@@ -163,7 +163,7 @@ def simulate_all(cfg, plan, lams):
             for step in range(0, plan.total_steps, CHUNK):
                 m = min(CHUNK, plan.total_steps - step)
                 t_chunk = frame_time_grid(t_now, m, plan.dt_nd, dtype, device)
-                # cell_2 is unforced (amp=freq=0) so this is all zeros -- built anyway to keep the
+                # master_spont is unforced (amp=freq=0) so this is all zeros -- built anyway to keep the
                 # (B, n_channels, T) shape contract honest for forced cells.
                 sim.sde.force = pipeline.build_nondim_sin_force_tensor(
                     forcing_b, t_chunk, rescale_b, plan.forcing_idx, plan.rescale_idx)

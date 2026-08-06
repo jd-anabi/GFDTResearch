@@ -246,12 +246,74 @@ REPARAM_LOG_PARAMS = []   # ALL-LINEAR box (the keeper posterior_07012026's coor
 # (single-frequency forcing, or spontaneous-only), so this is fully optional and additive.
 CHI_MODE = False
 CHI_N_FREQS = 6                # K: number of single-tone drive frequencies (recordings) per observation.
-CHI_FREQ_BOUNDS = (0.1, 10.0)  # log-spaced multipliers of the measured spontaneous peak Omega_0 spanned
+CHI_FREQ_BOUNDS = (0.03, 0.3)  # log-spaced multipliers of the measured spontaneous peak Omega_0 spanned
                                # by the K-frequency grid (mirrors FDTConfig.freq_bounds).
-CHI_K_MAX = 24         # upper bound on K accepted by the GUI. Cost is linear in K (each probe
-                       # is another full simulation per observation) and the Infer tab grows one
-                       # file-picker row per probe frequency.
-CHI_F0 = 0.2                   # ND drive amplitude for every chi probe. Driving at a FIXED ND amplitude
+                               #
+                               # SUB-RESONANCE ONLY, and that is a MEASUREMENT, not a preference.
+                               # scripts/chi_f0_sweep.py on the master cell (M=24 seeds), sweeping drive
+                               # amplitude against probe frequency, found |chi| reproducible ONLY below
+                               # ~0.25x Omega_0:
+                               #     0.05x  CV 0.026     0.1x  CV 0.029     0.2x  CV 0.055   (usable)
+                               #     0.3x   CV 0.22      0.5x  CV 0.21      0.7x  CV 0.47    (not)
+                               #     1x / 2x / 10x: CV 0.36-0.73 at EVERY amplitude tried (0.01 .. 0.3)
+                               # and -- the decisive part -- the high-multiplier CV does NOT improve from
+                               # T_obs 5 s to 25 s. A noise-limited lock-in would fall by sqrt(5) ~ 2.2x;
+                               # it does not move. So that variability is SYSTEMATIC, not statistical:
+                               # same theta, different noise seed, genuinely different chi. Neither a
+                               # stronger drive nor a longer recording can recover those probes.
+                               #
+                               # The old (0.1, 10.0) put 8 of 10 probes at K=10 in that regime -- each
+                               # costing a full simulation per observation. That is the direct explanation
+                               # for posterior_chi_08042026 (archived): flat SBC and a clean PPC, because
+                               # the flow correctly learned those features carry nothing, while every ND
+                               # marginal stayed at the prior.
+                               #
+                               # OPEN: the sub-resonance branch is close to the static compliance, so it may
+                               # carry chi's MAGNITUDE (x_scale/f_scale, already well identified) without the
+                               # SHAPE that was supposed to separate kappa/lambda -- the shape lives near and
+                               # above resonance, which is exactly the unusable region. Check with
+                               # scripts/degeneracy_map.py before spending another training run.
+CHI_K_MAX = 24         # upper bound on CHI_K_PAD accepted by the GUI -- a CAPACITY knob. It used to
+                       # bound K itself; under the set layout K is a property of an OBSERVATION and is
+                       # bounded by the pad, not by this.
+
+# === chi(omega) SET CONDITIONING (layout 2) ===
+# The chi block is a PADDED SET of probes, not a fixed 3K grid. Probe j occupies pad slot j as six
+# channels (u, log|chi|, cos, sin, logcyc, mask); the probe's FREQUENCY is carried explicitly in
+# channel 0 rather than being implied by its slot index. That is the whole point: the number of
+# probes and where they sit in frequency both become free, so a bench session that achieved 7
+# recordings at whatever frequencies it could manage conditions the same trained network as a
+# simulated 12-probe sweep.
+#
+# CHI_K_PAD IS FROZEN INTO EVERY ARTIFACT. sbi's reshape_to_batch_event bakes condition_shape into the
+# saved posterior, so raising it later invalidates every chi posterior -- which is why the sidecar
+# records it and the load path refuses a mismatch (a message, not a shape assert hours into a run).
+# The encoder's parameter count does NOT depend on it (phi/rho are per-element and pooled), so a
+# generous pad costs only 6*K_PAD input columns. Choose once.
+CHI_LAYOUT = 2         # layout version, written to the sidecar. 1 = the retired fixed-3K grid.
+CHI_ELEM_W = 6         # channels per pad slot. A LITERAL -- never derive it from the channel tuple.
+CHI_K_PAD = 12         # pad capacity -> block width 72, conditioning width 42 + 72 = 114
+CHI_K_MIN_TRAIN = 2    # floor of the per-batch probe-count draw
+CHI_MIN_CYCLES = 2.0   # a probe is MASKED (never moved, never dropped) below this many drive cycles
+                       # inside the segment it was locked in over. A lock-in over a fraction of a cycle
+                       # returns the demeaned trace's residual drift plus spontaneous 1/f content:
+                       # finite, in range, and REPRODUCIBLE -- which is exactly why it survived the
+                       # chi_f0_sweep CV screen at 0.05x. It is not a susceptibility. 2.0 rather than a
+                       # larger floor because measurement refuses one: at T=5s, mult=0.03 the probe has
+                       # 3.39 cycles and the BEST |chi| CV in the sweep (0.024), so a floor of 8 would
+                       # delete the best probe in the experiment.
+CHI_UHAT_MAX = 1.25    # band-normalised |u_hat| beyond which a probe is masked (packer) or refused
+                       # (experimental path). Replaces clamping, which silently moved probes.
+# Encoder geometry. Functions of CHI_ELEM_W and design choice ONLY -- never of CHI_K_PAD, or the
+# parameter count would change with the pad and no two pads could share a checkpoint.
+CHI_PHI_DIM = 64
+CHI_BIN_DIM = 16
+CHI_SET_OUT = 64
+CHI_RHO_HIDDEN = 128
+CHI_KNOTS = (-1.0, 0.0, 1.0)   # fixed band-normalised quadrature knots (Nadaraya-Watson)
+CHI_KNOT_SIGMA = 0.6
+CHI_KNOT_SHRINK = 0.5          # shrinkage of an under-covered knot toward zero
+CHI_F0 = 0.15                  # ND drive amplitude for every chi probe. Driving at a FIXED ND amplitude
                                # (dimensional amp = CHI_F0 * f_scale, which build_nondim divides back to
                                # CHI_F0) keeps the lock-in SNR uniform across the f_scale prior, and models
                                # an experimentalist who scales the physical drive to the cell. chi =
@@ -272,8 +334,17 @@ CHI_F0 = 0.2                   # ND drive amplitude for every chi probe. Driving
                                #                which IS the shape information the flow conditions on)
                                #     ND >=0.5 -> even steadier, but entrainment saturates |chi| (9.2 -> 1.4
                                #                at Omega_0 from 0.05 -> 1.0), compressing its theta-dependence
-                               # So 0.2 balances lock-in SNR against saturation. TUNABLE per config in the
-                               # Config tab; re-measure for a cell with a very different Q or noise level.
+                               #
+                               # RE-MEASURED 2026-08-05 on the master cell (scripts/chi_f0_sweep.py), over
+                               # the SUB-RESONANCE band this grid now spans. Two bounds, not one:
+                               #   too small -> CV rises (0.05x: CV 0.090 at F0=0.05 vs 0.026 at F0=0.15)
+                               #   too large -> the drive ENTRAINS the bundle, which abandons its own rhythm
+                               #                and follows the drive, so chi reports the drive back to
+                               #                itself. Onset at 1.4x detune is F0 = 0.2 -- the OLD default.
+                               # 0.15 is the largest amplitude that is still reproducible everywhere in the
+                               # band while leaving the bundle running free (own peak >= 84% of undriven at
+                               # every probe from 0.05x to 0.2x). TUNABLE per config in the Config tab;
+                               # re-measure for a cell with a very different Q or noise level.
 
 # Cycles of the observation's own oscillation shown in the time-domain posterior-overlay figures. The
 # window is derived per observation from its measured peak frequency, so this stays meaningful whatever
@@ -335,7 +406,11 @@ class SimConfig:
     # cannot silently reinterpret an existing run. default_factory reads the module value LIVE at
     # construction, so the CLI still picks up config.CHI_* edits without passing anything.
     chi_mode: bool = False
+    # chi_n_freqs is now "probes this OBSERVATION supplies" -- it no longer sets any width. chi_k_pad
+    # is the NETWORK's slot capacity and is what every width is derived from, so a posterior trained
+    # with K drawn over 2..12 loads against a config at chi_n_freqs = 4 or 9 with no guard loosened.
     chi_n_freqs: int = field(default_factory=lambda: CHI_N_FREQS)
+    chi_k_pad: int = field(default_factory=lambda: CHI_K_PAD)
     chi_f0: float = field(default_factory=lambda: CHI_F0)
     chi_freq_bounds: tuple = field(default_factory=lambda: CHI_FREQ_BOUNDS)
 
@@ -365,6 +440,26 @@ class SimConfig:
 
     # Hardware
     hw: DeviceConfig = field(default_factory=detect_device)
+
+    def __post_init__(self):
+        """Reject a chi geometry that cannot be represented, AT CONFIG BUILD.
+
+        K > chi_k_pad has no valid packing, and the natural failure without this is a raise from
+        deep inside pack_probe_block on the FIRST batch -- i.e. after the prior has been built and
+        the training loop has started. Both numbers are named so the message says which knob to move.
+        """
+        if not self.chi_mode:
+            return
+        if not (2 <= int(self.chi_k_pad) <= CHI_K_MAX):
+            raise ValueError(
+                f"chi_k_pad={self.chi_k_pad} is out of range: it must be at least 2 and at most "
+                f"CHI_K_MAX={CHI_K_MAX}. It is the network's probe-slot capacity and is frozen into "
+                f"every posterior trained with it.")
+        if not (1 <= int(self.chi_n_freqs) <= int(self.chi_k_pad)):
+            raise ValueError(
+                f"chi_n_freqs={self.chi_n_freqs} probes cannot be packed into chi_k_pad="
+                f"{self.chi_k_pad} slots. Lower the probe count, or raise the pad (which invalidates "
+                f"posteriors trained at the current pad).")
 
     # --- Derived properties ---
     @property

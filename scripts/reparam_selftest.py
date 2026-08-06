@@ -30,7 +30,7 @@ from core.SBI import pipeline
 from core.SBI.reparam import (build_inferred_bijection, build_rotated_bijection,
                               fisher_eigenbasis, RotatedLatentPrior)
 
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
+CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/master_spont.txt")
 POST = os.environ.get("POST", "posterior_3d.pt")
 M = int(os.environ.get("M", "32"))
 M_NOISE = int(os.environ.get("M_NOISE", "128"))
@@ -39,7 +39,8 @@ SEED = int(os.environ.get("SEED", "0"))
 torch.manual_seed(SEED)
 
 _common.enable_warnings()
-cfg = _common.script_cfg()
+cfg = _common.script_cfg(default_cell=_common.FORCED_DEFAULT_CELL)   # CELL env var wins
+_common.assert_forced(cfg, "reparam_selftest")
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 P = nd_dim + len(cfg.rescale_params)

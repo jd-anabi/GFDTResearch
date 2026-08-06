@@ -7,6 +7,9 @@ Exercises the exact rotated training path that orchestrator.build_posterior now 
   -> save V sidecar -> reload + rebuild rotated T -> sample (in-box, finite).
 Confirms the integration runs before a full retrain. Writes/removes temp files _smoke_rot*.
 
+Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_cfg):
+  BASE_POST  posterior to inherit the latent prior from  (default posterior_3d.pt)
+
 Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/reparam_wiring_smoke.py
 """
 import os
@@ -28,14 +31,26 @@ from core.SBI.reparam import (build_inferred_bijection, build_rotated_bijection,
 
 torch.manual_seed(0)
 _common.enable_warnings()
-cfg = _common.script_cfg("Resources/Cells/nadrowski/cell_2.txt")
+cfg = _common.script_cfg()          # CELL env var, else _common.DEFAULT_CELL
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 T = build_inferred_bijection(cfg)
 force_prior = orchestrator._build_forcing_prior(cfg)
 
-# latent inferred prior (inherit the structure from posterior_3d, as build_posterior would have it)
-base = torch.load(str(POSTERIOR_PATH / "posterior_3d.pt"), weights_only=False).prior.gen_dist
+# Latent inferred prior: inherit the structure from an EXISTING posterior, as build_posterior would
+# have it. Inheriting rather than calling build_prior is deliberate -- the stability screen is the
+# expensive part of a prior build and this script is meant to be a ~1 min wiring check.
+# Resources/Posteriors/ is empty after the 2026-08-05 consolidation, so say so instead of dying on a
+# raw FileNotFoundError three imports deep.
+BASE_POST = os.environ.get("BASE_POST", "posterior_3d.pt")
+_base_path = POSTERIOR_PATH / BASE_POST
+if not _base_path.exists():
+    have = sorted(p.name for p in POSTERIOR_PATH.glob("*.pt") if not p.name.endswith(".rot.pt"))
+    raise SystemExit(
+        f"[smoke] no base posterior at {_base_path}. This script inherits its latent prior from an\n"
+        f"        existing posterior rather than rebuilding one (the stability screen would dominate\n"
+        f"        a wiring check). Set BASE_POST=<name>.pt to one of: {have or '(none on disk)'}.")
+base = torch.load(str(_base_path), weights_only=False).prior.gen_dist
 print("[smoke] computing Fisher rotation V ...", flush=True)
 V = decorrelate.build_latent_fisher_rotation(cfg, T)
 print(f"[smoke] V shape={tuple(V.shape)}  orthogonality err={(V.T @ V - torch.eye(V.shape[0], device=device, dtype=dtype)).abs().max():.2e}", flush=True)
@@ -45,9 +60,7 @@ T_train = build_rotated_bijection(T, V)
 
 forcing_dim = orchestrator.expected_forcing_dim(cfg)   # shared width rule (chi-aware)
 input_dim = len(statistics.FEATURE_LABELS) + 1
-net = embedded_network.EmbeddedNet(input_dim, 3 * input_dim // 2, (5 * input_dim // 2, 2 * input_dim),
-                                   forcing_dim=forcing_dim, forcing_layer_dims=(forcing_dim * 4, forcing_dim * 2),
-                                   merge_layer_dim=2 * input_dim)
+net = orchestrator.build_embedding_net(cfg, input_dim, forcing_dim)   # shared construction site
 training_params = {"model": cfg.model, "prior": rotated_prior, "t": cfg.t, "run_size": 256, "num_runs": 2,
                    "steady_idx": cfg.steady_idx, "dt_nd_min": cfg.dt_nd_min, "dt_exp": cfg.dt_exp,
                    "t_min_exp": cfg.t_min_exp, "t_max_exp": cfg.t_max_exp, "t_scale_bounds": cfg.t_scale_bounds,

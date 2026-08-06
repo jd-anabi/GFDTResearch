@@ -18,7 +18,7 @@ Prints a verdict + the targeted fix. NB: f_scale is a RESCALE param, so log-ing 
 the (analytic) rescale bijection, NOT the ND GMM -> build_posterior's guard passes with the
 existing linear ND prior (no rebuild). A retrain is still needed to CONFIRM the fix.
 
-Env: POST (default posterior_07012026.pt), CELL (default nadrowski/cell_2.txt), NS (prior samples).
+Env: POST (default posterior_07012026.pt), CELL (default nadrowski/master_spont.txt), NS (prior samples).
 Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/diagnose_fscale.py
 """
 import os
@@ -35,7 +35,6 @@ from core.config import (SimConfig, DT_EXP_S, T_MIN_EXP_S, T_MAX_EXP_S, detect_d
                          NADROWSKI_LABELS, POSTERIOR_PATH)
 from core.SBI.reparam import build_inferred_bijection, build_rescale_bijection
 
-CELL = os.environ.get("CELL", "Resources/Cells/nadrowski/cell_2.txt")
 POST = os.environ.get("POST", "posterior_07012026.pt")
 NS = int(os.environ.get("NS", "20000"))
 

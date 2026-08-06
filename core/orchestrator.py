@@ -4,6 +4,7 @@ Pipeline orchestration for the SBI pipeline.
 No input() calls live here -- all user interaction is delegated to cli.py.
 This module owns the pipeline flow: observe -> prior -> posterior -> validate.
 """
+import hashlib
 import importlib
 import math
 import time
@@ -26,7 +27,7 @@ from .config import (
     TRAINING_STOP_AFTER_EPOCHS, TRAINING_MAX_NUM_EPOCHS, TRAINING_SHOW_SUMMARY, FORCING_SI_UNITS,
     EYE_TEST_CYCLES,
 )
-from . import cli, forcing
+from . import cli, config, forcing
 from .Helpers import helpers, visualizers, file_manager, labels
 from .SBI import embedded_network, pipeline, analysis, decorrelate, chi, overlay
 from .SBI.Priors import sbi_prior_wrapper
@@ -228,14 +229,23 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
     # with the summary pathway. Keep this order in sync with gen_training_data and build_posterior.
     log_T_obs = torch.tensor([[math.log(cfg.T_obs)]], dtype=cfg.hw.dtype)
     if cfg.chi_mode:
-        # [S(41, Group G zeroed) | log(T) | chi(3K)] -- K single-tone probes at mult_k * Omega_0.
+        # [S(41, Group G zeroed) | log(T) | padded probe SET] -- probes at mult_k * Omega_0.
+        # An OBSERVATION uses the deterministic grid, not the training sampler's jitter: this is a
+        # specific measurement, and the PPC has to be able to reproduce its exact drive frequencies.
         obs_stats = pipeline.gen_stats(x_spont_dim, None, cfg.dt_exp, None, None, None,
                                        device=cfg.hw.device, spontaneous_only=True)
-        chi_block = pipeline.gen_chi_block(
+        obs_mults = chi.chi_multipliers_for(cfg)
+        chi_block, _chi_mask = pipeline.gen_chi_block(
             cfg.model, cfg.params_tensor, rescale_gt, x_spont_dim, t_fine, cfg.inits_tensor,
             cfg.rescale_idx, n_segs_gt, cfg.steady_idx, subsample_factor, N_obs, cfg.dt_exp,
-            chi.chi_multipliers_for(cfg), cfg.chi_f0,
+            obs_mults, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
             state_dep_drift=cfg.state_dep_drift, dtype=cfg.hw.dtype, device=cfg.hw.device)
+        # Record the ABSOLUTE probe frequencies this observation was measured at, so the PPC drives
+        # the same experiment rather than re-deriving frequencies from each posterior sample's own
+        # f_peak -- which would simulate a different experiment and make the PPC agree for the wrong
+        # reason.
+        cfg.chi_obs_freqs = (obs_mults.to(cfg.hw.device)
+                             * chi.peak_freq(x_spont_dim, cfg.dt_exp).median()).detach()
         obs_stats = torch.cat([obs_stats, log_T_obs, chi_block.cpu()], dim=-1)
     elif cfg.has_forcing:
         obs_stats = pipeline.gen_stats(
@@ -252,6 +262,117 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
 
 
 # ── Step 2: Prior construction ──────────────────────────────────────────────
+def _find_nd_gmm(obj, _depth: int = 0):
+    """The latent ND MixtureSameFamily inside any of the prior wrappers, or None.
+
+    The same GMM is reachable by several paths depending on how it was built -- ProductPrior ->
+    TransformedDistribution -> base_dist (the PHYSICAL prior), SBIPriorWrapper -> ProductPrior
+    (the posterior's stored TRAINING prior), and RotatedLatentPrior around either -- so walk the
+    known containers rather than hard-coding one route that silently returns None for the others.
+    """
+    if isinstance(obj, torch.distributions.MixtureSameFamily):
+        return obj
+    if obj is None or _depth > 5:
+        return None
+    for attr in ("gen_dist", "base_dist", "base"):
+        found = _find_nd_gmm(getattr(obj, attr, None), _depth + 1)
+        if found is not None:
+            return found
+    for seq in ("distributions", "transforms"):
+        for item in (getattr(obj, seq, None) or []):
+            found = _find_nd_gmm(item, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _gmm_fingerprint(obj) -> str | None:
+    """Stable digest of an ND prior's GMM (component means + weights), or None if not found.
+
+    Identifies WHICH prior an artifact was built from. Component count alone is not enough -- two
+    runs over the same box produce different fits -- and the means are latent, so they cannot be
+    eyeballed. The digest is over float64 bytes, so it is exact rather than tolerance-based: this
+    answers "is this the same prior object", not "are these priors similar".
+    """
+    gmm = _find_nd_gmm(obj)
+    if gmm is None:
+        return None
+    means = gmm.component_distribution.loc.detach().cpu().to(torch.float64).contiguous()
+    weights = gmm.mixture_distribution.probs.detach().cpu().to(torch.float64).contiguous()
+    h = hashlib.sha256()
+    h.update(means.numpy().tobytes())
+    h.update(weights.numpy().tobytes())
+    return h.hexdigest()[:16]
+
+
+def _assert_prior_used_matches_posterior(posterior, inferred_prior, what: str) -> None:
+    """Refuse to run a posterior against a prior it was not trained with.
+
+    SBC draws theta* from the TRAINING prior; run against a different one it is not a calibration
+    measurement of this posterior at all, just a plot. The posterior carries its own training prior
+    (sbi stores it on the DirectPosterior), so this needs no sidecar and works for a posterior that
+    was trained moments ago and never saved. Unverifiable on either side => silence, not a false
+    alarm: legacy posteriors and hand-built stand-in priors both land there.
+    """
+    latent = getattr(posterior, "latent", posterior)
+    trained = _gmm_fingerprint(getattr(latent, "prior", None))
+    supplied = _gmm_fingerprint(inferred_prior)
+    if trained is None or supplied is None or trained == supplied:
+        return
+    raise ValueError(
+        f"{what}: the prior supplied is not the one this posterior was trained with "
+        f"(prior {supplied} vs posterior's {trained}). Load the prior that belongs to this "
+        f"posterior -- results computed against a different prior describe neither.")
+
+
+def _assert_prior_matches(cfg: SimConfig, path: str, choice: str) -> None:
+    """Fail LOUDLY when a saved ND prior does not belong to this config.
+
+    The latent GMM is fit in its box's OWN coordinate, so a prior is meaningful only against the
+    exact (model, parameter set + ORDER, box) it was built for. None of that was checked here, and
+    the consequences are silent rather than loud: the box edges rescale every sample the flow is
+    trained on, and a reordered parameter set mis-binds columns positionally. The one guard that did
+    exist lives in ``build_posterior`` and covers only the log-mask.
+
+    Legacy priors carry no ``model``/``param_keys``; those WARN rather than raise, because the box
+    comparison below is still exact and is the part that actually rescales the samples.
+    """
+    meta = file_manager.read_prior_metadata(path)
+    if not meta:
+        return                                    # pre-reparam file: nothing recorded to check
+
+    def _bad(what, got, want):
+        raise ValueError(
+            f"Prior '{choice}' does not match this configuration: {what} differs.\n"
+            f"  prior:  {got}\n  config: {want}\n"
+            f"A prior's GMM is fit in its own box coordinate, so loading it here would train the "
+            f"flow against a different distribution than the one the samples came from. Build a new "
+            f"prior for this bounds file, or pick the prior that belongs to it.")
+
+    if "model" in meta and str(meta["model"]) != cfg.model:
+        _bad("the model", meta["model"], cfg.model)
+    keys = list(cfg.params_dict.keys())
+    if "param_keys" in meta and list(meta["param_keys"]) != keys:
+        _bad("the ND parameter set or ORDER", list(meta["param_keys"]), keys)
+    if "lows" in meta and "highs" in meta:
+        want_lo = torch.tensor([b[0] for _, b in cfg.params_dict.values()], dtype=torch.float64)
+        want_hi = torch.tensor([b[1] for _, b in cfg.params_dict.values()], dtype=torch.float64)
+        got_lo = meta["lows"].detach().cpu().to(torch.float64)
+        got_hi = meta["highs"].detach().cpu().to(torch.float64)
+        if got_lo.shape != want_lo.shape:
+            _bad("the ND parameter COUNT", tuple(got_lo.shape), tuple(want_lo.shape))
+        if not (torch.allclose(got_lo, want_lo) and torch.allclose(got_hi, want_hi)):
+            diff = [f"{n}: prior ({lo:g}, {hi:g}) vs config ({wl:g}, {wh:g})"
+                    for n, lo, hi, wl, wh in zip(keys, got_lo.tolist(), got_hi.tolist(),
+                                                 want_lo.tolist(), want_hi.tolist())
+                    if lo != wl or hi != wh]
+            _bad("the ND box", "; ".join(diff), "the bounds file in use")
+    if "model" not in meta or "param_keys" not in meta:
+        warnings.warn(
+            f"Prior '{choice}' predates model/param_keys recording, so only its box could be "
+            f"verified. Re-save it to make it fully self-describing.", stacklevel=2)
+
+
 def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
                 *, save: bool = True, save_name: str | None = None, fig_sink=None) -> tuple[Distribution, Distribution]:
     """
@@ -286,6 +407,7 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     rescale_prior = _build_rescale_prior(cfg)
 
     if not build_new and choice is not None:
+        _assert_prior_matches(cfg, str(PRIOR_PATH / choice), choice)
         nd_prior = file_manager.load_mix_dist(str(PRIOR_PATH / choice), device=cfg.hw.device)
         visualizers.visualize_dist(nd_prior, labels=cfg.labels, title="Prior (loaded)", sink=fig_sink)
         nd_dim = len(cfg.params_dict)
@@ -460,11 +582,17 @@ def build_posterior(
     # The Fisher rotation probes a representative drive (decorrelate reads forcing_idx["amp"/…]); a
     # no-forcing model has no such params, so rotation is disabled for it. V=None is the plain pipeline.
     # Read the flag off the CONFIG, not the module: `from .config import REPARAM_ROTATE` snapshots at
-    # import, so a GUI toggle could never have taken effect. Works in BOTH the forced and spontaneous
-    # modes (decorrelate handles a driveless config). chi-mode stays unrotated: chi(omega) already
-    # attacks the degeneracy the rotation targets, and rotating it would need the chi features in the
-    # Fisher -- deferred deliberately, and the GUI greys the toggle out to say so.
-    rotate = cfg.reparam_rotate and not cfg.chi_mode
+    # import, so a GUI toggle could never have taken effect. Works in ALL THREE observation modes --
+    # decorrelate.feats builds its Jacobian over whichever feature set the mode conditions on.
+    #
+    # chi mode used to be excluded here, because "chi(omega) already attacks the degeneracy the
+    # rotation targets". That was never measured, and it is false: on the master cell k~x_scale is
+    # 0.98 forced vs 0.95 chi (scripts/degeneracy_map.py, 2026-08-05), i.e. chi leaves the dominant
+    # alias essentially intact while improving nearly everything else. The rotation exists for that
+    # alias, so chi gets one too. Cost note: the Fisher pays (1 + K) simulations per evaluation in chi
+    # mode instead of 2, so a rotation costs ~(K+1)/2 x what it does in forced mode -- REPARAM_FISHER_M
+    # and REPARAM_FISHER_POINTS are the knobs if that is too slow.
+    rotate = cfg.reparam_rotate
     if rotate:
         print("Computing decorrelating Fisher rotation (REPARAM_ROTATE=True)...")
         # Average the Fisher over the prior (not just GT) so the linear rotation is valid prior-wide.
@@ -491,9 +619,13 @@ def build_posterior(
         "state_dep_drift": cfg.state_dep_drift,
         "spontaneous_only": not cfg.has_forcing,
         "chi_mode": cfg.chi_mode,
-        "chi_n_freqs": cfg.chi_n_freqs,
+        # No "chi_n_freqs" here on purpose. It is the count an OBSERVATION supplies; training draws K
+        # per batch over [CHI_K_MIN_TRAIN, chi_k_pad] and subsets again per row, which is what makes
+        # one posterior serve any probe count. It used to be threaded in and silently ignored -- an
+        # invitation to "fix" gen_training_data into honouring it and destroy exactly that property.
         "chi_f0": cfg.chi_f0,
         "chi_freq_bounds": cfg.chi_freq_bounds,
+        "chi_k_pad": cfg.chi_k_pad,
         # _observation_inits, NOT cfg.inits_tensor: training is ground-truth-free, so a config built from
         # bounds alone (no cell loaded) has an empty inits_dict and cfg.inits_tensor would RAISE. The
         # fallback synthesizes the same model-default inits the training loop itself uses.
@@ -505,19 +637,13 @@ def build_posterior(
     # Conditioning layout is [S(x) | log(T) | forcing]. log(T) rides with the summary
     # pathway, so input_dim (the leading summary block) includes it; only the forcing
     # params form the separate forcing pathway.
-    # chi-mode routes the K-frequency chi(omega) block (3K features) through the EmbeddedNet's second
-    # pathway in place of the single-frequency forcing block.
+    # chi-mode routes the padded probe SET through the EmbeddedNet's second pathway in place of the
+    # single-frequency forcing block, as a permutation-invariant set encoder.
     forcing_dim = expected_forcing_dim(cfg)        # shared with the sidecar + the load-side mode guard
     from .SBI.statistics import FEATURE_LABELS
     input_dim = len(FEATURE_LABELS) + 1            # n_summary_stats + log(T); observation-independent
 
-    embedded_net = embedded_network.EmbeddedNet(
-        input_dim, 3 * input_dim // 2,
-        (5 * input_dim // 2, 2 * input_dim),
-        forcing_dim=forcing_dim,
-        forcing_layer_dims=(forcing_dim * 4, forcing_dim * 2),
-        merge_layer_dim=2 * input_dim,
-    )
+    embedded_net = build_embedding_net(cfg, input_dim, forcing_dim)
 
     sbi_prior = sbi_prior_wrapper.SBIPriorWrapper(train_prior)
 
@@ -559,15 +685,51 @@ def save_prior_artifacts(name: str, nd_prior, cfg: SimConfig, *, fig_sink=None) 
     Shared by build_prior (CLI, save=True) and a GUI's explicit "Save prior" control. With no
     fig_sink the corner plot falls back to plt.show() (a no-op under the GUI's Agg backend).
     """
-    file_manager.save_mix_dist(nd_prior, str(PRIOR_PATH / (name + ".pt")))
+    # model + the ND parameter ORDER travel with the file so _assert_prior_matches can refuse a
+    # cross-config load. Without them a prior is identifiable only by its box edges, which several
+    # cells happened to share.
+    file_manager.save_mix_dist(nd_prior, str(PRIOR_PATH / (name + ".pt")),
+                               model=cfg.model, param_keys=list(cfg.params_dict.keys()))
     visualizers.visualize_dist(nd_prior, labels=cfg.labels,
                                save_path=str(PLOT_PATH / (name + ".png")), title="Prior", sink=fig_sink)
 
 
 def expected_forcing_dim(cfg: SimConfig) -> int:
     """Width of the conditioning vector's forcing/chi block for this config. Single source of truth,
-    shared by build_posterior's EmbeddedNet, the save-side sidecar and the load-side mode guard."""
-    return chi.n_chi_features(cfg.chi_n_freqs) if cfg.chi_mode else len(cfg.force_params_dict)
+    shared by build_posterior's EmbeddedNet, the save-side sidecar and the load-side mode guard.
+
+    Under chi this is a function of the PAD, not of the probe count -- which is the one line that buys
+    K-agnosticism. A posterior trained with K drawn over 2..K_PAD loads against a config declaring any
+    other probe count with NO width guard loosened anywhere.
+    """
+    return chi.n_chi_features(cfg.chi_k_pad) if cfg.chi_mode else len(cfg.force_params_dict)
+
+
+def build_embedding_net(cfg: SimConfig, input_dim: int = None, forcing_dim: int = None):
+    """The ONE construction site for the conditioning network.
+
+    The sizing arithmetic used to be duplicated in two scripts as well as here, so a layout change
+    had three places to be wrong in. Under chi the forcing pathway's hidden dims are CONSTANTS
+    (the set encoder's geometry is independent of the pad, or no two pads could share a checkpoint);
+    everything else keeps the original forcing_dim-derived sizing byte-for-byte.
+    """
+    from .SBI.statistics import FEATURE_LABELS
+    input_dim = (len(FEATURE_LABELS) + 1) if input_dim is None else input_dim
+    forcing_dim = expected_forcing_dim(cfg) if forcing_dim is None else forcing_dim
+    if cfg.chi_mode:
+        return embedded_network.EmbeddedNet(
+            input_dim, 3 * input_dim // 2, (5 * input_dim // 2, 2 * input_dim),
+            forcing_dim=forcing_dim,
+            forcing_layer_dims=(config.CHI_PHI_DIM, config.CHI_SET_OUT),
+            merge_layer_dim=2 * input_dim,
+            chi_k_pad=cfg.chi_k_pad, chi_band=cfg.chi_freq_bounds,
+        )
+    return embedded_network.EmbeddedNet(
+        input_dim, 3 * input_dim // 2, (5 * input_dim // 2, 2 * input_dim),
+        forcing_dim=forcing_dim,
+        forcing_layer_dims=(forcing_dim * 4, forcing_dim * 2),
+        merge_layer_dim=2 * input_dim,
+    )
 
 
 def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
@@ -576,15 +738,65 @@ def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
 
     Without this the mismatch surfaced as a raw matrix-shape RuntimeError from inside EmbeddedNet's
     first Linear -- but only at the FIRST SAMPLE, i.e. after an entire calibration set had already
-    been simulated. The three conditioning widths (42 / 42+n_f / 42+3K) cannot collide, so the check
-    is exact; it just needs to happen before the simulation spend rather than after it.
+    been simulated. The three conditioning widths (42 / 42+n_f / 42+6*K_PAD) cannot collide, so the
+    check is exact; it just needs to happen before the simulation spend rather than after it.
     """
     sidecar = read_sidecar(choice, POSTERIOR_PATH, map_location=cfg.hw.device)
+
+    # LAYOUT GATE FIRST -- ahead of the decode below, whose `except ValueError: warn; return` would
+    # otherwise let a layout-1 posterior through on a decode failure. Keyed on the SIDECAR's own mode,
+    # not cfg's: a forced posterior loaded against a chi config must be told it is forced, not that it
+    # was "trained under chi layout 1".
+    sc_mode = (sidecar or {}).get("mode")
+    if sc_mode == "chi" or cfg.observation_mode == "chi":
+        if sc_mode == "chi":
+            got_layout = (sidecar or {}).get("chi_layout")
+            if got_layout != config.CHI_LAYOUT:
+                raise ValueError(
+                    f"Posterior '{choice}' was trained under chi layout {got_layout or 1} -- the "
+                    f"retired fixed-3K grid, where the probe's frequency was implied by its slot "
+                    f"index. This build writes layout {config.CHI_LAYOUT} (a padded probe set, "
+                    f"{config.CHI_ELEM_W} channels per slot, frequency carried explicitly). The two "
+                    f"are not interchangeable and their widths can collide exactly "
+                    f"(6*5 == 3*10 == 30), so this cannot be auto-detected. Retrain.")
+            for key, want, what in (("chi_k_pad", cfg.chi_k_pad, "probe-slot capacity"),
+                                    ("chi_elem_w", config.CHI_ELEM_W, "channels per slot")):
+                got = (sidecar or {}).get(key)
+                if got is not None and int(got) != int(want):
+                    raise ValueError(
+                        f"Posterior '{choice}' has {what} {got}, but this config declares {want}. "
+                        f"It is frozen into the trained network's input shape, so retrain or set "
+                        f"{key} back to {got}.")
+            got_band = (sidecar or {}).get("chi_freq_bounds")
+            if got_band is not None and tuple(got_band) != tuple(cfg.chi_freq_bounds):
+                raise ValueError(
+                    f"Posterior '{choice}' was trained over chi band {tuple(got_band)}, but this "
+                    f"config declares {tuple(cfg.chi_freq_bounds)}. The band fixes the encoder's "
+                    f"frequency normalization and is baked into its weights.")
+
     try:
         mode, forcing_dim, k = reparam_posterior_mode(posterior_latent, sidecar)
     except ValueError as e:                                  # undecodable: warn, do not block a load
         warnings.warn(f"Could not verify the observation mode of '{choice}': {e}", stacklevel=2)
         return
+    # Identity checks first: mode + width agreeing says only that the conditioning vectors are the
+    # same SHAPE, which several different configs satisfy. The model, the parameter ORDER and the
+    # training box are what make a posterior's numbers mean anything, and none of them were checked
+    # -- which is how a posterior trained on one cell's bounds was evaluated against another's.
+    if sidecar:
+        if sidecar.get("model") is not None and str(sidecar["model"]) != cfg.model:
+            raise ValueError(
+                f"Posterior '{choice}' was trained for model {sidecar['model']}, but this config is "
+                f"for {cfg.model}.")
+        want_keys = list(cfg.params_dict.keys()) + list(cfg.rescale_params.keys())
+        got_keys = list(sidecar.get("param_keys") or [])
+        if got_keys and got_keys != want_keys:
+            raise ValueError(
+                f"Posterior '{choice}' was trained over a different inferred parameter set or ORDER.\n"
+                f"  posterior: {got_keys}\n  config:    {want_keys}\n"
+                f"Columns bind positionally, so every reported value would refer to the wrong "
+                f"parameter. Pick the bounds file this posterior was trained with.")
+
     want_mode, want_dim = cfg.observation_mode, expected_forcing_dim(cfg)
     if mode == want_mode and forcing_dim == want_dim:
         return
@@ -627,13 +839,29 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
         # hypothetical 6-parameter drive).
         "mode": cfg.observation_mode,
         "input_dim": len(FEATURE_LABELS) + 1,
-        "forcing_dim": (chi.n_chi_features(cfg.chi_n_freqs) if cfg.chi_mode
-                        else len(cfg.force_params_dict)),
+        "forcing_dim": expected_forcing_dim(cfg),
+        # LAYOUT is what the load path gates on. Width cannot be trusted to identify it: 6*K_PAD at
+        # K_PAD=5 is exactly 30, an exact collision with the retired layout-1 3*K at K=10.
+        "chi_layout": config.CHI_LAYOUT if cfg.chi_mode else None,
+        "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
+        "chi_elem_w": config.CHI_ELEM_W if cfg.chi_mode else None,
+        # A TRAINING RECORD only -- never read as "the K this posterior needs". That is the payoff.
         "chi_n_freqs": cfg.chi_n_freqs if cfg.chi_mode else None,
         "chi_f0": cfg.chi_f0 if cfg.chi_mode else None,
         "chi_freq_bounds": tuple(cfg.chi_freq_bounds) if cfg.chi_mode else None,
         # Parameter ORDER is load-bearing (simulators bind columns positionally), so record it.
         "param_keys": list(cfg.params_dict.keys()) + list(cfg.rescale_params.keys()),
+        # THE TRAINING BOX. The flow learns a density over the LATENT coordinate, so the box is what
+        # turns its output back into physical parameters -- and eval used to rebuild that box from
+        # whatever config happened to be loaded rather than from the posterior. Two configs sharing a
+        # mode and a conditioning width therefore looked interchangeable while decoding the same
+        # latent sample to different physical values. Recorded here, load_eval_bijection can
+        # reconstruct the box the flow was actually trained in.
+        "model": cfg.model,
+        "nd_lows": torch.tensor([b[0] for _, b in cfg.params_dict.values()], dtype=torch.float64),
+        "nd_highs": torch.tensor([b[1] for _, b in cfg.params_dict.values()], dtype=torch.float64),
+        "rescale_lows": torch.tensor([b[0] for _, b in cfg.rescale_params.values()], dtype=torch.float64),
+        "rescale_highs": torch.tensor([b[1] for _, b in cfg.rescale_params.values()], dtype=torch.float64),
     }, str(POSTERIOR_PATH / (name + ".rot.pt")))
     # Loss curve: persisted so the convergence check is reproducible (sbi keeps it only in the trainer).
     if diagnostics is not None and diagnostics.get("validation_loss"):
@@ -765,6 +993,7 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
     :param inferred_prior: the actual training prior (ND x rescale product prior) — SBC draws
                            theta_star from it, not from the posterior.
     """
+    _assert_prior_used_matches_posterior(posterior, inferred_prior, "SBC/TARP calibration")
     t = cfg.t
     device = cfg.hw.device
     dtype = cfg.hw.dtype
@@ -788,7 +1017,12 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
         # _observation_inits: SBC/TARP draw theta from the PRIOR and need no ground truth, so this must
         # work on a cell-free config (cfg.inits_tensor would raise). See build_posterior.
         spontaneous_only=not cfg.has_forcing, chi_mode=cfg.chi_mode,
-        chi_n_freqs=cfg.chi_n_freqs, chi_f0=cfg.chi_f0, chi_freq_bounds=cfg.chi_freq_bounds,
+        chi_f0=cfg.chi_f0, chi_freq_bounds=cfg.chi_freq_bounds,
+        chi_k_pad=cfg.chi_k_pad,
+        # chi_k_fixed stays None here: validate_calibration's SBC is the POOLED one, over the same
+        # mixture of probe counts training saw. Stratifying by count is scripts/sbc_characterize.py's
+        # CHI_K_FIXED, run per stratum -- see section 4.1 step 5.
+        chi_k_fixed=None,
         n_vars=_observation_inits(cfg).shape[-1],
         dtype=dtype, device=device,
     )
@@ -904,7 +1138,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     arange_out = torch.arange(N_points_obs, device=device, dtype=torch.long)
     n_bins = math.ceil(n_samples / PPC_BIN_SIZE)
     # chi-mode: per-sample chi(omega) block, filled bin-by-bin alongside the spontaneous run.
-    chi_block_sorted = (torch.empty((n_samples, chi.n_chi_features(cfg.chi_n_freqs)),
+    chi_block_sorted = (torch.empty((n_samples, expected_forcing_dim(cfg)),
                                     dtype=dtype, device=device) if cfg.chi_mode else None)
 
     with torch.no_grad():
@@ -958,13 +1192,24 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
 
             del force_bin
             if cfg.chi_mode:
-                # K single-tone forced probes for this bin (per-sample t_scale -> subsample_factors).
+                # Single-tone probes for this bin (per-sample t_scale -> subsample_factors).
+                #
+                # Driven at the OBSERVATION'S ABSOLUTE FREQUENCIES, not at each sample's own
+                # mult_k*f_peak. The experiment fixed those frequencies; a PPC that re-derives them
+                # per posterior sample simulates a DIFFERENT experiment for every sample, and its chi
+                # z-scores then come out small for the wrong reason.
+                obs_freqs = getattr(cfg, "chi_obs_freqs", None)
+                if obs_freqs is None:
+                    probe, absolute = chi.chi_multipliers_for(cfg, dtype=dtype, device=device), False
+                else:
+                    probe, absolute = obs_freqs.to(device=device, dtype=dtype), True
                 chi_block_sorted[start:end] = pipeline.gen_chi_block(
                     cfg.model, bin_nd, bin_rescale, x_spont_sorted[start:end], t_fine_bin,
                     inits.expand(bs, -1), cfg.rescale_idx, n_segs_bin, cfg.steady_idx,
                     subsample_factors, N_points_obs, cfg.dt_exp,
-                    chi.chi_multipliers_for(cfg, dtype=dtype, device=device), cfg.chi_f0,
-                    state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=device)
+                    probe, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
+                    absolute_freqs=absolute,
+                    state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=device)[0]
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -1317,16 +1562,25 @@ def build_experiment_obs_chi(
     T_obs_s: float, F0_si: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    chi(omega) experimental path: ONE passive recording + K single-tone FORCED recordings (the k-th
-    driven at mult_k * Omega_0, with Omega_0 the passive PSD peak and mult_k = chi.chi_multipliers()).
-    Builds the conditioning [S(A-F) | log(T) | chi(3K)], mirroring generate_observations' chi branch.
+    chi(omega) experimental path: ONE passive recording + ANY NUMBER of single-tone FORCED recordings,
+    each locked in at THE FREQUENCY IT WAS ACTUALLY DRIVEN AT. Builds the conditioning
+    [S(A-F) | log(T) | padded probe set], mirroring generate_observations' chi branch.
+
+    This used to compute ``freq_k = mult_k * peak_freq(X_spont)`` itself and never asked what you
+    drove at. Two ways that went wrong on the bench, both silent: the frequencies you can actually
+    achieve are not exactly ``mult_k * Omega_0``, and even aiming for them, your Omega_0 estimate is
+    not ``chi.peak_freq``'s (different trace length, windowing, bin resolution). A lock-in at the
+    wrong frequency decays like a sinc -- a mismatch of a fraction of 1/T_obs destroys the estimate.
+    It also demanded exactly K recordings, with no substitution if one failed.
 
     chi = response/drive is drive-amplitude-independent in the linear regime, so any linear physical
     drive the experiment used works -- it is reported (F0_si) only so the lock-in divides by it to yield
     the true physical susceptibility (x_scale/f_scale)*chi_nd, matching training.
 
     :param X_spont: 1D passive recording (N_obs,), sampled at 1/cfg.dt_exp.
-    :param X_forced_list: K 1D forced recordings; recording k was driven at mult_k * Omega_0.
+    :param X_forced_list: the forced recordings. Either 1-D tensors -- legacy, assumed driven at
+        ``chi.chi_multipliers_for(cfg)`` -- or ``(recording, drive_frequency_Hz)`` pairs, which is the
+        form to use for real data. Any count from 1 to ``cfg.chi_k_pad``.
     :param T_obs_s: observation duration (seconds).
     :param F0_si: physical drive amplitude used (SI force, N); converted to cell force units.
     :return: (obs_stats, obs_data=X_spont as (1,N), t_dim in seconds).
@@ -1335,11 +1589,6 @@ def build_experiment_obs_chi(
     s_to_cell = cfg.get_unit_conversion_factor("s")
     T_obs = T_obs_s * s_to_cell
     F0 = F0_si * cfg.get_unit_conversion_factor("N")           # SI force -> cell force units
-    mults = chi.chi_multipliers_for(cfg, dtype=dtype, device=torch.device("cpu"))
-    if len(X_forced_list) != len(mults):
-        raise ValueError(
-            f"chi-mode expects {len(mults)} forced recordings (one per frequency multiplier), "
-            f"got {len(X_forced_list)}. Set K (chi frequencies) to match the number of drives.")
 
     X_spont_b = X_spont.to(dtype=dtype).unsqueeze(0)          # (1, N)
     N = X_spont_b.shape[-1]
@@ -1351,13 +1600,83 @@ def build_experiment_obs_chi(
 
     f_peak = chi.peak_freq(X_spont_b, cfg.dt_exp)             # (1,) Omega_0/2pi (cell freq units)
     nyq = 0.5 / cfg.dt_exp
-    T_obs_lockin = N * cfg.dt_exp
-    chis = []
-    for k, Xf in enumerate(X_forced_list):
-        Xf_b = Xf.to(dtype=dtype).unsqueeze(0)               # (1, N)
-        freq_k = torch.clamp(mults[k] * f_peak, max=0.9 * nyq)
-        chis.append(chi.lock_in_batched(Xf_b, 2.0 * math.pi * freq_k, F0, T_obs_lockin, cfg.dt_exp))
-    chi_block = chi.chi_features(torch.stack(chis, dim=1))    # (1, 3K)
+    n_probes = len(X_forced_list)
+    if not (1 <= n_probes <= cfg.chi_k_pad):
+        raise ValueError(
+            f"chi-mode accepts 1 to {cfg.chi_k_pad} forced recordings (CHI_K_PAD), got {n_probes}.")
+
+    # Legacy positional form: no frequency supplied, so fall back to the nominal grid.
+    paired = bool(X_forced_list) and isinstance(X_forced_list[0], (tuple, list))
+    if not paired:
+        mults = chi.chi_multipliers(dtype=dtype, device=torch.device("cpu"),
+                                    n_freqs=n_probes, bounds=cfg.chi_freq_bounds)
+
+    lo_b, hi_b = cfg.chi_freq_bounds
+    u_mid, u_half = chi.band_norm(cfg.chi_freq_bounds)
+    chis, u_list, logcyc_list, valid = [], [], [], []
+    for k, item in enumerate(X_forced_list):
+        if paired:
+            Xf, freq_hz = item[0], float(item[1])
+            if not (math.isfinite(freq_hz) and freq_hz > 0):
+                raise ValueError(f"chi probe {k}: drive frequency must be finite and positive, "
+                                 f"got {freq_hz} Hz.")
+            # freq_si_to_cell, NOT get_unit_conversion_factor("Hz") -- the latter returns 1.0 against
+            # an ms cell, a silent 1000x error landing as a wildly off-resonance but valid-looking chi.
+            f_cell = torch.tensor([freq_hz * cfg.freq_si_to_cell], dtype=dtype)
+        else:
+            Xf, f_cell = item, (mults[k] * f_peak)
+        Xf_b = Xf.to(dtype=dtype).unsqueeze(0)               # (1, N_k)
+        N_k = Xf_b.shape[-1]
+        T_k = N_k * cfg.dt_exp
+        f_val = float(f_cell)
+        # Refuse per row, naming the row -- the old code's only guard was a count check, and deleting
+        # that without replacement would let a 2-probe set run clean against a 12-slot posterior and
+        # return a near-prior answer: the first chi posterior's exact signature from another cause.
+        if f_val >= 0.9 * nyq:
+            raise ValueError(
+                f"chi probe {k}: {freq_hz if paired else f_val:g} is at or above the recording's "
+                f"Nyquist limit ({0.9 * nyq / cfg.freq_si_to_cell:g} Hz at dt_exp={cfg.dt_exp:g}).")
+        u_k = math.log(f_val / float(f_peak))
+        if abs((u_k - u_mid) / u_half) > config.CHI_UHAT_MAX:
+            in_band = (lo_b * float(f_peak) / cfg.freq_si_to_cell,
+                       hi_b * float(f_peak) / cfg.freq_si_to_cell)
+            raise ValueError(
+                f"chi probe {k}: {f_val / cfg.freq_si_to_cell:g} Hz is outside the band this "
+                f"posterior was trained over. For this cell (Omega_0 = "
+                f"{float(f_peak) / cfg.freq_si_to_cell:g} Hz) that is {in_band[0]:g}-{in_band[1]:g} Hz.")
+        # UNDER-RESOLVED IS MASKED, NOT REFUSED -- unlike the structural errors above.
+        #
+        # The distinction is train/eval consistency. Training MASKS a sub-cycle probe and keeps the
+        # row, so the network has learned to condition on sets with absent probes; refusing here
+        # would reject an observation the network handles perfectly well, and at the band's low edge
+        # that is common (at Omega_0 = 7.6 Hz the 0.03x probe has a 4.4 s period, so a 1 s recording
+        # cannot resolve it however carefully it was made). The other checks above are different in
+        # kind: a bad frequency, an aliased probe or an out-of-band one indicate a mistake the user
+        # must fix, not a limitation of the recording.
+        resolved = f_val * T_k >= config.CHI_MIN_CYCLES
+        if not resolved:
+            need_s = config.CHI_MIN_CYCLES / f_val / s_to_cell
+            warnings.warn(
+                f"chi probe {k}: {N_k} samples give only {f_val * T_k:.2f} drive cycles, below the "
+                f"{config.CHI_MIN_CYCLES:g}-cycle floor, so it is MASKED and contributes nothing. "
+                f"Record >= {need_s:.3g} s at this frequency to use it.", stacklevel=2)
+        chis.append(chi.lock_in_batched(Xf_b, 2.0 * math.pi * f_cell, F0, T_k, cfg.dt_exp))
+        u_list.append(torch.tensor([u_k], dtype=dtype))
+        logcyc_list.append(torch.tensor([math.log(f_val * T_k)], dtype=dtype))
+        valid.append(resolved)
+
+    chi_block, chi_mask = chi.pack_probe_block(
+        torch.stack(chis, dim=1), torch.stack(u_list, dim=1), torch.stack(logcyc_list, dim=1),
+        torch.tensor([valid], dtype=torch.bool), k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds)
+    if not bool(chi_mask.any()):
+        # Every probe masked. The encoder handles an empty set (it returns its empty-set constant),
+        # but then the posterior is conditioned on the passive trace alone -- so this would silently
+        # answer a spontaneous question with a chi posterior. The user supplied recordings expecting
+        # them to be used; say that none were.
+        raise ValueError(
+            f"chi: none of the {n_probes} supplied recordings produced a usable probe (all were "
+            f"below the {config.CHI_MIN_CYCLES:g}-cycle floor or had a non-finite lock-in). The "
+            f"conditioning would carry no susceptibility information at all.")
 
     obs_stats = pipeline.gen_stats(X_spont_b, None, cfg.dt_exp, None, None, None,
                                    device=cfg.hw.device, spontaneous_only=True)

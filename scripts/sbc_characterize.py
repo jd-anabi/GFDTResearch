@@ -20,12 +20,14 @@ The training prior is extracted directly from the saved posterior
 guaranteed to match training and no separate (possibly mismatched) prior file is needed.
 
 Env knobs:
-  CELL   cell file                                  (default Resources/Cells/nadrowski/cell_2.txt)
+  CELL   cell file                                  (default Resources/Cells/nadrowski/master_spont.txt)
   POST   posterior filename under Resources/Posteriors (default posterior_3d.pt)
   K      number of SBC repeats                      (default 10)
   N_CAL  calibration datasets per repeat            (default 2000)
   NPS    posterior samples per calibration point    (default 1000)
   SEED   base RNG seed                              (default 0)
+  CHI_K_FIXED  hold the chi probe COUNT at this value instead of pooling over the training
+               mixture -- run per stratum (2 / 6 / CHI_K_PAD) as well as pooled  (default: pooled)
 
 Run:
   & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/sbc_characterize.py
@@ -57,12 +59,26 @@ K = int(os.environ.get("K", "10"))
 N_CAL = int(os.environ.get("N_CAL", "2000"))
 NPS = int(os.environ.get("NPS", "1000"))
 SEED = int(os.environ.get("SEED", "0"))
+# Stratify the calibration set by PROBE COUNT instead of pooling over the training mixture. A pooled
+# SBC over a mixture of counts can be flat while each count is miscalibrated in compensating
+# directions -- posterior_chi_08042026 is the standing proof that flat SBC is not by itself evidence
+# of a working conditioning path. Run once per stratum (2 / 6 / CHI_K_PAD) AND once pooled, and
+# compare. Ignored outside chi mode.
+CHI_K_FIXED = int(os.environ["CHI_K_FIXED"]) if os.environ.get("CHI_K_FIXED") else None
 print(f"[cfg] POST={POST}  K={K}  N_CAL={N_CAL}  NPS={NPS}  SEED={SEED}", flush=True)
 
 # T_obs is irrelevant for SBC; the mode (spontaneous / forced / chi) is NOT -- it decides the width of
 # the conditioning vector gen_cal_data must produce, and a mismatch with POST used to surface only
 # after the whole calibration set had been simulated.
 cfg = _common.script_cfg()
+if CHI_K_FIXED is not None and not cfg.chi_mode:
+    raise SystemExit("CHI_K_FIXED only means something in chi(omega) mode; this config is "
+                     f"{cfg.observation_mode.upper()}. Set CHI=1, or unset CHI_K_FIXED.")
+# The stratum is stated on its own line, not buried in a knob dump: a stratified run and a pooled run
+# produce identically-shaped reports, so nothing else on screen distinguishes them on a later read.
+print(f"[cfg] probe-count stratum: "
+      f"{'POOLED over the training mixture' if CHI_K_FIXED is None else f'FIXED K = {CHI_K_FIXED}'}",
+      flush=True)
 dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 labels = cfg.inferred_labels
@@ -117,8 +133,12 @@ for r in range(K):
         # branch, so a spontaneous config hit `forcing_prior.sample` on a None and a chi config built
         # a 46-wide conditioning vector for a network expecting 42+3K.
         spontaneous_only=(cfg.observation_mode == "spontaneous"),
-        chi_mode=cfg.chi_mode, chi_n_freqs=cfg.chi_n_freqs, chi_f0=cfg.chi_f0,
-        chi_freq_bounds=cfg.chi_freq_bounds, n_vars=cfg.inits_tensor.shape[-1],
+        chi_mode=cfg.chi_mode, chi_f0=cfg.chi_f0,
+        # chi_k_pad from the CONFIG, not gen_training_data's module fallback: the pad width is frozen
+        # into the trained artifact (trap CHI7), so a config carrying a different one than the live
+        # config.CHI_K_PAD would silently calibrate against a differently-shaped block.
+        chi_freq_bounds=cfg.chi_freq_bounds, chi_k_pad=cfg.chi_k_pad, chi_k_fixed=CHI_K_FIXED,
+        n_vars=cfg.inits_tensor.shape[-1],
         dtype=dtype, device=device,
     )
     n_valid = theta_star.shape[0]

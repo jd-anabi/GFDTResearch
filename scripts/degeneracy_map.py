@@ -81,6 +81,8 @@ if cfg.chi_mode:
     _MULTS = chi_mod.chi_multipliers_for(cfg)
     print(f"[mode] probe multipliers of Omega_0: {[round(v, 4) for v in _MULTS.tolist()]}", flush=True)
 else:
+    # chi probes at its own frequencies and ignores the cell's drive, so only THIS branch needs one.
+    _common.assert_forced(cfg, "degeneracy_map in forced mode")
     forcing_gt = torch.tensor([[v for v, _ in cfg.force_params_dict.values()]],
                               dtype=dtype, device=device)
     amp_v = forcing_gt[:, cfg.forcing_idx["amp"]]
@@ -128,12 +130,19 @@ def _raw(pvec, rescale_vec, m, crn):
             # produces a plausible-looking, meaningless map.
             if crn:
                 torch.manual_seed(SC)
-            chi_block = pipeline.gen_chi_block(
+            # The FISHER feature set (4 channels per probe), not the conditioning block: this builds a
+            # Jacobian, and the conditioning block's `u` column is theta-independent under a fixed
+            # multiplier grid -- its float32 std is ~2.5e-8, below fnoise's 1e-9 floor, so a central
+            # difference turns pure rounding into entries of order 1. resolution_filter=False for the
+            # same reason the rotation uses it: a probe crossing the cycle threshold between arms is a
+            # step of 1 over that same floor.
+            chi_v, logcyc_v = pipeline.gen_chi_raw(
                 model=cfg.model, params_nd=p, rescale=rv, x_spont_dim=xs_d.to(dtype),
                 t_fine=t_fine, inits=inits_m, rescale_idx=cfg.rescale_idx, n_segs=n_segs,
                 steady_idx=cfg.steady_idx, subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
                 multipliers=_MULTS, f0_nd=cfg.chi_f0, state_dep_drift=cfg.state_dep_drift,
-                dtype=dtype, device=device)
+                resolution_filter=False, dtype=dtype, device=device)[:2]
+            chi_block = chi_mod.fisher_features(chi_v, logcyc_v)
             spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True).numpy()
             feats = np.concatenate([spont[:, _G_MASK], chi_block.double().cpu().numpy()], axis=1)

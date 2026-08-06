@@ -49,12 +49,13 @@ SF, SS = 1, 2
 torch.manual_seed(SEED)
 print(f"[cfg] M={M} M_NOISE={M_NOISE} REL={REL} SEED={SEED}", flush=True)
 
-cfg = _common.script_cfg()
+cfg = _common.script_cfg(default_cell=_common.FORCED_DEFAULT_CELL)   # CELL env var wins
 # This ranks candidate features by how much they shrink a marginal ON TOP OF the 41-feature baseline.
 # In chi mode the baseline is a different feature set (Group G zeroed, 3K chi features added), so the
 # measured "gain" of every candidate would be inflated -- chi already supplies much of it -- and the
 # ranking would be wrong with no sign of trouble.
 _common.assert_not_chi(cfg, "feature_candidate_test")
+_common.assert_forced(cfg, "feature_candidate_test")
 _common.describe_features(cfg)
 dtype, device = cfg.hw.dtype, cfg.hw.device
 DT = cfg.dt_exp

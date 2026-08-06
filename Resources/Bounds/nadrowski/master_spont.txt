@@ -1,14 +1,14 @@
 # Non-dimensional Parameters
-k in (0.01, 5.0)
+k in (0.01, 5)
 lam in (0.1, 50)
-f_max in (0.01, 5.0)
-tau in (1e-4, 2.0)
-tau_c in (0, 5.0)
-s in (0, 3.0)
+f_max in (0.05, 30)
+tau in (0.0001, 2)
+tau_c in (0.005, 5)
+s in (0, 3)
 delta_E in (0, 30)
 beta in (0.5, 100)
 n in (10, 300)
-temp in (0, 10.0)
+temp in (0.05, 10)
 
 # Dimensional Parameters
 x_scale in (10, 100)

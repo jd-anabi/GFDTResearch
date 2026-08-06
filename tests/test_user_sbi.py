@@ -14,6 +14,7 @@ Run:  python tests/test_user_sbi.py      (or under pytest)
 import math
 import os
 import sys
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -108,8 +109,8 @@ def test_builtin_forcing_path_unperturbed():
     conditioning vector [S(41) | log(T) | forcing] with Group G populated by the drive response."""
     labels = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
     cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                              str(config.BOUNDS_PATH / "nadrowski" / "cell.txt"))
-    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell.txt"))
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
     cfg.hw = config.cpu_device()
     cfg.T_obs = 1000.0                                            # ms units -> 1 s of data
     assert cfg.has_forcing is True
@@ -142,7 +143,7 @@ def test_train_and_validate_without_a_loaded_cell():
     sink = lambda title, fig: None                                # noqa: E731
     try:
         cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                                  str(config.BOUNDS_PATH / "nadrowski" / "cell.txt"),
+                                  str(config.BOUNDS_PATH / "nadrowski" / "master.txt"),
                                   reparam_rotate=False)           # the Fisher rotation is far too slow here
         cfg.hw = config.cpu_device()
         cfg.hw.batch_size = 8
@@ -173,8 +174,8 @@ def test_out_of_distribution_drive_is_flagged():
     passes -- forcing is deliberately not range-checked. An in-distribution drive must NOT be flagged."""
     labels = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
     cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                              str(config.BOUNDS_PATH / "nadrowski" / "cell_2.txt"))
-    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell_2.txt"))
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
     cfg.hw = config.cpu_device()
     force_prior = orchestrator._build_forcing_prior(cfg)      # cheap: no simulation involved
 
@@ -190,14 +191,24 @@ def test_out_of_distribution_drive_is_flagged():
     inf_prior = _BoxPrior([row[1] for row in cfg.params_dict.values()]
                           + [row[1] for row in cfg.rescale_params.values()])
 
-    # as shipped, cell_2 now carries an in-distribution DRIVE -> no drive warning
+    # master_weak carries an in-distribution DRIVE -> no drive warning
     msgs = orchestrator.check_observation_in_distribution(cfg, inf_prior, force_prior)
     assert not any("Drive" in m for m in msgs), msgs
-    # ...but tau_c and temp sit EXACTLY on the lower box edge, and the check rightly says so: that is the
-    # structural reason their posterior marginals can only ever be one-sided (nothing to do with the flow).
-    assert any("'tau_c'" in m for m in msgs) and any("'temp'" in m for m in msgs), msgs
+    # ...and NO parameter sits on a box edge either. The archived cell_2 had tau_c=0 and temp=0 exactly
+    # on their lower bounds, which is why those two marginals could only ever come out one-sided; the
+    # master cells are built strictly interior, so a quantile flag here is now a real regression.
+    assert not any("'tau_c'" in m for m in msgs), msgs
+    assert not any("'temp'" in m for m in msgs), msgs
     # phase must NOT be flagged despite sitting at 0: it is circular, so every value is reachable.
     assert not any("'phase'" in m for m in msgs), msgs
+
+    # The edge detector itself must still fire -- pin it by pushing a parameter onto its bound.
+    lo_tau_c = cfg.params_dict["tau_c"][1][0]
+    saved = cfg.params_dict["tau_c"]
+    cfg.params_dict["tau_c"] = (lo_tau_c, saved[1])
+    assert any("'tau_c'" in m for m in
+               orchestrator.check_observation_in_distribution(cfg, inf_prior, force_prior))
+    cfg.params_dict["tau_c"] = saved
 
     # zero it out the way it used to be -> the drive must be flagged
     for name in cfg.force_params_dict:
@@ -231,37 +242,105 @@ def test_observation_modes_and_conditioning_widths():
             return cfg
 
         # mode 1 -- spontaneous: no drive, and f_scale is correctly absent (it could not act on anything)
-        spont = build("cell_2_spont", "cell_2_spont")
+        spont = build("master_spont", "master_spont")
         assert spont.observation_mode == "spontaneous"
         assert "f_scale" not in spont.rescale_params
         assert len(spont.params_dict) + len(spont.rescale_params) == 12
         assert orchestrator.generate_observations(spont)[1].shape[-1] == S + 1
 
         # mode 2 -- forced: the cell's own drive, f_scale identified through Group G's gain
-        forced = build("cell_2", "cell_2")
+        forced = build("master", "master_weak")
         assert forced.observation_mode == "forced" and "f_scale" in forced.rescale_params
         assert orchestrator.generate_observations(forced)[1].shape[-1] == S + 1 + len(forced.force_params_dict)
 
         # mode 3 -- chi: K probes; the cell's own drive is ignored
-        chi_cfg = build("cell_2", "cell_2", chi_mode=True, chi_n_freqs=3)
+        chi_cfg = build("master", "master_weak", chi_mode=True, chi_n_freqs=3)
         assert chi_cfg.observation_mode == "chi"
-        assert orchestrator.generate_observations(chi_cfg)[1].shape[-1] == S + 1 + 3 * 3
+        # Width is a function of the PAD, not the probe count -- that is what lets one posterior
+        # serve any number of probes. Asserted via the shared rule, never a fresh literal.
+        assert (orchestrator.generate_observations(chi_cfg)[1].shape[-1]
+                == S + 1 + orchestrator.expected_forcing_dim(chi_cfg))
+        assert orchestrator.expected_forcing_dim(chi_cfg) == config.CHI_ELEM_W * chi_cfg.chi_k_pad
 
-        # a FORCING-BEARING cell against SPONTANEOUS bounds: extras dropped, not an error
+        # a FORCING-BEARING cell against SPONTANEOUS bounds: extras dropped, not an error.
+        # This is what lets ONE master cell serve every mode -- master_spont.txt carries f_scale and a
+        # zeroed Forcing section precisely so chi mode (which needs f_scale inferred) can use it too.
         mixed = cli.make_sim_config("NADROWSKI", labels, True,
-                                    str(config.BOUNDS_PATH / "nadrowski" / "cell_2_spont.txt"))
-        ignored = cli.load_and_validate_gt(mixed, str(config.CELL_PATH / "nadrowski" / "cell_2.txt"))
+                                    str(config.BOUNDS_PATH / "nadrowski" / "master_spont.txt"))
+        ignored = cli.load_and_validate_gt(mixed, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
         assert mixed.observation_mode == "spontaneous"
         assert "f_scale (rescale)" in ignored and any(n.endswith("(forcing)") for n in ignored)
 
-        # ...but a genuinely MISSING parameter is still fatal
+        # ...but a genuinely MISSING parameter is still fatal. Every master cell deliberately carries
+        # the full superset, so this is exercised at the guard rather than with a deficient file.
+        vals = {k: v for k, v in ((n, r[0]) for n, r in forced.rescale_params.items())}
+        vals.pop("f_scale")
         try:
-            cli.load_and_validate_gt(forced, str(config.CELL_PATH / "nadrowski" / "cell_2_spont.txt"))
+            forced.inject_ground_truth(dict(forced.inits_dict),
+                                       {n: r[0] for n, r in forced.params_dict.items()},
+                                       vals,
+                                       {n: r[0] for n, r in forced.force_params_dict.items()})
             raise AssertionError("expected a missing-parameter ValueError")
         except ValueError as e:
-            assert "missing" in str(e).lower()
+            assert "missing" in str(e).lower() and "f_scale" in str(e)
     finally:
         config.CHI_MODE, config.CHI_N_FREQS = saved_mode, saved_k
+
+
+def test_chi_fisher_rotation_builds_over_the_chi_feature_set():
+    """chi mode now gets a decorrelating rotation too, and its Fisher must be built over the features
+    a chi posterior actually conditions on -- 41 summary + 3K chi, not the 41-feature single-frequency
+    set.
+
+    WHY THIS EXISTS. build_posterior used to skip the rotation entirely under chi, on the untested
+    assumption that "chi already attacks the degeneracy the rotation targets". Measured on the master
+    cell, chi leaves k~x_scale at 0.95 (0.98 forced), so that was wrong. Re-enabling it has two ways
+    to fail SILENTLY, both pinned here: gen_chi_block never being called (a Fisher over the wrong
+    experiment), and J being allocated at len(FEATURE_LABELS) rows, which would truncate the chi block
+    out of the Jacobian without any error."""
+    from core.SBI import decorrelate
+    from core.SBI import pipeline as pipeline_mod
+    from core.SBI.reparam import build_inferred_bijection
+    labels = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
+    K = 2
+    cfg = cli.make_sim_config("NADROWSKI", labels, True,
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"),
+                              chi_mode=True, chi_n_freqs=K)
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+    cfg.T_obs = 100.0
+    assert cfg.observation_mode == "chi"
+    P = len(cfg.params_dict) + len(cfg.rescale_params)
+
+    calls, saved = [], pipeline_mod.gen_chi_raw
+
+    def _spy(*a, **kw):
+        out = saved(*a, **kw)
+        # (chi, u, logcyc, valid). Record the probe count and whether the resolution filter was off.
+        calls.append((out[0].shape[-1], kw.get("resolution_filter", True)))
+        return out
+
+    pipeline_mod.gen_chi_raw = _spy
+    try:
+        V = decorrelate.build_latent_fisher_rotation(cfg, build_inferred_bijection(cfg),
+                                                     m=2, n_points=1)
+    finally:
+        pipeline_mod.gen_chi_raw = saved
+
+    assert calls, "the chi probes were never simulated: the Fisher was built over the wrong features"
+    assert {c[0] for c in calls} == {K}, calls
+    # The Fisher must use the RAW lock-ins, so its feature width is 4 per probe (log|chi|, cos, sin,
+    # logcyc) -- NOT the 6-channel conditioning block. `u` and `mask` are theta-independent here and
+    # would write float32 rounding into the Jacobian at the magnitude of a real feature.
+    assert len(chi_mod.CHI_FISHER_CHANNELS) == 4
+    assert "u" not in chi_mod.CHI_FISHER_CHANNELS and "mask" not in chi_mod.CHI_FISHER_CHANNELS
+    # The resolution filter MUST be off: it depends on f_peak, hence on theta, so a probe crossing
+    # the cycle threshold between the +dz and -dz arms is a mask step of 1 over fnoise's 1e-9 floor.
+    assert all(rf is False for _, rf in calls), "the Fisher must disable the resolution filter"
+    # one baseline + a +dz/-dz pair per latent dimension, each evaluating the chi block
+    assert len(calls) == 2 * P + 1, f"expected {2 * P + 1} chi evaluations, got {len(calls)}"
+    assert V.shape == (P, P)
+    assert float((V.T @ V - torch.eye(P, dtype=V.dtype)).abs().max()) < 1e-4
 
 
 def test_spontaneous_fisher_rotation_is_orthogonal():
@@ -271,8 +350,8 @@ def test_spontaneous_fisher_rotation_is_orthogonal():
     from core.SBI.reparam import build_inferred_bijection
     labels = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
     cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                              str(config.BOUNDS_PATH / "nadrowski" / "cell_2_spont.txt"))
-    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell_2_spont.txt"))
+                              str(config.BOUNDS_PATH / "nadrowski" / "master_spont.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_spont.txt"))
     cfg.hw = config.cpu_device()
     cfg.T_obs = 500.0
     assert cfg.observation_mode == "spontaneous"
@@ -291,13 +370,13 @@ def test_chi_mode_observation_width():
     try:
         config.CHI_MODE, config.CHI_N_FREQS = True, 3
         cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                                  str(config.BOUNDS_PATH / "nadrowski" / "cell.txt"))
+                                  str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
         assert cfg.chi_mode is True
-        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell.txt"))
+        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
         cfg.hw = config.cpu_device()
         cfg.T_obs = 1000.0                                        # ms units -> 1 s of data
         _, obs_stats, _ = orchestrator.generate_observations(cfg)
-        assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + 3 * config.CHI_N_FREQS
+        assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg)
         assert torch.allclose(obs_stats[0, _N_SPONT:_N_SPONT + _N_GROUP_G], torch.zeros(_N_GROUP_G))
         assert torch.isfinite(obs_stats).all()
     finally:
@@ -315,8 +394,8 @@ def test_chi_mode_full_sbi_pipeline():
     try:
         config.CHI_MODE, config.CHI_N_FREQS = True, 3
         cfg = cli.make_sim_config("NADROWSKI", labels, True,
-                                  str(config.BOUNDS_PATH / "nadrowski" / "cell.txt"))
-        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell.txt"))
+                                  str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
         cfg.hw = config.cpu_device()
         cfg.hw.batch_size = 8
         cfg.T_obs = 1000.0
@@ -330,7 +409,7 @@ def test_chi_mode_full_sbi_pipeline():
         posterior, _ = orchestrator.build_posterior(cfg, inferred_prior, force_prior, None, True,
                                                     save=False, fig_sink=sink)
 
-        K3 = 3 * config.CHI_N_FREQS
+        K3 = orchestrator.expected_forcing_dim(cfg)
         x_dim, obs_stats, t_dim = orchestrator.generate_observations(cfg)
         assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + K3
         assert torch.isfinite(obs_stats).all()
@@ -479,11 +558,12 @@ def test_zero_force_tensor_channel_width():
     assert forcing.n_force_channels("HOPF", {}, 2) == 2, "Hopf drift reads force_step[:, 1] regardless"
 
     # A width that is too NARROW is an IndexError inside the drift, so simulate for real (tiny).
-    for model, sub, stem in (("NADROWSKI", "nadrowski", "cell_2"), ("HOPF", "hopf", "cell")):
+    for model, sub, b_stem, c_stem in (("NADROWSKI", "nadrowski", "master", "master_weak"),
+                                       ("HOPF", "hopf", "cell", "cell")):
         sdd = registry.state_dep_drift(model)
         cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)], sdd,
-                                  str(config.BOUNDS_PATH / sub / f"{stem}.txt"))
-        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / sub / f"{stem}.txt"))
+                                  str(config.BOUNDS_PATH / sub / f"{b_stem}.txt"))
+        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / sub / f"{c_stem}.txt"))
         cfg.hw = config.cpu_device()
         n_vars = cfg.inits_tensor.shape[-1]
         n_ch = forcing.n_force_channels(model, cfg.forcing_idx, n_vars)
@@ -520,7 +600,7 @@ def test_chi_mode_drives_every_channel_the_model_reads():
         assert cfg.observation_mode == "chi" and cfg.inits_tensor.shape[-1] == 2
 
         stats = orchestrator.generate_observations(cfg)[1]
-        assert stats.shape[-1] == len(FEATURE_LABELS) + 1 + 3 * 3, (
+        assert stats.shape[-1] == len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg), (
             f"hopf chi conditioning is the wrong width: {tuple(stats.shape)}")
         assert torch.isfinite(stats).all(), "hopf chi conditioning has non-finite entries"
 
@@ -563,8 +643,8 @@ def test_chi_batch_never_outruns_the_nd_time_grid():
     model = "NADROWSKI"
     cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
                               registry.state_dep_drift(model),
-                              str(config.BOUNDS_PATH / "nadrowski" / "cell_2.txt"))
-    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell_2.txt"))
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
     cfg.hw = config.cpu_device()
 
     class _FixedPrior:                      # stands in for the trained prior
@@ -574,12 +654,20 @@ def test_chi_batch_never_outruns_the_nd_time_grid():
     n_grid, steady_idx = 12_000, 500        # deliberately SHORTER than N_ND_MAX
     t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
 
+    # Key every lock-in to ITS batch explicitly. K is drawn per batch under the set layout, so
+    # inferring it by dividing call counts (as this used to) is no longer even well-defined.
     seen = {"spont": [], "chi": []}
     real_peak, real_lock = chi_module.peak_freq, chi_module.lock_in_batched
-    chi_module.peak_freq = lambda x, dt, *a, **k: (seen["spont"].append(x.shape[-1]),
-                                                   real_peak(x, dt, *a, **k))[1]
-    chi_module.lock_in_batched = lambda x, *a, **k: (seen["chi"].append(x.shape[-1]),
-                                                     real_lock(x, *a, **k))[1]
+
+    def _peak(x, dt, *a, **k):
+        seen["spont"].append(x.shape[-1])
+        return real_peak(x, dt, *a, **k)
+
+    def _lock(x, *a, **k):
+        seen["chi"].append((len(seen["spont"]) - 1, x.shape[-1]))
+        return real_lock(x, *a, **k)
+
+    chi_module.peak_freq, chi_module.lock_in_batched = _peak, _lock
     try:
         pipeline_mod.gen_training_data(
             model, _FixedPrior(cfg.ground_truth_tensor.reshape(1, -1)), None, t,
@@ -587,19 +675,127 @@ def test_chi_batch_never_outruns_the_nd_time_grid():
             nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
             dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
             t_scale_bounds=cfg.t_scale_bounds, state_dep_drift=cfg.state_dep_drift,
-            chi_mode=True, chi_n_freqs=2, chi_f0=config.CHI_F0,
+            chi_mode=True, chi_k_fixed=2, chi_f0=config.CHI_F0,
             chi_freq_bounds=config.CHI_FREQ_BOUNDS, n_vars=cfg.inits_tensor.shape[-1],
             dtype=cfg.hw.dtype, device=cfg.hw.device)
     finally:
         chi_module.peak_freq, chi_module.lock_in_batched = real_peak, real_lock
 
     assert seen["spont"], "the chi branch never ran"
-    k = len(seen["chi"]) // len(seen["spont"])          # K lock-ins per spontaneous trace
-    for i, n_spont in enumerate(seen["spont"]):
-        group = set(seen["chi"][i * k:(i + 1) * k])
-        assert group == {n_spont}, (
-            f"batch {i}: the summary statistics see {n_spont} samples but the chi probes see "
-            f"{sorted(group)} -- the fine grid was clipped and the conditioning row is inconsistent")
+    assert seen["chi"], "no probes were locked in"
+    # A probe may see FEWER samples than the summary statistics -- per-probe durations are a
+    # deliberate axis of the training distribution, and the count is recorded in the probe's own
+    # logcyc channel so the encoder can discount a short one. It must never see MORE: that is the
+    # 2026-07-28 defect, where the spontaneous trace was built by SLICING a clipped fine grid (so it
+    # came back short) while the chi path GATHERED to N_points with a clamp replicating the last
+    # sample -- the two then described different trace lengths and log(T) recorded a third.
+    for batch_i, n_chi in seen["chi"]:
+        n_spont = seen["spont"][batch_i]
+        assert 0 < n_chi <= n_spont, (
+            f"batch {batch_i}: a chi probe saw {n_chi} samples but the summary statistics saw "
+            f"{n_spont} -- the fine grid was clipped and the conditioning row is inconsistent")
+
+
+def test_chi_k_fixed_holds_the_probe_count_for_a_stratified_calibration():
+    """``chi_k_fixed`` must pin the per-ROW live-probe count, and the default must NOT.
+
+    WHY THIS EXISTS. Section 4.1 step 5 wants SBC stratified by probe count, because a pooled SBC
+    over a mixture of counts can be flat while each count is miscalibrated in compensating
+    directions. There was no lever: ``chi_n_freqs`` was accepted by gen_training_data and never read.
+
+    TWO ways to get this wrong, both silent:
+      * fixing k_b but leaving ``_subset_probe_rows`` on. The drive SET would then have K probes while
+        individual ROWS kept a random prefix of them, so a "K = 3" stratum would quietly be a mixture
+        over 1..3 -- exactly the pooled measurement the stratification exists to avoid.
+      * honouring ``chi_n_freqs`` during TRAINING, which is the obvious "fix" for the dead parameter
+        and would train a network that has only ever seen one probe count.
+
+    Asserted against the PACKER's own mask rather than against a bare count, because after
+    pack_probe_block a masked probe and a pad slot are bitwise identical (a dead slot is exactly 0.0
+    in all six channels). Some probes ARE legitimately masked here -- the training draw includes short
+    recordings where a 0.03x probe cannot complete two drive cycles -- so "the row has exactly K live
+    slots" is not a true invariant at any K. What IS invariant: K probes are simulated, and the row
+    keeps every probe the packer marked valid.
+    """
+    model = "NADROWSKI"
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
+                              registry.state_dep_drift(model),
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+
+    class _FixedPrior:
+        def __init__(self, theta): self.theta = theta
+        def sample(self, shape): return self.theta.expand(shape[0], -1).clone()
+
+    n_grid, steady_idx = 12_000, 500
+    t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
+    k_pad, k_fixed = 6, 3
+
+    def _run(**kw):
+        """-> (probes simulated per batch, packer-valid count per row, live slots per emitted row)."""
+        simulated, valid_rows = [], []
+        real_raw, real_block = pipeline_mod.gen_chi_raw, pipeline_mod.gen_chi_block
+
+        def _spy_raw(*a, **k):
+            out = real_raw(*a, **k)
+            simulated.append(out[0].shape[-1])              # (B, K) chi stack -> K probes simulated
+            return out
+
+        def _spy_block(*a, **k):
+            block, mask = real_block(*a, **k)
+            valid_rows.append(mask.sum(dim=1).clone())      # (B,) live probes BEFORE any subsetting
+            return block, mask
+
+        pipeline_mod.gen_chi_raw, pipeline_mod.gen_chi_block = _spy_raw, _spy_block
+        try:
+            data, _ = pipeline_mod.gen_training_data(
+                model, _FixedPrior(cfg.ground_truth_tensor.reshape(1, -1)), None, t,
+                run_size=4, n_runs=4, steady_idx=steady_idx, dt_nd_min=cfg.dt_nd_min,
+                nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
+                dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
+                t_scale_bounds=cfg.t_scale_bounds, state_dep_drift=cfg.state_dep_drift,
+                chi_mode=True, chi_f0=config.CHI_F0, chi_freq_bounds=config.CHI_FREQ_BOUNDS,
+                chi_k_pad=k_pad, n_vars=cfg.inits_tensor.shape[-1],
+                dtype=cfg.hw.dtype, device=cfg.hw.device, **kw)
+        finally:
+            pipeline_mod.gen_chi_raw, pipeline_mod.gen_chi_block = real_raw, real_block
+        block = data[:, -k_pad * config.CHI_ELEM_W:].reshape(-1, k_pad, config.CHI_ELEM_W)
+        live = (block != 0).any(dim=-1).sum(dim=-1)                      # (rows,)
+        # Batches are appended in order and concatenated, so these line up row-for-row.
+        return simulated, torch.cat(valid_rows), live
+
+    simulated, valid, live = _run(chi_k_fixed=k_fixed)
+    assert live.numel(), "no training rows were produced"
+    assert int(valid.sum()) > 0, (
+        "every probe was masked, so the equality below holds trivially -- this test's geometry is "
+        "wrong, not the code's")
+    assert set(simulated) == {k_fixed}, (
+        f"chi_k_fixed={k_fixed} simulated {sorted(set(simulated))} probes per batch. The count must "
+        f"not be drawn: a calibration stratum is the whole point of the flag.")
+    assert torch.equal(live, valid), (
+        f"chi_k_fixed dropped probes the packer had marked valid: live={live.tolist()} vs "
+        f"valid={valid.tolist()}. The per-row subsetting is still running, so a 'K = {k_fixed}' "
+        f"stratum is silently a mixture over 1..{k_fixed} -- the pooled measurement it exists to avoid.")
+
+    simulated_p, valid_p, live_p = _run()
+    assert len(set(simulated_p)) > 1, (
+        "the DEFAULT path simulated one probe count for every batch. K must vary across the training "
+        "set -- a fixed count would leave the encoder's K-agnosticism untrained rather than merely "
+        "untested.")
+    assert not torch.equal(live_p, valid_p), (
+        "the DEFAULT path kept every valid probe in every row, so _subset_probe_rows did nothing. "
+        "Per-row subsetting is what decouples the probe count from the batch's (t_scale, T) stratum.")
+
+    for bad in (0, k_pad + 1):
+        try:
+            _run(chi_k_fixed=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"chi_k_fixed={bad} was accepted. Out of 1..chi_k_pad it either asks for more probes "
+                f"than the network has slots or for an all-masked observation.")
 
 
 def test_solver_failure_raises_instead_of_killing_the_process():
@@ -623,8 +819,8 @@ def test_solver_failure_raises_instead_of_killing_the_process():
     model = "NADROWSKI"
     sdd = registry.state_dep_drift(model)
     cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)], sdd,
-                              str(config.BOUNDS_PATH / "nadrowski" / "cell_2.txt"))
-    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell_2.txt"))
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
     cfg.hw = config.cpu_device()
     n_ch = forcing.n_force_channels(model, cfg.forcing_idx, cfg.inits_tensor.shape[-1])
 
@@ -724,8 +920,8 @@ def test_split_gen_obs_concatenates_correctly():
         model, B, n = "NADROWSKI", 8, 80
         sdd = registry.state_dep_drift(model)
         cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)], sdd,
-                                  str(config.BOUNDS_PATH / "nadrowski" / "cell_2.txt"))
-        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "cell_2.txt"))
+                                  str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+        cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
         cfg.hw = config.cpu_device()
         params = cfg.params_tensor.expand(B, -1).contiguous()
         inits = cfg.inits_tensor.expand(B, -1).contiguous()
@@ -920,17 +1116,37 @@ def test_posterior_mode_decodes_all_three_observation_modes():
                                                       "condition_shape": None})()
 
     summary_w = len(FEATURE_LABELS) + 1
-    for want_mode, fdim, want_k in (("spontaneous", 0, None), ("forced", 4, None), ("chi", 18, 6)):
+    k_pad = 6
+    chi_dim = config.CHI_ELEM_W * k_pad
+    for want_mode, fdim, want_k in (("spontaneous", 0, None), ("forced", 4, None),
+                                    ("chi", chi_dim, k_pad)):
+        kw = ({"chi_k_pad": k_pad, "chi_band": config.CHI_FREQ_BOUNDS} if want_mode == "chi" else {})
         net = embedded_network.EmbeddedNet(summary_w, 8, (16, 12), forcing_dim=fdim,
                                            forcing_layer_dims=(max(fdim * 4, 4), max(fdim * 2, 2)),
-                                           merge_layer_dim=16)
+                                           merge_layer_dim=16, **kw)
         mode, got_dim, got_k = posterior_mode(_Stub(net))
         assert (mode, got_dim, got_k) == (want_mode, fdim, want_k), \
             f"decoded {(mode, got_dim, got_k)} from the trained net, expected {(want_mode, fdim, want_k)}"
 
         # Tier 1: an explicit sidecar always wins over decoding the net.
-        side = {"mode": want_mode, "forcing_dim": fdim, "chi_n_freqs": want_k}
+        side = {"mode": want_mode, "forcing_dim": fdim, "chi_k_pad": want_k}
         assert posterior_mode(_Stub(net), side) == (want_mode, fdim, want_k)
+
+    # A chi posterior is identified by its net's own attributes or by a chi_layout sidecar -- NEVER by
+    # width arithmetic. The old `fdim >= 6 and fdim % 3 == 0 -> chi` rule decoded any 6-parameter
+    # drive as chi, and under the set layout width cannot identify a layout at all: 6*5 == 3*10 == 30.
+    # A wide forcing_dim with neither marker must SAY it cannot tell, not guess.
+    class _Bare:
+        def __init__(self, fdim):
+            self.posterior_estimator = type(
+                "E", (), {"embedding_net": None, "condition_shape": (summary_w + fdim,)})()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            posterior_mode(_Bare(chi_dim))
+        raise AssertionError("an unidentifiable wide forcing_dim must raise, not guess 'chi'")
+    except ValueError as e:
+        assert "chi_layout" in str(e), str(e)
 
 
 def test_overlay_figures_warn_instead_of_vanishing_on_a_width_mismatch():

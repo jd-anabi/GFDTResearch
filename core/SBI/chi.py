@@ -33,23 +33,77 @@ _LOCK_IN_CHUNK = 8192
 _PEAK_FREQ_BATCH = 256
 
 
-def n_chi_features(n_freqs: int | None = None) -> int:
-    """Width of the chi(omega) conditioning block: 3 features (log|chi|, cos, sin) per frequency."""
-    k = config.CHI_N_FREQS if n_freqs is None else n_freqs
-    return 3 * k
+# The THREE chi feature sets. They are different widths for different consumers and conflating them is
+# silent, so they are named once here and every consumer asks for one by name.
+#
+#   CONDITIONING  6 channels x K_PAD slots  -> the network, expected_forcing_dim, the sidecar
+#   FISHER        4 channels x K probes     -> decorrelate.feats, scripts/degeneracy_map
+#   (the diagnostic labels in scripts/_common are the FISHER set minus the 11 Group-G columns)
+#
+# `u` and `mask` are deliberately ABSENT from the Fisher set. `u = log(f_k/f_peak)` is theta-INDEPENDENT
+# wherever the Fisher probes a deterministic multiplier grid, so across an ensemble it takes ~two
+# distinct float32 values with std ~2.5e-8 -- and `fnoise = max(std, 1e-9)` does NOT protect against
+# that. The central difference then writes entries of order 1, the magnitude of a real standardized
+# feature, into up to K x P cells of the Jacobian that defines the flow's coordinate system, while V
+# stays orthogonal to 1e-4 and every existing test passes.
+CHI_COND_CHANNELS = ("u", "logmag", "cos", "sin", "logcyc", "mask")
+CHI_FISHER_CHANNELS = ("logmag", "cos", "sin", "logcyc")
 
 
-def chi_labels(n_freqs: int | None = None) -> list[str]:
-    """Ordered feature labels for the chi block, matching chi_features()'s [log|chi|, cos, sin] packing."""
-    k = config.CHI_N_FREQS if n_freqs is None else n_freqs
-    labels: list[str] = []
-    for i in range(k):
-        labels += [f"chi{i}_logmag", f"chi{i}_cos", f"chi{i}_sin"]
-    return labels
+def n_chi_features(k_pad: int | None = None) -> int:
+    """Width of the chi(omega) conditioning block. **K-INDEPENDENT** -- it is a function of the pad.
+
+    This one line is what buys the payoff: a posterior trained with K drawn over 2..K_PAD loads
+    against a config declaring a different probe count with no width guard loosened anywhere.
+    """
+    kp = config.CHI_K_PAD if k_pad is None else int(k_pad)
+    return config.CHI_ELEM_W * kp
 
 
-# Default-K labels, analogous to statistics.FEATURE_LABELS. Recompute via chi_labels(K) for a custom K.
-CHI_LABELS = chi_labels()
+def chi_labels(k: int | None = None, channels: tuple = CHI_COND_CHANNELS) -> list[str]:
+    """Ordered labels for one of the chi feature sets; ``channels`` picks which.
+
+    Conditioning labels say ``chiS{j}`` -- S for SLOT. A slot is not a probe identity: which probe
+    lands in slot j depends on the observation, so a per-column diagnostic table keyed by slot must
+    not be read as "probe j".
+    """
+    n = config.CHI_K_PAD if k is None else int(k)
+    stem = "chiS" if channels is CHI_COND_CHANNELS else "chi"
+    return [f"{stem}{j}_{ch}" for j in range(n) for ch in channels]
+
+
+def band_norm(bounds: tuple | None = None) -> tuple[float, float]:
+    """(u_mid, u_half) mapping the log-frequency band onto u_hat in [-1, 1].
+
+    Fixed from the BAND, never fitted from data: it is baked into a trained encoder, so the load path
+    compares it and refuses a posterior whose band differs.
+    """
+    lo, hi = config.CHI_FREQ_BOUNDS if bounds is None else bounds
+    return 0.5 * (math.log(lo) + math.log(hi)), 0.5 * (math.log(hi) - math.log(lo))
+
+
+def sample_multipliers(k: int, bounds: tuple | None = None, *, generator=None,
+                       dtype: torch.dtype = torch.float32,
+                       device: torch.device = torch.device("cpu")) -> torch.Tensor:
+    """(k,) STRATIFIED-JITTERED log-spaced multipliers spanning ``bounds``, sorted ascending.
+
+    Training placement. One draw per stratum rather than k iid draws: quadrature variance falls as
+    O(k^-3) instead of O(k^-1), and every row spans the band with no holes and no clusters -- which
+    matters precisely because k can be 1 or 2.
+
+    Deliberately NOT the deterministic grid used for observations. A fixed grid would leave the
+    encoder's frequency channel taking only k distinct values across the entire training set, so an
+    experimentalist's 0.07x recording would be an out-of-distribution input to an MLP that
+    extrapolates linearly and confidently.
+
+    Draws from ``generator``, never the global RNG -- the chi block is bracketed by deliberate
+    manual_seed() calls for common random numbers, which would otherwise re-randomise or freeze it.
+    """
+    lo, hi = config.CHI_FREQ_BOUNDS if bounds is None else bounds
+    u_lo, u_hi = math.log(lo), math.log(hi)
+    xi = torch.rand(int(k), generator=generator)
+    a = u_lo + (u_hi - u_lo) * (torch.arange(int(k), dtype=torch.float64) + xi.double()) / int(k)
+    return torch.exp(a).to(dtype=dtype, device=device)
 
 
 def chi_multipliers(dtype: torch.dtype = torch.float32,
@@ -127,7 +181,9 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs: float, dt: 
     TWO INVARIANTS, both of which fail SILENTLY (finite, in-range, wrong):
       * the mean is over the FULL trace, computed in pass 1. Demeaning per chunk would be a high-pass
         filter with corner ~1/(chunk*dt), which preferentially eats the LOW-multiplier probes -- and
-        CHI_FREQ_BOUNDS starts at 0.1*Omega_0, so those are exactly the probes chi-mode exists for.
+        CHI_FREQ_BOUNDS is now entirely SUB-RESONANCE (0.03 .. 0.3 * Omega_0, measured: everything
+        above ~0.25x is irreproducible), so EVERY probe is a low-multiplier one. This invariant went
+        from "protects the probes chi-mode exists for" to "protects all of them".
       * the phase in a chunk starting at s uses the ABSOLUTE times arange(s, e)*dt, never
         arange(0, e-s)*dt. (The wrong form is normally an order-unity error, but it is invisible when
         omega*chunk*dt happens to be a multiple of 2*pi -- so test with incommensurate omega.)
@@ -168,19 +224,85 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs: float, dt: 
     return torch.complex(re, im) * (2.0 / (F0 * float(T_obs))) * dt
 
 
-def chi_features(chi_stack: torch.Tensor) -> torch.Tensor:
+def _mag_phase(chi_stack: torch.Tensor):
+    """(log|chi|, cos arg, sin arg) from a complex stack. log for the positive, unbounded magnitude;
+    a (cos, sin) pair for the phase so there is no 2pi wrap -- the statistics.py convention."""
+    ang = torch.angle(chi_stack)
+    return torch.log(torch.clamp(chi_stack.abs(), min=_EPS)), torch.cos(ang), torch.sin(ang)
+
+
+def fisher_features(chi_stack: torch.Tensor, logcyc: torch.Tensor) -> torch.Tensor:
+    """(B, K) complex + (B, K) logcyc -> (B, 4K) float32: [log|chi|, cos, sin, logcyc] per probe.
+
+    The FISHER set: no pad slots, no mask, and NO frequency channel -- see CHI_FISHER_CHANNELS for why
+    `u` must not appear here. `logcyc` is kept because it genuinely varies with theta (through
+    f_peak), so it carries signal rather than float32 rounding.
     """
-    Pack a (B, K) complex susceptibility curve into (B, 3K) real features, ordered per frequency as
-    [log|chi_k|, cos(arg chi_k), sin(arg chi_k)] -- log for the (positive, unbounded) magnitude and a
-    (cos, sin) pair for the phase (no 2pi wrap), matching the statistics.py conventions. Output width
-    equals len(chi_labels(K)). NaN/Inf -> 0 for a clean conditioning vector.
+    logmag, cos, sin = _mag_phase(chi_stack)
+    feats = torch.stack([logmag, cos, sin, logcyc.to(logmag.dtype)], dim=-1)   # (B, K, 4)
+    out = feats.reshape(feats.shape[0], -1)
+    return torch.nan_to_num(out.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def pack_probe_block(chi_stack: torch.Tensor, u: torch.Tensor, logcyc: torch.Tensor,
+                     valid: torch.Tensor, k_pad: int | None = None,
+                     bounds: tuple | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack K probes into the padded conditioning block.
 
     :param chi_stack: (B, K) complex susceptibilities.
-    :return: (B, 3K) float32 features.
+    :param u:         (B, K) log(f_probe / f_peak) -- the frequency ACTUALLY locked in at.
+    :param logcyc:    (B, K) log(f_probe * T_probe) -- drive cycles inside the locked-in segment.
+    :param valid:     (B, K) bool, the caller's verdict (Nyquist, resolution floor, ...).
+    :return: ((B, CHI_ELEM_W*k_pad) float32 block, (B, k_pad) bool mask)
+
+    THREE properties the rest of the design leans on:
+
+    * **A failed probe is MASKED, never a phantom.** The old packer ran nan_to_num over the whole
+      block, so a non-finite lock-in became a live-looking (0, 0, 0) triple -- and cos^2+sin^2 = 1
+      says no real probe can produce that. Here `mask` is the single verdict: simulated AND finite
+      AND resolvable AND in band.
+    * **Pads are EXACTLY 0.0 in all six channels.** Deterministic, so every downstream constant-column
+      filter (posterior_predictive_check's s_std > 1e-10, overlay.rank_by_stats) drops them; and
+      finite, so train_nn's isfinite/|x|<1e15 filter and gen_cal_data's validity mask drop ZERO rows.
+      Never torch.empty, never NaN.
+    * **Valid probes are packed contiguously into slots 0..n-1, ascending in frequency.** The encoder
+      is provably slot-invariant so this is free for learning, but it makes the layout deterministic
+      across generate_observations / gen_training_data / the PPC / the experimental path, which is
+      what lets a test compare them byte-for-byte.
+
+    Raises rather than truncating when K > k_pad: silently dropping probes the caller paid to
+    simulate is the kind of attrition that shows up as a mysteriously uninformative posterior.
     """
-    mag = chi_stack.abs()
-    ang = torch.angle(chi_stack)
-    logmag = torch.log(torch.clamp(mag, min=_EPS))
-    feats = torch.stack([logmag, torch.cos(ang), torch.sin(ang)], dim=-1)     # (B, K, 3)
-    out = feats.reshape(feats.shape[0], -1)                                   # (B, 3K), per-freq blocks
-    return torch.nan_to_num(out.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    kp = config.CHI_K_PAD if k_pad is None else int(k_pad)
+    B, K = chi_stack.shape
+    if K > kp:
+        raise ValueError(
+            f"chi: {K} probes cannot be packed into {kp} slots (CHI_K_PAD). The pad is frozen into "
+            f"every posterior trained with it, so raise it deliberately and retrain, or probe less.")
+
+    u_mid, u_half = band_norm(bounds)
+    m = (valid.to(torch.bool)
+         & torch.isfinite(chi_stack.abs()) & (chi_stack.abs() > 0)
+         & torch.isfinite(u) & torch.isfinite(logcyc)
+         & (((u - u_mid) / u_half).abs() <= config.CHI_UHAT_MAX))
+
+    # Canonical order: valid slots first, ASCENDING IN FREQUENCY among them. Sorting here rather than
+    # trusting the caller matters for the experimental path, where the frequencies are whatever the
+    # operator typed in whatever order they typed them -- the layout must not depend on that. The
+    # encoder is permutation-invariant so this is free for learning; it exists so the simulated and
+    # experimental paths produce byte-comparable blocks for the same probe set.
+    big = torch.finfo(u.dtype).max
+    order = torch.argsort(torch.where(m, u, torch.full_like(u, big)), dim=1, stable=True)
+    logmag, cos, sin = _mag_phase(chi_stack)
+    elem = torch.stack([u, logmag, cos, sin, logcyc.to(u.dtype), m.to(u.dtype)], dim=-1)  # (B,K,6)
+    elem = torch.gather(elem, 1, order.unsqueeze(-1).expand(-1, -1, config.CHI_ELEM_W))
+    m_sorted = torch.gather(m, 1, order)
+    # Zero the whole slot wherever the mask is off, so a dead slot is 0.0 in every channel including
+    # any non-finite u/logcyc that came with it.
+    elem = torch.nan_to_num(elem, nan=0.0, posinf=0.0, neginf=0.0) * m_sorted.unsqueeze(-1).to(elem.dtype)
+
+    out = torch.zeros((B, kp, config.CHI_ELEM_W), dtype=torch.float32, device=chi_stack.device)
+    out[:, :K, :] = elem.to(torch.float32)
+    mask = torch.zeros((B, kp), dtype=torch.bool, device=chi_stack.device)
+    mask[:, :K] = m_sorted
+    return out.reshape(B, config.CHI_ELEM_W * kp), mask
