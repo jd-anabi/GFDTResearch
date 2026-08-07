@@ -48,10 +48,15 @@ Env knobs:
   SEED       RNG seed                                                   (default 0)
   CV_MAX     reproducibility ceiling on |chi| CV                        (default 0.20)
   PHASE_MAX  ceiling on circular phase scatter, radians                 (default 0.50)
+             ⚠ the one screen here with NO empirical basis. It was chosen, so a verdict that turns
+             on it (today: whether 0.3x belongs in the band) is not evidence -- see backlog C-5
   SNR_MIN    floor on driven/undriven |chi|  -- PROPOSED, not settled   (default 3.0)
   SUP_MIN    entrainment floor: own peak must retain this fraction      (default 0.50)
-  CYCLE_CAP  re-report every point locked in over a prefix of at most this many drive cycles.
-             This is the control that tells a bad FREQUENCY from a bad DURATION  (default 20)
+  CYCLE_CAP  the prefix length shown in the per-point table and the plot. This is the control that
+             tells a bad FREQUENCY from a bad DURATION                          (default 20)
+  CYCLE_CAPS every prefix length to evaluate, for the WALL BRACKET. All of them run on the same
+             traces, so this sweep costs lock-ins, not simulations -- never re-run the script per
+             cap                                       (default 8 12 16 20 26 32 40 56, + CYCLE_CAP)
   PEAK_BW    half-bandwidth of the entrainment integral, as a fraction of Omega_0   (default 0.10)
   N_TOBS     points in the default T grid                               (default 5)
   N_MULTS    in-band points in the default multiplier grid              (default 4)
@@ -82,7 +87,17 @@ _common.enable_warnings()
 M = int(os.environ.get("M", "24"))
 SEED = int(os.environ.get("SEED", "0"))
 CV_MAX = float(os.environ.get("CV_MAX", "0.20"))
-PHASE_MAX = float(os.environ.get("PHASE_MAX", "0.50"))
+# ADVISORY BY DEFAULT (inf), and that is a measured decision, not a loosening. C-5 swept 11
+# multipliers through the band's high edge: under the duration cap, circular phase scatter grows
+# SMOOTHLY from 0.13 to 1.52 rad with no knee anywhere (step ratios settle to ~1.15 per grid point),
+# so any threshold on it is a choice reported back as a finding -- and the choice is worth a 2.5x
+# difference in band width (0.5 rad would put the edge at 0.12x, entrainment puts it at 0.35-0.4x).
+# The column is still printed and still worth reading: a probe whose phase is irreproducible has lost
+# its cos/sin channels, so it is a HALF-USEFUL probe. It is not a corrupt one -- its |chi| CV stays
+# ~0.08 and its SNR ~12 -- which is why it should not be a pass/fail gate. Entrainment is the
+# criterion that discriminates, because it corrupts: a captured bundle reports the drive back to
+# itself. Set PHASE_MAX to re-enable the screen.
+PHASE_MAX = float(os.environ.get("PHASE_MAX", "inf"))
 SNR_MIN = float(os.environ.get("SNR_MIN", "3.0"))
 SUP_MIN = float(os.environ.get("SUP_MIN", "0.50"))
 N_TOBS = int(os.environ.get("N_TOBS", "5"))          # points in the default T grid
@@ -99,9 +114,23 @@ PEAK_BW = float(os.environ.get("PEAK_BW", "0.10"))
 #   "this DURATION is unusable"   -> the capped column recovers, and the fix is a per-probe duration
 #                                    cap, which costs nothing and leaves the band intact.
 # Those imply completely different changes, and the full-length column alone cannot tell them apart.
-CYCLE_CAP = float(os.environ.get("CYCLE_CAP", "20"))
+#
+# EVERY cap in CYCLE_CAPS is evaluated on the SAME simulations -- a cap is just a shorter prefix of an
+# already-existing trace, so bracketing the wall costs lock-ins, not simulations. Do not "sweep" this
+# by re-running the script per cap: that is N x the simulation cost for the same numbers.
+# Defaults to the ceiling ACTUALLY IN FORCE, so the capped column is what production measures rather
+# than a literal that can drift away from it.
+CYCLE_CAP = float(os.environ.get("CYCLE_CAP", config.CHI_MAX_CYCLES))
 
 PLOT_NAME = "chi_tobs_gate.png"
+
+
+class Capped(NamedTuple):
+    """The same four metrics, re-measured over a shorter prefix of the same trace."""
+    cv: float
+    phase: float
+    snr: float
+    cycles: float      # cycles the prefix actually spans (== the full count if the trace is shorter)
 
 
 class Point(NamedTuple):
@@ -111,10 +140,10 @@ class Point(NamedTuple):
     snr: float         # mean|chi_driven| / mean|chi_undriven| at the same probe frequency
     sup: float         # driven power at the UNDRIVEN Omega_0, over its undriven level
     cycles: float      # drive cycles the lock-in saw -- what CHI_MIN_CYCLES currently gates on
-    cv_cap: float      # the same CV, locked in over a prefix of at most CYCLE_CAP cycles
-    snr_cap: float     # the same SNR, over that prefix
-    phase_cap: float   # the same circular phase scatter, over that prefix
-    cycles_cap: float  # cycles that prefix actually spans (== cycles when the trace is shorter)
+    by_cap: dict       # cap (cycles) -> Capped.  Always contains CYCLE_CAP.
+
+    def cap(self, c=None):
+        return self.by_cap[CYCLE_CAP if c is None else c]
 
 
 def _grid(name, default):
@@ -135,6 +164,12 @@ def _default_mults():
 MULTS = _grid("MULTS", _default_mults())
 MULTS_ARE_DEFAULT = not os.environ.get("MULTS")
 F0_GRID = _grid("F0S", [config.CHI_F0])
+# Prefix lengths to bracket the reproducibility wall. Spans the two numbers on record -- 20 cycles is
+# known to work and ~31 is the shortest observed failure -- with room either side, so the knee is
+# inside the grid rather than at its edge. CYCLE_CAP is always included so the table, the plot and
+# the sweep agree.
+CYCLE_CAPS = sorted(set(_grid("CYCLE_CAPS", [8.0, 12.0, 16.0, 20.0, 26.0, 32.0, 40.0, 56.0])
+                        + [CYCLE_CAP]))
 
 
 def _reachable_t_seconds(cfg, hz):
@@ -210,9 +245,9 @@ def _save_plot(tobs, mults, res, f0):
          f"|chi| CV, full length  (pass <= {CV_MAX:g})", "viridis_r", True),
         ([[res[(t, m, f0)].snr for m in mults] for t in tobs],
          f"SNR, full length  (pass >= {SNR_MIN:g})", "viridis", False),
-        ([[res[(t, m, f0)].cv_cap for m in mults] for t in tobs],
+        ([[res[(t, m, f0)].cap().cv for m in mults] for t in tobs],
          f"|chi| CV, capped at {CYCLE_CAP:g} cycles", "viridis_r", False),
-        ([[res[(t, m, f0)].snr_cap for m in mults] for t in tobs],
+        ([[res[(t, m, f0)].cap().snr for m in mults] for t in tobs],
          f"SNR, capped at {CYCLE_CAP:g} cycles", "viridis", False),
     )
     # ONE colour scale per metric across BOTH rows. Per-panel autoscaling would give the capped row
@@ -310,40 +345,49 @@ def main():
             f_mean = float(freq_b.mean())
             cycles = f_mean * T_lockin
             masked = cycles < config.CHI_MIN_CYCLES
-            # One prefix length for the whole batch, as production's duration_frac does. Ceil so the
-            # cap is never undershot into a sub-cycle window by rounding.
-            n_cap = min(n_obs, max(1, int(math.ceil(CYCLE_CAP / max(f_mean, 1e-30) / cfg.dt_exp))))
-            T_cap = n_cap * cfg.dt_exp
-            cycles_cap = f_mean * T_cap
+            # One prefix length per cap for the whole batch, as production's duration_frac does. Ceil
+            # so a cap is never undershot into a sub-cycle window by rounding.
+            def _prefix(c):
+                n = min(n_obs, max(1, int(math.ceil(c / max(f_mean, 1e-30) / cfg.dt_exp))))
+                return n, n * cfg.dt_exp
             for f0 in F0_GRID:
                 amp_b = torch.full((M,), f0 * f_scale, dtype=dtype, device=device)
                 # The floor: the SAME lock-in, the SAME nominal amplitude, on the UNDRIVEN ensemble.
                 # Using the same amp_b makes the ratio a pure |chi| ratio (lock_in divides by F0).
                 chi_floor = chi_mod.lock_in_batched(x_spont, omega_b, amp_b, T_lockin, cfg.dt_exp)
-                chi_floor_c = chi_mod.lock_in_batched(x_spont[:, :n_cap], omega_b, amp_b, T_cap, cfg.dt_exp)
                 x_f = bmc._simulate(cfg, geom, amp_dim=amp_b, freq_cell=freq_b,
                                     phase=math.pi / 2, batch=M)
                 chi_v = chi_mod.lock_in_batched(x_f, omega_b, amp_b, T_lockin, cfg.dt_exp)
-                chi_c = chi_mod.lock_in_batched(x_f[:, :n_cap], omega_b, amp_b, T_cap, cfg.dt_exp)
-                mag, mag_c = chi_v.abs(), chi_c.abs()
+                mag = chi_v.abs()
                 cv = float(mag.std() / mag.mean().clamp(min=1e-30))
                 snr = float(mag.mean() / chi_floor.abs().mean().clamp(min=1e-30))
-                cv_cap = float(mag_c.std() / mag_c.mean().clamp(min=1e-30))
-                snr_cap = float(mag_c.mean() / chi_floor_c.abs().mean().clamp(min=1e-30))
-                phase_sd, phase_cap = _circ_std(chi_v), _circ_std(chi_c)
+                phase_sd = _circ_std(chi_v)
+                # Every cap, on the SAME two traces. A cap is a prefix, so this is lock-ins on
+                # tensors that already exist -- bracketing the wall costs no extra simulation.
+                by_cap = {}
+                for c in CYCLE_CAPS:
+                    n_c, T_c = _prefix(c)
+                    fl_c = chi_mod.lock_in_batched(x_spont[:, :n_c], omega_b, amp_b, T_c, cfg.dt_exp)
+                    dr_c = chi_mod.lock_in_batched(x_f[:, :n_c], omega_b, amp_b, T_c, cfg.dt_exp)
+                    m_c = dr_c.abs()
+                    by_cap[c] = Capped(
+                        cv=float(m_c.std() / m_c.mean().clamp(min=1e-30)),
+                        phase=_circ_std(dr_c),
+                        snr=float(m_c.mean() / fl_c.abs().mean().clamp(min=1e-30)),
+                        cycles=f_mean * T_c)
                 fr, po = bmc._psd(x_f, cfg.dt_exp)
                 # Entrainment is a property of the WHOLE driven trace's spectrum, not of the lock-in
-                # window, so there is no capped counterpart -- `sup` applies to both columns.
+                # window, so there is no capped counterpart -- `sup` applies to every column.
                 sup = bmc._power_near(fr, po, f0_ens, halfwidth_bins=peak_bins) / max(p_spont, 1e-30)
-                res[(T_s, mult, f0)] = Point(cv=cv, phase=phase_sd, snr=snr, sup=sup, cycles=cycles,
-                                             cv_cap=cv_cap, snr_cap=snr_cap, phase_cap=phase_cap,
-                                             cycles_cap=cycles_cap)
+                p = Point(cv=cv, phase=phase_sd, snr=snr, sup=sup, cycles=cycles, by_cap=by_cap)
+                res[(T_s, mult, f0)] = p
                 note = _verdict(cv, phase_sd, snr, sup)
                 if masked:
                     note += f"  [masked: {cycles:.2f} < CHI_MIN_CYCLES]"
+                pc = p.cap()
                 print(f"  {mult:6g} {f_mean * hz:8.4g} {cycles:7.2f} {f0:7.3g} "
-                      f"{cv:9.4g} {phase_sd:9.4g} {snr:8.4g} {sup:9.4g} | {cycles_cap:7.2f} "
-                      f"{cv_cap:8.4g} {snr_cap:8.4g}  {note}", flush=True)
+                      f"{cv:9.4g} {phase_sd:9.4g} {snr:8.4g} {sup:9.4g} | {pc.cycles:7.2f} "
+                      f"{pc.cv:8.4g} {pc.snr:8.4g}  {note}", flush=True)
                 del x_f
         del x_spont
         if device.type == "cuda":
@@ -358,6 +402,8 @@ def main():
               f"amplitude question. ===\n")
     _cycles_verdict(res)
     _cap_verdict(TOBS, res)
+    _wall_verdict(res)
+    _edge_profile(TOBS, res)
     _save_plot(TOBS, MULTS, res, F0_GRID[0])
 
 
@@ -383,8 +429,8 @@ def _band_verdict(TOBS, res):
         note = _verdict(res[wc].cv, res[wp].phase, res[ws].snr, res[wu].sup)
         # Same election over the capped columns. `sup` has no capped counterpart -- entrainment is a
         # spectral property of the driven trace, not of the lock-in window.
-        note_cap = _verdict(max(res[k].cv_cap for k in keys), max(res[k].phase_cap for k in keys),
-                            min(res[k].snr_cap for k in keys), res[wu].sup)
+        note_cap = _verdict(max(res[k].cap().cv for k in keys), max(res[k].cap().phase for k in keys),
+                            min(res[k].cap().snr for k in keys), res[wu].sup)
         if note == "OK":
             passing.append(mult)
         if note_cap == "OK":
@@ -464,6 +510,124 @@ def _f0_verdict(TOBS, res, f_scale):
     print()
 
 
+def _edge_profile(TOBS, res):
+    """Where does the band's HIGH EDGE actually break? -- backlog C-5.
+
+    The band verdict answers "does this multiplier cross the thresholds". That is the wrong question
+    at the edge, because ``PHASE_MAX`` was CHOSEN, not measured: a verdict that turns on it reports
+    the threshold back to itself. So this prints the CAPPED metrics as a monotone progression in
+    multiplier and looks for a KNEE -- a place where a metric's behaviour changes character, which is
+    a property of the cell rather than of a constant in this file.
+
+    Read it as: if phase scatter and own-peak degrade SMOOTHLY across the whole range, no threshold
+    here is defensible from this data and the edge has to be settled by training (C-5's expensive
+    branch). If they turn sharply somewhere, that turn IS the edge and the thresholds should be moved
+    to bracket it.
+    """
+    print("=== EDGE PROFILE: capped metrics vs probe frequency (backlog C-5) ===")
+    print(f"  Worst across T_obs, all at the {CYCLE_CAP:g}-cycle cap. 'step' is the ratio to the row")
+    print(f"  above -- a knee shows up there, not in the absolute values.")
+    print(f"  {'mult':>7} {'CV':>8} {'step':>6} {'SNR':>8} {'step':>6} {'phase':>8} {'step':>6} "
+          f"{'own peak':>9} {'step':>6}")
+    prev = None
+    for mult in MULTS:
+        keys = [(t, mult, f0) for t in TOBS for f0 in F0_GRID]
+        cv = max(res[k].cap().cv for k in keys)
+        snr = min(res[k].cap().snr for k in keys)
+        ph = max(res[k].cap().phase for k in keys)
+        sup = min(res[k].sup for k in keys)
+        cur = (cv, snr, ph, sup)
+        if prev is None:
+            print(f"  {mult:7g} {cv:8.4g} {'-':>6} {snr:8.4g} {'-':>6} {ph:8.4g} {'-':>6} "
+                  f"{sup:9.4g} {'-':>6}")
+        else:
+            r = [c / p if abs(p) > 1e-30 else float('inf') for c, p in zip(cur, prev)]
+            print(f"  {mult:7g} {cv:8.4g} {r[0]:6.2f} {snr:8.4g} {r[1]:6.2f} {ph:8.4g} {r[2]:6.2f} "
+                  f"{sup:9.4g} {r[3]:6.2f}")
+        prev = cur
+    print()
+    print(f"  Thresholds for reference: CV <= {CV_MAX:g}, SNR >= {SNR_MIN:g}, "
+          f"phase <= {PHASE_MAX:g} rad, own peak >= {SUP_MIN:g}")
+    print(f"  ⚠ PHASE_MAX and SNR_MIN were CHOSEN, not measured. Where a multiplier falls relative to")
+    print(f"    them is not evidence; where the STEP column turns is. If no step turns sharply, this")
+    print(f"    grid cannot settle the edge and C-5 needs the training comparison instead.\n")
+
+
+def _wall_verdict(res):
+    """WHERE is the reproducibility wall? -- the measurement C-4 needs before it can pick a cap.
+
+    Every cap is evaluated on the same traces, so this is a prefix-length sweep, not a re-run. Two
+    populations are reported per cap, and the distinction is the whole point:
+
+      TRUNCATED  points the cap actually shortened. These are the evidence about the wall: if their
+                 worst CV degrades as the cap grows, the cap is past it.
+      UNTOUCHED  points whose full trace is already shorter than the cap. They cannot say anything
+                 about a cap they never bound, and pooling them in would dilute exactly the signal
+                 being looked for -- at a large cap most of the grid is untouched, and the average
+                 would drift toward "fine" for a reason that has nothing to do with the cap.
+
+    A cap is only meaningful where it BINDS, so the recommendation below comes from the truncated
+    population and states how many points it rests on.
+    """
+    print("=== WALL BRACKET: worst metrics vs lock-in prefix length ===")
+    print("  (truncated = points the cap actually shortened; the only ones it says anything about)")
+    print(f"  {'cap':>6} {'n_trunc':>8} {'worst CV':>9} {'worst SNR':>10} {'worst phase':>12} "
+          f"{'n_fail':>7}   verdict")
+    rows = []
+    for c in CYCLE_CAPS:
+        trunc = [p for p in res.values() if p.cap(c).cycles < p.cycles - 1e-9]
+        if not trunc:
+            print(f"  {c:6g} {0:8d} {'-':>9} {'-':>10} {'-':>12} {'-':>7}   "
+                  f"binds nothing in this grid")
+            continue
+        w_cv = max(p.cap(c).cv for p in trunc)
+        w_snr = min(p.cap(c).snr for p in trunc)
+        w_ph = max(p.cap(c).phase for p in trunc)
+        n_fail = sum(1 for p in trunc
+                     if _verdict(p.cap(c).cv, p.cap(c).phase, p.cap(c).snr, p.sup) != "OK")
+        rows.append((c, len(trunc), w_cv, w_snr, w_ph, n_fail))
+        print(f"  {c:6g} {len(trunc):8d} {w_cv:9.4g} {w_snr:10.4g} {w_ph:12.4g} {n_fail:7d}   "
+              f"{'clean' if n_fail == 0 else f'{n_fail} point(s) fail'}")
+
+    print()
+    if not rows:
+        print("  No cap in CYCLE_CAPS binds any point -- every trace is shorter than every cap.")
+        print("  Extend TOBS_GRID upward or lower CYCLE_CAPS before reading anything into this.\n")
+        return
+    # The wall is the SMALLEST failing cap, not the largest clean one. Scanning from the top and
+    # taking max(clean) would jump straight over an interior failure -- and these metrics are NOT
+    # monotonic in the cap (a CV over M seeds is itself an estimate), so an interior failure with
+    # clean caps above it is a normal outcome and a signal about precision, not about the wall.
+    failing = [r[0] for r in rows if r[5] > 0]
+    if not failing:
+        print(f"  NO cap in the grid fails, so the wall is ABOVE {max(r[0] for r in rows):g} cycles and")
+        print(f"  this grid does not bracket it. Raise CYCLE_CAPS (and TOBS_GRID, so the longer caps")
+        print(f"  actually bind) before choosing CHI_MAX_CYCLES.\n")
+        return
+    first_fail = min(failing)
+    below = [r for r in rows if r[0] < first_fail and r[5] == 0]
+    clean_above = [(r[0], r[1]) for r in rows if r[5] == 0 and r[0] > first_fail]
+    if not below:
+        print(f"  !! The SMALLEST cap that binds ({first_fail:g} cycles) already fails, so this grid")
+        print(f"     does not bracket the wall from below -- it may be lower still, or the failures")
+        print(f"     may not be duration-driven at all. Lower CYCLE_CAPS, and check the LOCK-IN")
+        print(f"     DURATION CAP table above for which points survive.\n")
+        return
+    best = max(below, key=lambda r: r[0])
+    print(f"  First failing cap: {first_fail:g} cycles. Largest clean cap below it: {best[0]:g} "
+          f"({best[1]} truncated points, worst CV {best[2]:.3g}, worst SNR {best[3]:.3g}).")
+    print(f"  => the wall sits between {best[0]:g} and {first_fail:g} cycles. Set CHI_MAX_CYCLES at or")
+    print(f"     below {best[0]:g}, with margin: this is ONE cell at ONE F0, and the estimate is only")
+    print(f"     as fine as the CYCLE_CAPS grid.")
+    if clean_above:
+        print(f"  ⚠ NON-MONOTONIC: caps {[c for c, _ in clean_above]} are clean despite sitting ABOVE")
+        print(f"    a failing one, on {[n for _, n in clean_above]} truncated point(s) respectively.")
+        print(f"    A large cap BINDS FEWER POINTS -- only traces longer than it -- so the top of this")
+        print(f"    table is thin evidence by construction, and each cell is still an M={M} CV")
+        print(f"    estimate. Read the trend over the caps with many points, not the last row.")
+    print()
+
+
 def _cycles_verdict(res):
     """Is the drive-cycle count a good proxy for informativeness? -- the CHI_MIN_CYCLES question.
 
@@ -533,18 +697,18 @@ def _cap_verdict(TOBS, res):
 
     def _capped(p):
         """The cap actually shortened this point AND the shortened lock-in passes."""
-        return (p.cycles_cap < p.cycles - 1e-9
-                and _verdict(p.cv_cap, p.phase_cap, p.snr_cap, p.sup) == "OK")
+        return (p.cap().cycles < p.cycles - 1e-9
+                and _verdict(p.cap().cv, p.cap().phase, p.cap().snr, p.sup) == "OK")
 
     rescued = [(k, p) for k, p in failed if _capped(p)]
     print(f"  {'T(s)':>6} {'mult':>7} {'cycles':>8} {'CV':>8} {'SNR':>8}  ->  "
           f"{'cyc@cap':>7} {'CV@cap':>8} {'SNR@cap':>8}   ")
     for k, p in sorted(failed):
         tag = ("RESCUED" if _capped(p) else
-               "no cap applied" if p.cycles_cap >= p.cycles - 1e-9 else "still fails")
+               "no cap applied" if p.cap().cycles >= p.cycles - 1e-9 else "still fails")
         print(f"  {k[0]:6g} {k[1]:7g} {p.cycles:8.2f} {p.cv:8.4g} {p.snr:8.4g}  ->  "
-              f"{p.cycles_cap:7.2f} {p.cv_cap:8.4g} {p.snr_cap:8.4g}   {tag}")
-    n_capable = sum(1 for _, p in failed if p.cycles_cap < p.cycles - 1e-9)
+              f"{p.cap().cycles:7.2f} {p.cap().cv:8.4g} {p.cap().snr:8.4g}   {tag}")
+    n_capable = sum(1 for _, p in failed if p.cap().cycles < p.cycles - 1e-9)
     print()
     if n_capable and len(rescued) == n_capable:
         print(f"  ALL {len(rescued)} over-long failures RECOVER under a {CYCLE_CAP:g}-cycle cap.")

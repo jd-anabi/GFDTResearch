@@ -302,6 +302,36 @@ CHI_MIN_CYCLES = 2.0   # a probe is MASKED (never moved, never dropped) below th
                        # larger floor because measurement refuses one: at T=5s, mult=0.03 the probe has
                        # 3.39 cycles and the BEST |chi| CV in the sweep (0.024), so a floor of 8 would
                        # delete the best probe in the experiment.
+CHI_MAX_CYCLES = 20.0  # CEILING on the drive cycles a probe is locked in over. The counterpart to
+                       # CHI_MIN_CYCLES above, and the less obvious of the two: every instinct about
+                       # integration says a longer lock-in is a better one, and above ~30 cycles on
+                       # this model it is not. Measured 2026-08-06 (handoff 4.3.1 / trap CHI9): at
+                       # FIXED theta, |chi| CV runs 0.03 -> 0.63 and driven/undriven SNR 26 -> 2.3 as
+                       # the window grows past the wall, and re-locking the SAME trace over a shorter
+                       # prefix reverses it completely. A stationary noise-limited estimator cannot do
+                       # that, so the response is non-stationary on the scale of tens of drive cycles
+                       # and the lock-in accumulates that wander instead of averaging it away.
+                       # This is NOT a filter: no probe is masked or dropped by it. It shortens the
+                       # SEGMENT the lock-in runs over, which is a property of the measurement, so it
+                       # lives in gen_chi_raw where every caller -- training, the Fisher rotation, the
+                       # PPC and the experimental path -- goes through it. Applying it in one caller
+                       # would make the network condition on a different observable than it was
+                       # trained on, which is silent.
+                       # WHY 20. scripts/chi_f0_sweep.py brackets the wall by re-locking the same
+                       # traces over every prefix length (M=48, in-band probes only so frequency
+                       # effects cannot confound it). Worst |chi| CV by cap:
+                       #   8 -> 0.042   12 -> 0.039   16 -> 0.047   20 -> 0.062
+                       #   24 -> 0.086  28 -> 0.123   32 -> 0.198   36 -> 0.456  (first failure)
+                       # A steady climb, not a cliff, so there is no "correct" value -- only a
+                       # trade-off. 20 sits in the flat part with ~3x margin to the 0.2 CV screen and
+                       # 10x above CHI_MIN_CYCLES, and it is the value the 4.3.1 rescue table already
+                       # validated end-to-end on every failing point. 12-16 reproduce slightly better;
+                       # they were not chosen because NOTHING here measures the other side of the
+                       # trade -- a shorter lock-in is also less frequency-selective, and no
+                       # experiment in this repo has yet priced that.
+                       # It is frozen into the artifact for the same reason the band is: a posterior
+                       # trained at one ceiling and evaluated at another sees different logcyc values
+                       # for the same recording. The sidecar carries it and the load path checks it.
 CHI_UHAT_MAX = 1.25    # band-normalised |u_hat| beyond which a probe is masked (packer) or refused
                        # (experimental path). Replaces clamping, which silently moved probes.
 # Encoder geometry. Functions of CHI_ELEM_W and design choice ONLY -- never of CHI_K_PAD, or the
@@ -413,6 +443,10 @@ class SimConfig:
     chi_k_pad: int = field(default_factory=lambda: CHI_K_PAD)
     chi_f0: float = field(default_factory=lambda: CHI_F0)
     chi_freq_bounds: tuple = field(default_factory=lambda: CHI_FREQ_BOUNDS)
+    # The lock-in duration ceiling, in drive cycles. On the config for the same reason as the band:
+    # it changes the logcyc a given recording reports, so a posterior trained under one ceiling and
+    # evaluated under another is reading a different observable.
+    chi_max_cycles: float = field(default_factory=lambda: CHI_MAX_CYCLES)
 
     # Decorrelating Fisher rotation, carried per-config for the same reason as the chi knobs: consumers
     # used to `from .config import REPARAM_ROTATE`, which snapshots at import and cannot be toggled at
@@ -460,6 +494,15 @@ class SimConfig:
                 f"chi_n_freqs={self.chi_n_freqs} probes cannot be packed into chi_k_pad="
                 f"{self.chi_k_pad} slots. Lower the probe count, or raise the pad (which invalidates "
                 f"posteriors trained at the current pad).")
+        # The floor masks a probe; the ceiling shortens it. If they cross, the ceiling truncates
+        # every probe to under the floor and the packer masks the entire set -- an all-masked
+        # observation, which the experimental path refuses outright. That would surface as "every
+        # probe was masked" with nothing pointing at the two constants that closed on each other.
+        if not (float(self.chi_max_cycles) > CHI_MIN_CYCLES):
+            raise ValueError(
+                f"chi_max_cycles={self.chi_max_cycles} does not clear CHI_MIN_CYCLES={CHI_MIN_CYCLES}. "
+                f"The ceiling truncates a probe's lock-in and the floor masks it below that many "
+                f"cycles, so a ceiling at or under the floor masks every probe in every observation.")
 
     # --- Derived properties ---
     @property

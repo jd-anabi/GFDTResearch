@@ -193,6 +193,11 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                     rescale_idx=cfg.rescale_idx, n_segs=n_segs, steady_idx=cfg.steady_idx,
                     subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
                     multipliers=chi_mults, f0_nd=cfg.chi_f0,
+                    # The duration ceiling STAYS ON here, unlike resolution_filter. The filter is a
+                    # theta-dependent MASK and so poisons a central difference; the ceiling shortens
+                    # the segment and is theta-independent given the probe frequency. Turning it off
+                    # would build the rotation over a longer lock-in than the network ever sees.
+                    max_cycles=cfg.chi_max_cycles,
                     state_dep_drift=cfg.state_dep_drift, resolution_filter=False,
                     dtype=dtype, device=device)
                 fisher_block = _chi.fisher_features(chi_v, logcyc_v)

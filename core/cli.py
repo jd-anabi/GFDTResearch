@@ -480,7 +480,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
                     bounds_dicts=None, units_override=None,
                     chi_mode: bool | None = None, chi_n_freqs: int | None = None,
                     chi_f0: float | None = None, chi_freq_bounds: tuple | None = None,
-                    chi_k_pad: int | None = None,
+                    chi_k_pad: int | None = None, chi_max_cycles: float | None = None,
                     reparam_rotate: bool | None = None) -> SimConfig:
     """
     Build a bounds-only SimConfig (no prompts) from a chosen model + bounds file. Ground-truth values,
@@ -532,6 +532,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         chi_freq_bounds=(config.CHI_FREQ_BOUNDS if chi_freq_bounds is None
                          else tuple(chi_freq_bounds)),
         chi_k_pad=config.CHI_K_PAD if chi_k_pad is None else int(chi_k_pad),
+        chi_max_cycles=(config.CHI_MAX_CYCLES if chi_max_cycles is None else float(chi_max_cycles)),
         reparam_rotate=(config.REPARAM_ROTATE if reparam_rotate is None else bool(reparam_rotate)),
         dt_exp=DT_EXP_S * s_to_cell,
         t_min_exp=T_MIN_EXP_S * s_to_cell,

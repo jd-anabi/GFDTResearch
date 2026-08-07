@@ -35,6 +35,7 @@ from core import cli, config, orchestrator, registry
 from core.config import BOUNDS_PATH, CELL_PATH, POSTERIOR_PATH, PRIOR_PATH, VALID_LABELS, VALID_MODELS
 from core.Helpers import file_manager
 from core.SBI import reparam
+from core.SBI.statistics import FEATURE_LABELS
 
 _NAD = "nadrowski"
 _LABELS = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
@@ -198,9 +199,23 @@ def test_a_prior_the_posterior_was_not_trained_with_is_refused():
 
 # ── posterior identity ────────────────────────────────────────────────────────────────────────────
 def _sidecar(cfg, **over):
+    """A sidecar that a CURRENT build would actually write, so an override tests what it names.
+
+    Every field the chi block of ``_assert_mode_matches`` gates on has to be here and has to be
+    RIGHT. It is checked in order and the first mismatch raises, so one missing key makes every test
+    built on this helper pass on that key instead of on its own override -- which is what happened:
+    ``chi_layout``/``chi_k_pad``/``chi_elem_w`` were absent, so the baseline sidecar was rejected as
+    "trained under chi layout 1" and the model / param-order cases below were never reached.
+    """
     keys = list(cfg.params_dict) + list(cfg.rescale_params)
     d = dict(
-        V=None, log_params=[], mode="chi", input_dim=42, forcing_dim=12, chi_n_freqs=4,
+        V=None, log_params=[], mode="chi", chi_n_freqs=4,
+        # DERIVED, never literals. These were `input_dim=42, forcing_dim=12` -- 12 being 3K at K=4
+        # under the retired layout-1 grid, stale since the probe set landed and silently wrong ever
+        # since. Deriving them from the same helpers the writer uses is what keeps a fixture honest.
+        input_dim=len(FEATURE_LABELS) + 1, forcing_dim=orchestrator.expected_forcing_dim(cfg),
+        chi_layout=config.CHI_LAYOUT, chi_k_pad=cfg.chi_k_pad, chi_elem_w=config.CHI_ELEM_W,
+        chi_max_cycles=float(cfg.chi_max_cycles),
         chi_f0=cfg.chi_f0, chi_freq_bounds=tuple(cfg.chi_freq_bounds), param_keys=keys,
         model="NADROWSKI",
         nd_lows=torch.tensor([b[0] for _, b in cfg.params_dict.values()], dtype=torch.float64),
@@ -248,6 +263,10 @@ def test_a_posterior_over_different_parameters_is_refused():
     path = POSTERIOR_PATH / "_ptest.rot.pt"
     keys = list(cfg.params_dict) + list(cfg.rescale_params)
     try:
+        # THE BASELINE, and the reason this test means anything: an unmodified sidecar must be
+        # ACCEPTED. Without it every case below can pass on some unrelated field being wrong.
+        torch.save(_sidecar(cfg), str(path))
+        orchestrator._assert_mode_matches(cfg, object(), "_ptest.pt")
         for tag, over in (("model", {"model": "HOPF"}),
                           ("param order", {"param_keys": keys[1:] + keys[:1]})):
             torch.save(_sidecar(cfg, **over), str(path))
@@ -256,6 +275,36 @@ def test_a_posterior_over_different_parameters_is_refused():
                 raise AssertionError(f"a posterior with the wrong {tag} was accepted")
             except ValueError:
                 pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_a_posterior_trained_at_a_different_cycle_ceiling_is_refused():
+    """chi_max_cycles is frozen into an artifact for the same reason the band is.
+
+    It decides how much of each recording is integrated, so the SAME bench data yields a different
+    |chi| and -- the part that bites -- a different ``logcyc`` under two ceilings. logcyc is the
+    channel the encoder uses to decide how much to trust a probe, so evaluating at a foreign ceiling
+    feeds it a value the training set never contained, on precisely the channel whose job is
+    calibration. Nothing about the shapes disagrees, so without this check it loads clean.
+
+    An ABSENT ceiling must stay silent: posteriors written before 2026-08-06 have no such field, and
+    turning those into a hard failure would strand every existing artifact.
+    """
+    cfg = _cfg(chi_mode=True, chi_n_freqs=4)
+    path = POSTERIOR_PATH / "_ptest.rot.pt"
+    try:
+        torch.save(_sidecar(cfg, chi_max_cycles=float(cfg.chi_max_cycles) * 2), str(path))
+        try:
+            orchestrator._assert_mode_matches(cfg, object(), "_ptest.pt")
+            raise AssertionError("a posterior trained at a different cycle ceiling was accepted")
+        except ValueError as e:
+            assert "ceiling" in str(e), f"the message must name the ceiling, got: {e}"
+
+        d = _sidecar(cfg)
+        d.pop("chi_max_cycles")
+        torch.save(d, str(path))
+        orchestrator._assert_mode_matches(cfg, object(), "_ptest.pt")   # legacy: must not raise
     finally:
         path.unlink(missing_ok=True)
 

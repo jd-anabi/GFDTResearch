@@ -239,6 +239,7 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
             cfg.model, cfg.params_tensor, rescale_gt, x_spont_dim, t_fine, cfg.inits_tensor,
             cfg.rescale_idx, n_segs_gt, cfg.steady_idx, subsample_factor, N_obs, cfg.dt_exp,
             obs_mults, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
+            max_cycles=cfg.chi_max_cycles,
             state_dep_drift=cfg.state_dep_drift, dtype=cfg.hw.dtype, device=cfg.hw.device)
         # Record the ABSOLUTE probe frequencies this observation was measured at, so the PPC drives
         # the same experiment rather than re-deriving frequencies from each posterior sample's own
@@ -626,6 +627,7 @@ def build_posterior(
         "chi_f0": cfg.chi_f0,
         "chi_freq_bounds": cfg.chi_freq_bounds,
         "chi_k_pad": cfg.chi_k_pad,
+        "chi_max_cycles": cfg.chi_max_cycles,
         # _observation_inits, NOT cfg.inits_tensor: training is ground-truth-free, so a config built from
         # bounds alone (no cell loaded) has an empty inits_dict and cfg.inits_tensor would RAISE. The
         # fallback synthesizes the same model-default inits the training loop itself uses.
@@ -773,6 +775,15 @@ def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
                     f"Posterior '{choice}' was trained over chi band {tuple(got_band)}, but this "
                     f"config declares {tuple(cfg.chi_freq_bounds)}. The band fixes the encoder's "
                     f"frequency normalization and is baked into its weights.")
+            got_cyc = (sidecar or {}).get("chi_max_cycles")
+            if got_cyc is not None and abs(float(got_cyc) - float(cfg.chi_max_cycles)) > 1e-9:
+                raise ValueError(
+                    f"Posterior '{choice}' was trained with a {float(got_cyc):g}-cycle lock-in "
+                    f"ceiling, but this config declares {float(cfg.chi_max_cycles):g}. The ceiling "
+                    f"decides how much of each recording is integrated, so the same bench data "
+                    f"produces different |chi| AND a different logcyc under the two -- and logcyc is "
+                    f"how the encoder weighs a probe. Set chi_max_cycles back to {float(got_cyc):g}, "
+                    f"or retrain.")
 
     try:
         mode, forcing_dim, k = reparam_posterior_mode(posterior_latent, sidecar)
@@ -849,6 +860,11 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
         "chi_n_freqs": cfg.chi_n_freqs if cfg.chi_mode else None,
         "chi_f0": cfg.chi_f0 if cfg.chi_mode else None,
         "chi_freq_bounds": tuple(cfg.chi_freq_bounds) if cfg.chi_mode else None,
+        # The lock-in duration ceiling. Recorded for the same reason as the band: it sets the logcyc
+        # a given recording reports, and logcyc is the channel the encoder uses to decide how much to
+        # trust a probe. Evaluating at a different ceiling feeds it a value the training set never
+        # contained, on the one channel whose job is calibration.
+        "chi_max_cycles": float(cfg.chi_max_cycles) if cfg.chi_mode else None,
         # Parameter ORDER is load-bearing (simulators bind columns positionally), so record it.
         "param_keys": list(cfg.params_dict.keys()) + list(cfg.rescale_params.keys()),
         # THE TRAINING BOX. The flow learns a density over the LATENT coordinate, so the box is what
@@ -1018,7 +1034,7 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
         # work on a cell-free config (cfg.inits_tensor would raise). See build_posterior.
         spontaneous_only=not cfg.has_forcing, chi_mode=cfg.chi_mode,
         chi_f0=cfg.chi_f0, chi_freq_bounds=cfg.chi_freq_bounds,
-        chi_k_pad=cfg.chi_k_pad,
+        chi_k_pad=cfg.chi_k_pad, chi_max_cycles=cfg.chi_max_cycles,
         # chi_k_fixed stays None here: validate_calibration's SBC is the POOLED one, over the same
         # mixture of probe counts training saw. Stratifying by count is scripts/sbc_characterize.py's
         # CHI_K_FIXED, run per stratum -- see section 4.1 step 5.
@@ -1208,7 +1224,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
                     inits.expand(bs, -1), cfg.rescale_idx, n_segs_bin, cfg.steady_idx,
                     subsample_factors, N_points_obs, cfg.dt_exp,
                     probe, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
-                    absolute_freqs=absolute,
+                    absolute_freqs=absolute, max_cycles=cfg.chi_max_cycles,
                     state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=device)[0]
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -1644,6 +1660,24 @@ def build_experiment_obs_chi(
                 f"chi probe {k}: {f_val / cfg.freq_si_to_cell:g} Hz is outside the band this "
                 f"posterior was trained over. For this cell (Omega_0 = "
                 f"{float(f_peak) / cfg.freq_si_to_cell:g} Hz) that is {in_band[0]:g}-{in_band[1]:g} Hz.")
+        # THE DURATION CEILING (config.CHI_MAX_CYCLES) -- the same one gen_chi_raw applies to every
+        # training row. A bench recording is routinely far longer than the ceiling, and locking in
+        # over all of it would be wrong twice over: |chi| goes past the reproducibility wall (trap
+        # CHI9), and logcyc reports a cycle count no training row ever carried, so the encoder is
+        # extrapolating on the one channel that tells it how much to trust the probe. TRUNCATE rather
+        # than mask -- the recording is fine, only its tail is unusable, and the leading prefix is
+        # exactly what training measured. Warned, not silent: the user recorded that length on
+        # purpose and is entitled to know only part of it was used.
+        n_cap = max(1, int(math.floor(cfg.chi_max_cycles / f_val / cfg.dt_exp)))
+        if n_cap < N_k:
+            warnings.warn(
+                f"chi probe {k}: {N_k} samples give {f_val * T_k:.1f} drive cycles, above the "
+                f"{cfg.chi_max_cycles:g}-cycle ceiling; locking in over the first {n_cap} samples "
+                f"({n_cap * cfg.dt_exp / s_to_cell:.3g} s) only. Above the ceiling |chi| stops being "
+                f"reproducible at fixed parameters, so the extra recording carries no information "
+                f"the network can use.", stacklevel=2)
+            Xf_b, N_k = Xf_b[:, :n_cap], n_cap
+            T_k = N_k * cfg.dt_exp
         # UNDER-RESOLVED IS MASKED, NOT REFUSED -- unlike the structural errors above.
         #
         # The distinction is train/eval consistency. Training MASKS a sub-cycle probe and keeps the

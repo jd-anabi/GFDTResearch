@@ -141,7 +141,11 @@ def _raw(pvec, rescale_vec, m, crn):
                 t_fine=t_fine, inits=inits_m, rescale_idx=cfg.rescale_idx, n_segs=n_segs,
                 steady_idx=cfg.steady_idx, subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
                 multipliers=_MULTS, f0_nd=cfg.chi_f0, state_dep_drift=cfg.state_dep_drift,
-                resolution_filter=False, dtype=dtype, device=device)[:2]
+                # Ceiling ON, filter OFF -- see the note at the same call in SBI/decorrelate.feats.
+                # Without it this measures the information in a lock-in longer than any the network
+                # will ever be given, which is a different experiment from the one being mapped.
+                max_cycles=cfg.chi_max_cycles, resolution_filter=False,
+                dtype=dtype, device=device)[:2]
             chi_block = chi_mod.fisher_features(chi_v, logcyc_v)
             spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True).numpy()

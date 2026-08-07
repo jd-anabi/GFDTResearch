@@ -394,7 +394,8 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
                 multipliers: torch.Tensor, f0_nd: float, state_dep_drift: bool = False,
                 fixed_dict: dict = None,
                 absolute_freqs: bool = False, resolution_filter: bool = True,
-                duration_frac=None, dtype: torch.dtype = torch.float32,
+                duration_frac=None, max_cycles: float | None = None,
+                dtype: torch.dtype = torch.float32,
                 device: torch.device = torch.device('cpu')) -> tuple:
     """
     K single-tone forced runs -> the RAW probe measurements
@@ -430,9 +431,18 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
                               of a central difference -- a step of 1 divided by fnoise's 1e-9 floor
                               puts ~1e9 into the Jacobian, and V becomes that discontinuity.
     :param duration_frac: (K,) fractions of N_points to lock each probe in over. None = full length.
+    :param max_cycles: CEILING on the drive cycles each probe is locked in over; None reads
+                       ``config.CHI_MAX_CYCLES``, ``math.inf`` disables it. Applied AFTER
+                       ``duration_frac``, so it is a ceiling on that draw rather than a replacement.
+                       This is not a filter -- nothing is masked or dropped, the SEGMENT is shortened
+                       -- which is why it lives here rather than in a caller: training, the Fisher
+                       rotation, the PPC and the experimental path must all measure the same
+                       observable, and a ceiling applied in only one of them is silent. See
+                       config.CHI_MAX_CYCLES for the measurement behind it.
     :return: (chi (B,K) complex, u (B,K), logcyc (B,K), valid (B,K) bool). Use
              :func:`gen_chi_block` for the padded conditioning block.
     """
+    max_cycles = config.CHI_MAX_CYCLES if max_cycles is None else float(max_cycles)
     B = params_nd.shape[0]
     f_peak = chi.peak_freq(x_spont_dim, dt_exp)                         # (B,) cell freq units
     x_scale = rescale[:, rescale_idx["x_scale"]].unsqueeze(1)
@@ -493,6 +503,27 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         # it makes the (duration, frequency) trade-off -- what a real session actually varies -- an
         # axis of the training distribution rather than a constant.
         N_k = N_points if duration_frac is None else max(1, int(round(float(duration_frac[k]) * N_points)))
+        # THE DURATION CEILING (config.CHI_MAX_CYCLES). Keyed on the batch's HIGHEST f_peak, so no ROW
+        # exceeds it -- N_k is one scalar for the batch while freq_k is per-sample, and lock_in_batched
+        # takes a scalar T_obs, so a per-row duration is not expressible without slicing per row.
+        #
+        # THE COST, stated because it is real and unmeasured: a row whose f_peak is a fraction q of
+        # the batch's fastest gets q * max_cycles cycles, so a batch spanning a decade in f_peak
+        # leaves its slowest rows near CHI_MIN_CYCLES and some of them masked. The alternative --
+        # keying on the median -- puts the FASTEST rows, the ones nearest the wall, back over it. That
+        # asymmetry decides it: over-truncation is visible (gen_chi_block already counts and warns
+        # "chi: N/M probes masked") and the network is trained on masked sets by design, while going
+        # over the wall is silent and is the exact failure this ceiling exists to prevent. Watch that
+        # masked count on the smoke train; if it is large, the fix is a per-row slice here, not a
+        # laxer key. Cannot collide with CHI_MIN_CYCLES below -- SimConfig.__post_init__ rejects a
+        # ceiling that does not clear the floor -- but that guard bounds the FASTEST row only.
+        # Over the ALREADY-VALIDATED rows only: freq_k still holds the non-finite / out-of-Nyquist
+        # entries of rows masked on the line above, and a single inf would collapse N_k to 1 sample
+        # for the whole batch. All rows invalid -> the probe is masked anyway, so leave N_k alone.
+        if math.isfinite(max_cycles) and bool(valid[:, k].any()):
+            f_hi = float(freq_k[valid[:, k]].max())
+            if f_hi > 0.0:
+                N_k = max(1, min(N_k, int(math.floor(max_cycles / f_hi / dt_exp))))
         T_k = N_k * dt_exp
         if resolution_filter:
             # A lock-in over a fraction of a cycle returns the demeaned trace's residual drift plus
@@ -569,7 +600,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                       spontaneous_only: bool = False, chi_mode: bool = False,
                       chi_f0: float | None = None,
                       chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
-                      chi_k_fixed: int | None = None,
+                      chi_k_fixed: int | None = None, chi_max_cycles: float | None = None,
                       n_vars: int | None = None,
                       dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> tuple:
     """
@@ -626,6 +657,11 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                         ``chi_n_freqs`` here: that is the count an OBSERVATION supplies, and honouring
                         it during data generation would destroy the K-agnosticism the padded probe-set
                         layout exists to provide.
+    :param chi_max_cycles: lock-in duration CEILING in drive cycles; None reads
+                           ``config.CHI_MAX_CYCLES``. Bounds the ``duration_frac`` draw below --
+                           without it the draw is a FRACTION of the recording, which does not bound
+                           cycles at all, so a long recording walks its probes past the
+                           reproducibility wall (config.CHI_MAX_CYCLES, trap CHI9).
     :param dtype: Tensor data type. Defaults to torch.float32.
     :param device: Computation device. Defaults to CPU.
     :return: Tuple of (training_data, thetas) where training_data has shape
@@ -838,7 +874,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
                     b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
                     k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
-                    dtype=dtype, device=device)
+                    max_cycles=chi_max_cycles, dtype=dtype, device=device)
                 # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
                 # rows that keep the probe -- and it is the only way to decouple the probe count from
                 # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
@@ -1030,6 +1066,7 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             chi_freq_bounds=training_params.get("chi_freq_bounds", None),
             chi_k_pad=training_params.get("chi_k_pad", None),
             chi_k_fixed=training_params.get("chi_k_fixed", None),
+            chi_max_cycles=training_params.get("chi_max_cycles", None),
             n_vars=training_params.get("n_vars", None),
             dtype=training_params["dtype"], device=training_params["device"],
         )

@@ -798,6 +798,118 @@ def test_chi_k_fixed_holds_the_probe_count_for_a_stratified_calibration():
                 f"than the network has slots or for an all-masked observation.")
 
 
+def test_lock_in_duration_is_capped_at_chi_max_cycles():
+    """No probe may be locked in over more than ``chi_max_cycles`` drive cycles -- in the SIMULATED
+    path and in the EXPERIMENTAL one, which must agree or the network is fed an observable it was
+    not trained on.
+
+    WHY THIS EXISTS. Every instinct about integration says a longer lock-in is a better one; measured
+    (handoff 4.3.1, trap CHI9), |chi| CV runs 0.03 -> 0.63 and driven/undriven SNR 26 -> 2.3 as the
+    window grows past ~30 cycles, and re-locking the SAME trace over a shorter prefix reverses it.
+    The ceiling is therefore part of the measurement's definition, and it is silent when missing:
+    nothing errors, the run simply reproduces posterior_chi_08042026's uninformative failure.
+
+    Asserted on ``logcyc``, the probe's own record of the cycles it saw, because that is both the
+    thing the ceiling changes and the channel the encoder uses to weigh a probe -- so a cap that
+    failed to move it would be a cap the network cannot see. ``absolute_freqs`` pins the probe
+    frequency instead of deriving it from a measured Omega_0, so "cycles" here is arithmetic rather
+    than an estimate.
+    """
+    model = "NADROWSKI"
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
+                              registry.state_dep_drift(model),
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+    dtype = cfg.hw.dtype
+
+    B, N_points, cap = 2, 4000, 20.0
+    steady_idx, subsample = 200, 1
+    t_fine = torch.linspace(0, (steady_idx + N_points) * cfg.dt_nd_min,
+                            steady_idx + N_points, dtype=dtype)
+    nd = cfg.params_tensor[0].reshape(1, -1).expand(B, -1).contiguous()
+    rescale = torch.tensor([[v for v, _ in cfg.rescale_params.values()]],
+                           dtype=dtype).expand(B, -1).contiguous()
+    inits = cfg.inits_tensor.reshape(1, -1).expand(B, -1).contiguous()
+    # A DETERMINISTIC Omega_0. peak_freq is the argmax of the rfft, so a pure tone on a bin centre
+    # pins it; torch.randn would make Omega_0 the argmax of NOISE -- a different value every run, and
+    # the experimental leg below (which checks the probe is in band, a band defined relative to
+    # Omega_0) would then pass or fail by coin flip. It did: this test passed standalone and took the
+    # suite down on the next full run.
+    tt = torch.arange(N_points, dtype=dtype) * cfg.dt_exp
+    f0_cell = 668.0 / (N_points * cfg.dt_exp)                    # exactly on rfft bin 668
+    x_spont = torch.sin(2 * math.pi * f0_cell * tt).unsqueeze(0).expand(B, -1).contiguous()
+    # Half a BIN, not an epsilon: the claim is "peak_freq landed on the intended bin", and the
+    # frequency axis is float32, so an exact comparison fails on representation alone.
+    assert abs(float(chi_mod.peak_freq(x_spont, cfg.dt_exp)[0]) - f0_cell) < 0.5 / (N_points * cfg.dt_exp), \
+        "the synthetic passive trace must pin Omega_0, or the band below is not what it says"
+    # Probe at the band's TOP edge: in band by construction, and the most cycles available in band,
+    # so the ceiling binds hard (200 cycles at full length against a 20-cycle cap).
+    f_abs = float(cfg.chi_freq_bounds[1]) * f0_cell
+    assert f_abs < 0.9 * (0.5 / cfg.dt_exp), "the test probe must stay under Nyquist"
+
+    def _cycles(max_cycles):
+        _chi, _u, logcyc, _valid = pipeline_mod.gen_chi_raw(
+            model=model, params_nd=nd, rescale=rescale, x_spont_dim=x_spont, t_fine=t_fine,
+            inits=inits, rescale_idx=cfg.rescale_idx, n_segs=1, steady_idx=steady_idx,
+            subsample=subsample, N_points=N_points, dt_exp=cfg.dt_exp,
+            multipliers=torch.tensor([f_abs], dtype=dtype), f0_nd=cfg.chi_f0,
+            absolute_freqs=True, resolution_filter=False, max_cycles=max_cycles,
+            state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=cfg.hw.device)
+        return float(torch.exp(logcyc).max())
+
+    uncapped = _cycles(math.inf)
+    assert uncapped > cap, (
+        f"the test geometry gives only {uncapped:.1f} cycles uncapped, at or below the {cap:g} "
+        f"ceiling -- the assertion below would hold with no cap at all")
+    capped = _cycles(cap)
+    assert capped <= cap + 1e-6, (
+        f"a probe was locked in over {capped:.2f} cycles against a {cap:g}-cycle ceiling. The "
+        f"duration ceiling is not being applied in gen_chi_raw, so every caller past it -- training, "
+        f"the Fisher rotation, the PPC -- measures a different observable than the ceiling defines.")
+
+    # The EXPERIMENTAL path must apply the same ceiling to a supplied recording, and say that it did:
+    # a bench recording is routinely far longer than the ceiling, and silently using a prefix would
+    # leave the experimenter believing the whole recording was measured.
+    cfg.T_obs = N_points * cfg.dt_exp
+    hz = cfg.freq_si_to_cell
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        obs_stats, _data, _t = orchestrator.build_experiment_obs_chi(
+            cfg, x_spont[0].clone(), [(x_spont[0].clone(), f_abs / hz)],
+            float(cfg.T_obs / cfg.get_unit_conversion_factor("s")), 1.0)
+    assert torch.isfinite(obs_stats).all()
+    assert any("ceiling" in str(c.message) for c in caught), \
+        f"the experimental path truncated silently, or not at all: {[str(c.message) for c in caught]}"
+
+
+def test_chi_max_cycles_must_clear_the_min_cycles_floor():
+    """The floor MASKS a probe and the ceiling SHORTENS it, so a ceiling at or under the floor
+    truncates every probe to below the floor and masks the entire set.
+
+    The natural failure without this is `build_experiment_obs_chi` refusing with "none of the
+    supplied recordings produced a usable probe" -- true, unhelpful, and pointing at the recordings
+    rather than at the two constants that closed on each other. In training it is worse: nothing
+    refuses, every chi block is all-pad, and the run trains happily on no susceptibility at all.
+    """
+    import dataclasses
+    model = "NADROWSKI"
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
+                              registry.state_dep_drift(model),
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"),
+                              chi_mode=True)
+    for bad in (config.CHI_MIN_CYCLES, config.CHI_MIN_CYCLES / 2):
+        try:
+            dataclasses.replace(cfg, chi_max_cycles=bad)
+        except ValueError as e:
+            assert "CHI_MIN_CYCLES" in str(e), f"the message must name both constants, got: {e}"
+        else:
+            raise AssertionError(
+                f"chi_max_cycles={bad} was accepted against CHI_MIN_CYCLES="
+                f"{config.CHI_MIN_CYCLES}: every probe would be masked in every observation.")
+    dataclasses.replace(cfg, chi_max_cycles=config.CHI_MIN_CYCLES * 2)      # must not raise
+
+
 def test_solver_failure_raises_instead_of_killing_the_process():
     """A solver failure must raise SimulationError, not hard-exit.
 

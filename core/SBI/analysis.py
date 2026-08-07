@@ -62,7 +62,7 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
                  spontaneous_only: bool = False, chi_mode: bool = False,
                  chi_f0: float | None = None,
                  chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
-                 chi_k_fixed: int | None = None,
+                 chi_k_fixed: int | None = None, chi_max_cycles: float | None = None,
                  n_vars: int | None = None,
                  dtype: torch.dtype = torch.float32,
                  device: torch.device = torch.device('cpu')) -> tuple[torch.Tensor, torch.Tensor]:
@@ -112,7 +112,7 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
         fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
         spontaneous_only=spontaneous_only, chi_mode=chi_mode,
         chi_f0=chi_f0, chi_freq_bounds=chi_freq_bounds, chi_k_pad=chi_k_pad,
-        chi_k_fixed=chi_k_fixed, n_vars=n_vars,
+        chi_k_fixed=chi_k_fixed, chi_max_cycles=chi_max_cycles, n_vars=n_vars,
         dtype=dtype, device=device,
     )
 

@@ -75,6 +75,12 @@ HELP = {
     "chi_f0": "Non-dimensional drive amplitude for every χ probe. χ = response/drive is independent of "
               "amplitude in the linear regime, so this only needs to be small enough to stay linear "
               "(≲0.1) and large enough for the lock-in to beat the noise.",
+    "chi_max_cycles": "Longest lock-in, in drive cycles, used for any one probe. A longer lock-in is "
+                      "NOT a better one here: past roughly 30 cycles χ stops being reproducible at "
+                      "fixed parameters, and the extra recording adds noise rather than signal. "
+                      "Recordings longer than this are truncated, not rejected — the leading part is "
+                      "exactly what the network was trained on. Frozen into any posterior trained "
+                      "with it, so changing it means retraining.",
     "chi_range": "The K probe frequencies are placed log-spaced across this range, as MULTIPLES of each "
                  "observation's own measured spontaneous peak Ω₀ — so the probes track the resonance "
                  "wherever t_scale puts it, instead of sitting at fixed absolute frequencies.",
@@ -226,12 +232,14 @@ class ConfigPanel(_StagePanel):
         self.chi_f0 = FloatField(config.CHI_F0)
         self.chi_range = _ChiRangeRow(*config.CHI_FREQ_BOUNDS)
         self.chi_pad = IntField(config.CHI_K_PAD)
+        self.chi_cycles = FloatField(config.CHI_MAX_CYCLES)
         self.chi_check.toggled.connect(lambda _on: self._sync_chi_enabled())
         form.addRow(with_badge(self.chi_check, HELP["chi_mode"]))
         add_help_row(form, "χ probes per observation", self.chi_k, HELP["chi_k"])
         add_help_row(form, "χ probe slots (capacity)", self.chi_pad, HELP["chi_k_pad"])
         add_help_row(form, "χ drive F₀ (ND)", self.chi_f0, HELP["chi_f0"])
         add_help_row(form, "χ frequency range", self.chi_range, HELP["chi_range"])
+        add_help_row(form, "χ lock-in ceiling (cycles)", self.chi_cycles, HELP["chi_max_cycles"])
 
         self.rot_check = QCheckBox("Decorrelating Fisher rotation")
         form.addRow(with_badge(self.rot_check, HELP["reparam_rotate"]))
@@ -247,7 +255,7 @@ class ConfigPanel(_StagePanel):
         decorrelated what the rotation targets; measured on the master cell, χ leaves k~x_scale at
         0.95 (vs 0.98 forced), so that assumption was wrong and the exclusion is gone."""
         on = self.chi_check.isChecked()
-        for w in (self.chi_k, self.chi_pad, self.chi_f0, self.chi_range):
+        for w in (self.chi_k, self.chi_pad, self.chi_f0, self.chi_range, self.chi_cycles):
             w.setEnabled(on)
         self.rot_check.setEnabled(True)
         self.rot_check.setToolTip(
@@ -314,7 +322,12 @@ class ConfigPanel(_StagePanel):
                        f"simulation per observation, and the Infer tab needs one recording per "
                        f"frequency." if self.chi_k.value() > CHI_K_MAX else
                        "χ drive F₀ must be > 0." if self.chi_f0.value() <= 0 else
-                       "χ frequency range must satisfy 0 < from < to." if not (0 < lo < hi) else None)
+                       "χ frequency range must satisfy 0 < from < to." if not (0 < lo < hi) else
+                       # Caught here rather than by SimConfig.__post_init__ so it reads as a form
+                       # error next to the box, not as a traceback on "Apply model & options".
+                       f"χ lock-in ceiling must exceed the {config.CHI_MIN_CYCLES:g}-cycle floor, "
+                       f"or every probe is truncated below it and masked."
+                       if self.chi_cycles.value() <= config.CHI_MIN_CYCLES else None)
             if problem:
                 self.log_pane.append_line(problem, "warning")
                 return
@@ -333,13 +346,15 @@ class ConfigPanel(_StagePanel):
             model=model, labels=model_labels, state_dep_drift=state_dep_drift, units_override=units,
             chi_mode=chi_on, chi_n_freqs=self.chi_k.value(), chi_f0=self.chi_f0.value(),
             chi_freq_bounds=self.chi_range.value(), chi_k_pad=self.chi_pad.value(),
+            chi_max_cycles=self.chi_cycles.value(),
             reparam_rotate=self.rot_check.isChecked())
         self._screen.new_draft(draft)                # replaces the session + repoints Prior + re-gates
         extras = []
         if chi_on:
             lo, hi = draft.chi_freq_bounds
             extras.append(f"χ(ω) on — {draft.chi_n_freqs} frequencies over {lo:g}–{hi:g}×Ω₀ at ND "
-                          f"amplitude {draft.chi_f0:g}, so expect ~{(draft.chi_n_freqs + 1) / 2:.1f}× the "
+                          f"amplitude {draft.chi_f0:g}, ≤{draft.chi_max_cycles:g} cycles per probe, "
+                          f"so expect ~{(draft.chi_n_freqs + 1) / 2:.1f}× the "
                           f"usual training time and train a NEW posterior")
         elif draft.reparam_rotate:
             extras.append("decorrelating Fisher rotation on")
@@ -365,6 +380,7 @@ class ConfigPanel(_StagePanel):
         settings.save_field(qs, "chi_f0", self.chi_f0)
         settings.save_field(qs, "chi_lo", self.chi_range.lo)
         settings.save_field(qs, "chi_hi", self.chi_range.hi)
+        settings.save_field(qs, "chi_max_cycles", self.chi_cycles)
         qs.endGroup()
 
     def restore_settings(self, qs):
@@ -385,6 +401,7 @@ class ConfigPanel(_StagePanel):
         settings.restore_field(qs, "chi_f0", self.chi_f0)
         settings.restore_field(qs, "chi_lo", self.chi_range.lo)
         settings.restore_field(qs, "chi_hi", self.chi_range.hi)
+        settings.restore_field(qs, "chi_max_cycles", self.chi_cycles)
         qs.endGroup()
 
 
@@ -517,10 +534,15 @@ class PriorPanel(_StagePanel):
                 "Forcing section AND without f_scale for spontaneous inference.", "warning")
         if cfg.chi_mode:
             lo, hi = cfg.chi_freq_bounds
+            # Width from the SHARED rule, not 3*K: that was layout 1, where a probe's frequency was
+            # implied by its slot. Under the padded probe set it is CHI_ELEM_W * chi_k_pad and does
+            # not depend on K at all -- which is the entire point of the layout, so reporting the old
+            # formula here told the user the opposite of what the mode now does.
             self.log_pane.append_line(
                 f"χ(ω) mode: {cfg.chi_n_freqs} drive frequencies over {lo:g}–{hi:g}×Ω₀ at ND amplitude "
-                f"{cfg.chi_f0:g}; conditioning is [S(41) | log T | χ({3 * cfg.chi_n_freqs})]. Train a NEW "
-                f"posterior (the width differs from a non-χ one).")
+                f"{cfg.chi_f0:g}, each locked in over at most {cfg.chi_max_cycles:g} drive cycles; "
+                f"conditioning is [S(41) | log T | χ({orchestrator.expected_forcing_dim(cfg)})] over "
+                f"{cfg.chi_k_pad} probe slots. Train a NEW posterior (the width differs from a non-χ one).")
 
         entry, is_new = self.prior_picker.selected()
         self.dispatch(orchestrator.build_prior, cfg, entry, is_new, save=False,
