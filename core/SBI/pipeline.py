@@ -395,6 +395,7 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
                 fixed_dict: dict = None,
                 absolute_freqs: bool = False, resolution_filter: bool = True,
                 duration_frac=None, max_cycles: float | None = None,
+                adapt_placement: bool = False, bounds: tuple | None = None,
                 dtype: torch.dtype = torch.float32,
                 device: torch.device = torch.device('cpu')) -> tuple:
     """
@@ -439,6 +440,13 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
                        rotation, the PPC and the experimental path must all measure the same
                        observable, and a ceiling applied in only one of them is silent. See
                        config.CHI_MAX_CYCLES for the measurement behind it.
+    :param adapt_placement: lift each ROW's multipliers into the sub-band its own Omega_0 can resolve
+                            (:func:`core.SBI.chi.resolvable_multipliers`). **TRAINING ONLY.** The
+                            experimental path drove at frequencies the experiment chose and the PPC
+                            must reproduce the observation's, so both pass ``absolute_freqs`` and are
+                            never adapted -- moving a probe there would answer a different experiment
+                            than the one that was run. Ignored when ``absolute_freqs`` is set.
+    :param bounds: the chi band, for ``adapt_placement``; None reads ``config.CHI_FREQ_BOUNDS``.
     :return: (chi (B,K) complex, u (B,K), logcyc (B,K), valid (B,K) bool). Use
              :func:`gen_chi_block` for the padded conditioning block.
     """
@@ -487,6 +495,13 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
     mults = mults.to(device=device, dtype=f_peak.dtype)
     if mults.dim() == 1:
         mults = mults.unsqueeze(0)                                      # (1, K) -> broadcast over B
+    if adapt_placement and not absolute_freqs:
+        # Per-ROW placement: one shared multiplier set cannot resolve across a prior spanning ~4
+        # decades of Omega_0 (trap CHI10 / handoff 4.3.4). Uses the FULL duration as the budget --
+        # duration_frac and the CHI_MAX_CYCLES ceiling below only ever SHORTEN the window, so a
+        # multiplier chosen against the full length is the most permissive honest choice; the floor
+        # check below still has the last word on the duration actually used.
+        mults = chi.resolvable_multipliers(mults, f_peak, N_points * dt_exp, bounds=bounds)
     freqs = mults if absolute_freqs else mults * f_peak.unsqueeze(1)    # (B, K) or (1, K)
     freqs = freqs.expand(B, -1)
     K = freqs.shape[1]
@@ -503,33 +518,36 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         # it makes the (duration, frequency) trade-off -- what a real session actually varies -- an
         # axis of the training distribution rather than a constant.
         N_k = N_points if duration_frac is None else max(1, int(round(float(duration_frac[k]) * N_points)))
-        # THE DURATION CEILING (config.CHI_MAX_CYCLES). Keyed on the batch's HIGHEST f_peak, so no ROW
-        # exceeds it -- N_k is one scalar for the batch while freq_k is per-sample, and lock_in_batched
-        # takes a scalar T_obs, so a per-row duration is not expressible without slicing per row.
+        # THE DURATION CEILING (config.CHI_MAX_CYCLES), applied PER ROW.
         #
-        # THE COST, stated because it is real and unmeasured: a row whose f_peak is a fraction q of
-        # the batch's fastest gets q * max_cycles cycles, so a batch spanning a decade in f_peak
-        # leaves its slowest rows near CHI_MIN_CYCLES and some of them masked. The alternative --
-        # keying on the median -- puts the FASTEST rows, the ones nearest the wall, back over it. That
-        # asymmetry decides it: over-truncation is visible (gen_chi_block already counts and warns
-        # "chi: N/M probes masked") and the network is trained on masked sets by design, while going
-        # over the wall is silent and is the exact failure this ceiling exists to prevent. Watch that
-        # masked count on the smoke train; if it is large, the fix is a per-row slice here, not a
-        # laxer key. Cannot collide with CHI_MIN_CYCLES below -- SimConfig.__post_init__ rejects a
-        # ceiling that does not clear the floor -- but that guard bounds the FASTEST row only.
-        # Over the ALREADY-VALIDATED rows only: freq_k still holds the non-finite / out-of-Nyquist
-        # entries of rows masked on the line above, and a single inf would collapse N_k to 1 sample
-        # for the whole batch. All rows invalid -> the probe is masked anyway, so leave N_k alone.
-        if math.isfinite(max_cycles) and bool(valid[:, k].any()):
-            f_hi = float(freq_k[valid[:, k]].max())
-            if f_hi > 0.0:
-                N_k = max(1, min(N_k, int(math.floor(max_cycles / f_hi / dt_exp))))
-        T_k = N_k * dt_exp
+        # It used to be one scalar keyed on the batch's FASTEST row, because lock_in_batched took a
+        # scalar T_obs. That cost was real and measured: Omega_0 spans ~4 decades inside a training
+        # batch, so keying on the fastest truncated the slow rows to a fraction of a cycle and masked
+        # them -- ~48 % of rows carried no live probe at all (handoff 4.3.4/4.3.5). lock_in_batched
+        # now takes an (B,) n_samples, so each row gets exactly the prefix its own frequency needs.
+        # Rows whose full length is already under the ceiling are untouched.
+        #
+        # Computed over the ALREADY-VALIDATED rows: freq_k still holds the non-finite / out-of-Nyquist
+        # entries of rows masked on the line above, and dividing by those would poison the length. An
+        # invalid row keeps the full N_k -- it is masked anyway, so its length changes nothing.
+        N_row = torch.full((B,), N_k, dtype=torch.long, device=device)
+        if math.isfinite(max_cycles):
+            ok_k = valid[:, k] & (freq_k > 0)
+            if bool(ok_k.any()):
+                cap_row = torch.floor(max_cycles / freq_k.clamp(min=1e-30).double() / dt_exp)
+                cap_row = cap_row.clamp(min=1.0, max=float(N_k)).long()
+                N_row = torch.where(ok_k, cap_row, N_row)
+        # T_row is what each row was ACTUALLY integrated over: it normalises that row's chi, sets its
+        # cycle count for the floor below, and is what logcyc reports. There is deliberately no
+        # scalar counterpart any more -- keeping one around is how logcyc would come to describe a
+        # duration the lock-in did not use.
+        T_row = N_row.to(torch.float64) * dt_exp
         if resolution_filter:
             # A lock-in over a fraction of a cycle returns the demeaned trace's residual drift plus
             # spontaneous 1/f content: finite, in range, and REPRODUCIBLE -- which is exactly why it
             # survived a CV screen -- but it is not a susceptibility.
-            valid[:, k] &= (freq_k * T_k) >= config.CHI_MIN_CYCLES
+            # Against the row's OWN duration -- the whole point of C-8 is that these differ.
+            valid[:, k] &= (freq_k.double() * T_row) >= config.CHI_MIN_CYCLES
         forcing_params = torch.zeros((B, 4), dtype=dtype, device=device)
         forcing_params[:, 0] = amp_dim
         forcing_params[:, 1] = freq_k
@@ -555,11 +573,15 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         # materialised x_dim, so nothing below reads any of them. (idx_c is loop-invariant --
         # do NOT drop it.)
         del force, x_nd, x_sub
-        chis.append(chi.lock_in_batched(x_dim, 2.0 * math.pi * freq_k, amp_dim, T_k, dt_exp))
+        # n_samples/T_row, not the scalar: each row is integrated over its own prefix of x_dim.
+        chis.append(chi.lock_in_batched(x_dim, 2.0 * math.pi * freq_k, amp_dim, T_row, dt_exp,
+                                        n_samples=N_row))
         # The frequency ACTUALLY locked in at, and the cycles actually seen -- both carried as
-        # features rather than implied by slot index, which is what makes placement free.
+        # features rather than implied by slot index, which is what makes placement free. logcyc uses
+        # T_row for the same reason the filter above does: it is the encoder's record of how much
+        # evidence this probe rests on, so it must describe the integration that really happened.
         u_list.append(torch.log(freq_k / f_peak.clamp(min=1e-30)))
-        logcyc_list.append(torch.log(torch.clamp(freq_k * T_k, min=1e-30)))
+        logcyc_list.append(torch.log(torch.clamp(freq_k.double() * T_row, min=1e-30)).to(freq_k.dtype))
         del x_dim
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -578,7 +600,10 @@ def gen_chi_block(*args, k_pad: int = None, bounds: tuple = None, **kwargs) -> t
 
     :return: ((B, CHI_ELEM_W*k_pad) block, (B, k_pad) bool mask).
     """
-    chi_stack, u, logcyc, valid = gen_chi_raw(*args, **kwargs)
+    # `bounds` goes to BOTH: the packer normalises u_hat by it, and adapt_placement compresses into
+    # it. Forwarding to only one would let a probe be placed against one band and screened against
+    # another -- the same class of mismatch the sidecar band check exists to catch.
+    chi_stack, u, logcyc, valid = gen_chi_raw(*args, bounds=bounds, **kwargs)
     block, mask = chi.pack_probe_block(chi_stack, u, logcyc, valid, k_pad=k_pad, bounds=bounds)
     B, K = chi_stack.shape
     dropped = int((~mask[:, :K]).sum())
@@ -874,7 +899,12 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
                     b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
                     k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
-                    max_cycles=chi_max_cycles, dtype=dtype, device=device)
+                    max_cycles=chi_max_cycles,
+                    # THE ONLY adapt_placement=True in the codebase. Training is the one path that
+                    # gets to choose where it probes; every other caller is reproducing an experiment
+                    # whose frequencies are already fixed.
+                    adapt_placement=True,
+                    dtype=dtype, device=device)
                 # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
                 # rows that keep the probe -- and it is the only way to decouple the probe count from
                 # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same

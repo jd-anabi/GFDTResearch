@@ -283,7 +283,7 @@ def feature_labels(cfg: SimConfig) -> list:
     from core.SBI.statistics import FEATURE_LABELS
     if not cfg.chi_mode:
         return list(FEATURE_LABELS)
-    # The FISHER channel set (log|chi|, cos, sin, logcyc), not the conditioning one: these diagnostics
+    # The FISHER channel set (log|chi|, cos, sin), not the conditioning one: these diagnostics
     # build a Jacobian, and the conditioning block's `u` and `mask` columns are theta-independent
     # there -- see chi.CHI_FISHER_CHANNELS for what that does to a central difference.
     return ([FEATURE_LABELS[i] for i in summary_keep_idx()]
@@ -298,8 +298,9 @@ def n_features(cfg: SimConfig) -> int:
 def describe_features(cfg: SimConfig) -> None:
     """One banner line so a result can never be read without knowing which information set made it."""
     if cfg.chi_mode:
-        n_sp = len(summary_keep_idx())
-        print(f"[mode] CHI: feature rows = {n_sp} spontaneous + {4 * cfg.chi_n_freqs} chi "
+        from core.SBI import chi as _chi
+        n_sp, n_ch = len(summary_keep_idx()), len(_chi.CHI_FISHER_CHANNELS)
+        print(f"[mode] CHI: feature rows = {n_sp} spontaneous + {n_ch * cfg.chi_n_freqs} chi "
               f"= {n_features(cfg)}  (Group G dropped: it is zeroed in this mode)", flush=True)
         print("[mode] NOTE f_scale is informative here (chi drives at amp = F0 * f_scale).", flush=True)
     else:
@@ -314,10 +315,11 @@ def assert_not_chi(cfg: SimConfig, what: str) -> None:
     which is precisely how these scripts failed before.
     """
     if cfg.chi_mode:
+        from core.SBI import chi as _chi
         raise SystemExit(
             f"{what} has not been generalised to chi(omega) mode: it measures the single-frequency "
             f"41-feature information set, while a chi posterior conditions on "
-            f"{n_features(cfg)} different features (Group G zeroed, {4 * cfg.chi_n_freqs} chi "
+            f"{n_features(cfg)} different features (Group G zeroed, {len(_chi.CHI_FISHER_CHANNELS) * cfg.chi_n_freqs} chi "
             f"features added). Running it here would produce a confident, meaningless answer.\n"
             f"  -> unset CHI to analyse the forced information set, or use scripts/degeneracy_map.py, "
             f"which is chi-aware.")

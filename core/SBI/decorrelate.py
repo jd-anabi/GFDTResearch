@@ -10,7 +10,9 @@ The Jacobian is built over THE FEATURES THE POSTERIOR ACTUALLY CONDITIONS ON, wh
 observation mode:
     spontaneous  41 features (Groups A-F; Group G is zero-padded and contributes zero rows)
     forced       41 features (Group G populated by the drive response)
-    chi          41 + 3K -- Groups A-F plus the chi(omega) block
+    chi          41 + 3K -- Groups A-F (Group G zeroed) plus the chi FISHER block, which is
+                 CHI_FISHER_CHANNELS (log|chi|, cos, sin) per probe -- NOT the 6-channel
+                 conditioning block, and no longer the 4-channel set that included logcyc (C-9/C-10)
 Getting that wrong is silent: a Fisher built over the single-frequency feature set describes a
 different experiment than the one being run, so V would decorrelate the wrong thing.
 
@@ -163,16 +165,22 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
         fork_devices = [device] if device.type == "cuda" else []
         with torch.random.fork_rng(devices=fork_devices):
             if cfg.chi_mode:
-                # [S(41, Group G zeroed) | chi FISHER features (4K)] -- NOT the conditioning block.
+                # [S(41, Group G zeroed) | chi FISHER features (3K)] -- NOT the conditioning block.
                 #
-                # The conditioning block carries `u = log(f_k/f_peak)` and a `mask`, and BOTH poison a
-                # Fisher. Here the placement is a deterministic multiplier grid, so `u` is
-                # theta-INDEPENDENT by construction: across the ensemble it takes ~two distinct float32
-                # values with std ~2.5e-8, and `fnoise = max(std, 1e-9)` does not protect against that.
-                # The central difference then writes entries of ORDER 1 -- the magnitude of a real
-                # standardized feature -- into up to K x P cells of the Jacobian that defines the
-                # coordinate system the flow trains in, while V stays orthogonal to 1e-4 and every test
-                # passes. `logcyc` is kept: it varies genuinely with theta through f_peak.
+                # The conditioning block carries `u = log(f_k/f_peak)`, `logcyc` and a `mask`, and ALL
+                # THREE poison a Fisher, for one reason with three faces: `fnoise = max(std, 1e-9)` is
+                # a DENOMINATOR, so a barely-varying channel is an amplifier. Here the placement is a
+                # deterministic multiplier grid, so `u` is theta-INDEPENDENT by construction (std
+                # ~2.5e-8 of pure rounding) and `logcyc` is either an exact duplicate of A3_log_fpeak
+                # or, where the CHI_MAX_CYCLES ceiling binds, floor() quantization. The central
+                # difference then writes entries of ORDER 1 to 1e4 -- the magnitude of a real
+                # standardized feature or far beyond -- into up to K x P cells of the Jacobian that
+                # defines the coordinate system the flow trains in, while V stays orthogonal to 1e-4
+                # and every test passes.
+                #
+                # Note the asymmetry, because it is why this hid so well: the 11 Group-G columns are
+                # EXACTLY zero in chi mode and cost nothing (0/1e-9 = 0). It is the NEARLY constant
+                # channel that is lethal, not the constant one. See trap CHI10 and backlog C-9/C-10.
                 zero = torch.zeros((mm, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
                 torch.manual_seed(2)
                 xs_d = xsc * s(zero).double() + xof
@@ -187,7 +195,8 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 # depends on theta, so a probe can CROSS the threshold between the +dz and -dz arms --
                 # a mask step of 1 divided by fnoise's 1e-9 floor puts ~1e9 into J, and V becomes that
                 # discontinuity rather than the Fisher geometry.
-                chi_v, _u_v, logcyc_v, _valid_v = pipeline.gen_chi_raw(
+                # All four named, none re-sliced: `[:N]` on this return is what produced trap CHI10.
+                chi_v, _u_v, _logcyc_v, _valid_v = pipeline.gen_chi_raw(
                     model=cfg.model, params_nd=nd, rescale=rv, x_spont_dim=xs_d.to(dtype),
                     t_fine=t_fine, inits=base_inits.expand(mm, -1).contiguous(),
                     rescale_idx=cfg.rescale_idx, n_segs=n_segs, steady_idx=cfg.steady_idx,
@@ -200,7 +209,12 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                     max_cycles=cfg.chi_max_cycles,
                     state_dep_drift=cfg.state_dep_drift, resolution_filter=False,
                     dtype=dtype, device=device)
-                fisher_block = _chi.fisher_features(chi_v, logcyc_v)
+                # logcyc is deliberately NOT passed -- fisher_features takes one argument now. It is
+                # neither used nor useful here: with the ceiling clear it is an exact duplicate of
+                # A3_log_fpeak (measured: four of six rows agreeing to 6 significant figures in a real
+                # rotation), and with the ceiling binding it is floor() quantization that a 1e-9-floored
+                # fnoise amplifies. C-9/C-10, trap CHI10.
+                fisher_block = _chi.fisher_features(chi_v)
                 return np.concatenate([spont, fisher_block.double().cpu().numpy()], axis=1)
             if has_drive:
                 force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(mm, -1), t_fine, rv,

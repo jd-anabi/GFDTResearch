@@ -37,7 +37,7 @@ non-interactive diagnostic scripts.
 |---|---|---|
 | CLI | `python -m core` | The original. Interactive prompts. **Must keep working** — every GUI refactor was non-breaking and defaults to old CLI behaviour. |
 | GUI | `run.bat` / `run.sh` (`python -m core.gui`) | PySide6. An *additional* front-end, not a replacement. |
-| Scripts | `python scripts/<name>.py` | 11 non-interactive diagnostics. Env knobs are documented in each file's docstring. |
+| Scripts | `python scripts/<name>.py` | 15 non-interactive diagnostics (+ `_common.py`, the shared config builder). Env knobs are documented in each file's docstring. |
 
 Both run scripts **must be launched from the repo root** — `config.py` builds `Resources/` paths from
 `os.getcwd()` (there is a `__file__` fallback, but the run scripts are the supported path).
@@ -67,13 +67,13 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `tests/test_gui_progress.py` | 76 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry** |
+| `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
 | `tests/test_user_models.py` | 29 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry |
-| `tests/test_user_sbi.py` | 29 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever** |
-| `tests/test_chi_set_encoder.py` | 20 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, and the packer's round-trip / masked-not-phantom behaviour |
+| `tests/test_user_sbi.py` | 30 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever** |
+| `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 10 | the master Bounds/Cells triple, bounds resolution, and the prior/posterior identity guards — **eval box comes from the sidecar, not the config** |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **169** | |
+| **Total** | **176** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -127,7 +127,9 @@ core/
   Reduction/      NWK->Hopf normal-form map. IRRELEVANT to SBI — do not reason about it here.
   Helpers/        file_manager, helpers, visualizers, labels, model_store.
   gui/            see §2.2
-scripts/          11 non-interactive diagnostics.
+scripts/          15 non-interactive diagnostics + _common.py (the shared SimConfig builder).
+                  Newest: smoke_train (the pre-flight five-stage run), chi_mask_audit (why chi
+                  probes get masked), chi_f0_sweep (the band/F0/T_obs/cycle-cap measurement).
 Resources/        Bounds/ Cells/ Units/ Models/ (inputs) + Plots/ Priors/ Posteriors/
                   CrossValidation/ (generated outputs).
 ```
@@ -346,20 +348,42 @@ and the 2026-08-05 Appendix A entry.
   `B1_log_Q` fix (§7.6) and the consolidation. Their §4.2 numbers stand as historical record only.
 
 **The chi conditioning is now a padded probe SET (layout 2, §3.6) and the Fisher rotation is
-available under χ (§4.4). All 169 tests across six suites pass.**
+available under χ (§4.4). All 171 tests across six suites pass.**
+
+**C-6 is resolved** (§4.3.3–§4.3.6). The first end-to-end smoke train found 77 % of training probes
+masked — a typical row conditioning on ~2 live probes, which is `posterior_chi_08042026`'s
+uninformative signature reached from a new direction. Diagnosed to the prior's ~4-decade Ω₀ spread
+(not `T`, not the band) and fixed in two parts: **per-ROW probe placement** and **per-ROW lock-in
+durations**. Live probes 41 % → **64 %**, inert rows 55 % → **33 %**. The remaining third is the
+genuinely unmeasurable tail and is a question about the PRIOR, not a blocker.
+
+Confirmed end-to-end: a fresh smoke train puts TRAINING at **36.8 %** masked (the audit said 35.8 %,
+so the cheap audit is a good proxy). The PPC's 79.9 % is expected and is a readout of the posterior,
+not of the probe machinery — see §4.3.6.
 
 **The lock-in duration ceiling (C-4) is IMPLEMENTED**: `config.CHI_MAX_CYCLES = 20`, applied in
 `pipeline.gen_chi_raw` so training, the Fisher rotation, the PPC and the experimental path all
 measure the same observable, carried on the `SimConfig`, frozen into the sidecar and checked on load.
 Without it, `T ~ logU[1 s, 60 s]` puts a large fraction of probes past the reproducibility wall
-(§4.3.1) and a retrain spends days reproducing `posterior_chi_08042026`'s failure mode. What remains
-before a retrain:
+(§4.3.1) and a retrain spends days reproducing `posterior_chi_08042026`'s failure mode.
+
+**The retrain is UNBLOCKED as of 2026-08-10.** Step 3 (§4.4.1) answered the information question —
+chi buys `f_scale`, `t_scale` and `lam`, does not buy `k`~`x_scale`, and the set encoder lost nothing
+versus §4.4. Getting there exposed that a standardized Jacobian amplifies any *nearly*-constant
+channel (trap **CHI10**), which also reached `decorrelate` — measured, confirmed, and closed as
+C-9/C-10 by removing `logcyc` from the Fisher set. Every C-item that gates a retrain is now done;
+what is left open (C-2, C-3, C-7) does not. What remains:
 
 **Recommended order:**
 
 0. **`git status` first.** Everything since `eeaa5c5` is LOCAL and uncommitted — the consolidation,
-   the artifact-identity guards, rotation-in-chi, and the whole set-encoder layout. Nothing has been
-   committed on your behalf.
+   the artifact-identity guards, rotation-in-chi, the set-encoder layout, all of C-1/C-4/C-5/C-6/C-8,
+   and the 2026-08-08 `degeneracy_map` fix. Nothing has been committed on your behalf. **Commit before
+   the retrain** so the posterior traces to a revision.
+   *Untracked files that are new since `eeaa5c5` and easy to miss:* `scripts/smoke_train.py`,
+   `scripts/chi_mask_audit.py`, `scripts/chi_f0_sweep.py`, `scripts/build_master_cells.py`,
+   `core/SBI/chi_encoder.py`, `tests/test_artifact_consistency.py`, `tests/test_chi_set_encoder.py`.
+   `Resources/Priors/_c6_prior.pt` is a throwaway from the audit — delete it, do not train against it.
 1. ~~**Gate the band on `T_obs` before spending days.**~~ ✅ **DONE 2026-08-06 — and it did not come
    back clean. See §4.3.1.** The band fails on the T axis, but the binding variable is **drive
    cycles**, not probe frequency: every full-length failure sits above ~31 cycles, and re-locking the
@@ -376,20 +400,62 @@ before a retrain:
    the band's high edge under that cap (§4.3.2): `CHI_FREQ_BOUNDS = (0.03, 0.3)` stands unchanged.**
    The band moves in neither direction — the retired near-resonance multipliers do not come back, and
    the narrowing §4.3.1 hinted at was an artifact of a chosen phase threshold.
-3. **`scripts/degeneracy_map.py` on the new layout**, chi vs forced, to confirm the set conditioning
-   did not lose the information the fixed grid carried (§4.4 is the pre-set-encoder baseline: every
-   unique handle improved, `k`~`x_scale` stayed at 0.95). Run it *after* C-4 — a Fisher built over
-   probes past the cycle wall measures the wall, not the parameters.
-4. **A smoke train** — tiny `TRAINING_NUM_RUNS` end-to-end through prior → posterior → validate →
-   infer, to shake the new guards out before the long run. **Watch the `chi: N/M probes masked`
-   warning count.** The duration ceiling is keyed on the batch's *fastest* `f_peak` (it has to be —
-   one scalar duration per batch), so a batch spanning a wide range of `f_peak` gives its slowest
-   rows proportionally fewer cycles and can push some under `CHI_MIN_CYCLES`. That spread is not
-   measured — the honest place to see it is this smoke train. A large masked fraction means the fix
-   is a per-row slice in `gen_chi_raw`, not a laxer key.
-5. **The retrain** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4).
-   Budget ≈ (1 + E[K]) / 2 × a spontaneous run for the training data, plus (K+1)/2 × a forced-mode
-   Fisher for the rotation. At `CHI_K_PAD = 12`, `E[K] = 7`.
+3. ~~**`scripts/degeneracy_map.py`, chi vs forced.**~~ ✅ **DONE 2026-08-08 — §4.4.1.** The set
+   conditioning did **not** lose what the retired fixed grid carried: the §4.4 baseline reproduces
+   within noise (`k` 0.040→0.092, `x_scale` 0.043→0.127, `t_scale` 0.219→0.371, condition number
+   2212→2093, `k`~`x_scale` 0.98→0.96). And the payload table finally answers the question it was
+   written for — **which** features break which alias. See §4.4.1 for the reading.
+
+   **It could not have been run as-is.** The script sliced `gen_chi_raw(...)[:2]`, binding `logcyc_v`
+   to `u`, so every chi Jacobian it had ever produced was contaminated — trap **CHI10**. Two guards
+   now stand where that was, and both fired on first use. Run it with the interpreter, from the repo
+   root, **teed** (all tables are stdout-only apart from the `.npz`), and at a **deliberate
+   `TOBS_S`** — the default of 1.0 s puts three of six probes under the resolution floor:
+
+   ```bash
+   TOBS_S=4.5 SEED=0 M=32 M_NOISE=128 CHI=0 BOUNDS=Resources/Bounds/nadrowski/master.txt CELL=Resources/Cells/nadrowski/master_weak.txt python scripts/degeneracy_map.py
+   TOBS_S=4.5 SEED=0 M=32 M_NOISE=128 CHI=1 CHI_K=6 BOUNDS=Resources/Bounds/nadrowski/master.txt CELL=Resources/Cells/nadrowski/master_spont.txt python scripts/degeneracy_map.py
+   ```
+
+   `TOBS_S` **must match across the pair** (`J` is in signal-to-noise units and `fnoise` falls ~1/√T,
+   so a 1.0 s map against a 4.5 s one is not a chi-vs-forced comparison at all), and forced **must**
+   use `master_weak` — `master_spont` has no Forcing section and `assert_forced` exits. Outputs are
+   mode-suffixed and now include `degeneracy_map_<mode>.npz` (J, fnoise, dead, labels, run meta), so
+   the two runs diff by LABEL without a re-run; the snippet is in the module docstring.
+
+   **Why 4.5 s, and why there is no comfortable answer.** The band's dynamic range (`hi/lo` = 10)
+   **exactly equals** the cycle window's (`CHI_MAX_CYCLES/CHI_MIN_CYCLES` = 20/2 = 10), so exactly one
+   `T_obs` puts the low edge on the floor and the high edge on the ceiling at once — measured
+   `T* = 2.93 s` on this cell (Ω₀ = 22.78 Hz, printed by the run). Both edges cannot be cleared with
+   margin. Err ABOVE: under the floor a probe is not a measurement in any of its four channels, over
+   the ceiling it loses one of four. 4.5 s clears the floor by 50 % (3.07 cycles) and pins one probe.
+   `chi.resolvable_multipliers` records the same collision from the training side.
+
+   **Three things to know before reading the result.** First, the Fisher runs with
+   `resolution_filter=False` — mandatory (trap CHI2), but it means the map is built over an
+   **unmasked** probe set, while training masks ~37 % (§4.3.6). Its answer is an upper bound on the
+   information training actually has. Second, `max_cycles` IS applied there (unlike the filter), so
+   the probes are the same length training uses — without that the map would measure a lock-in longer
+   than the network ever sees. Third, `adapt_placement` is OFF here and that is deliberate (it would
+   make placement theta-dependent, trap CHI2's defect class); at `T_obs ≥ T*` it is a numeric no-op
+   anyway, and the run prints the threshold so you can confirm rather than trust it.
+4. ~~**A smoke train.**~~ ✅ **DONE 2026-08-06, re-run 2026-08-07 after C-6/C-8** via
+   `scripts/smoke_train.py`. All four stages complete (~46 min); training masking 76.7 % → **36.8 %**.
+   It is the cheapest possible check on a multi-day commitment — **re-run it after any change to the
+   chi path**, and watch the per-stage masked fractions in §4.3.6.
+4b. ~~**Verify C-9.**~~ ✅ **DONE 2026-08-10 — measured, reproduced, and fixed together with C-10.**
+   `logcyc` left `CHI_FISHER_CHANNELS` (now 3 channels, 3K not 4K) and `fisher_features` takes one
+   argument. The rotation's chi block went 24 rows → 18 with **zero** pinned channels, every
+   surviving row untouched. **Nothing now stands between here and the retrain.**
+
+5. **The retrain** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4). ⬅ **NEXT.**
+   C-6 is resolved, step 3 says go, and C-9/C-10 are closed. Budget
+   ≈ (1 + E[K]) / 2 × a spontaneous run for the training data, plus (K+1)/2 × a forced-mode Fisher
+   for the rotation. At `CHI_K_PAD = 12`, `E[K] = 7`. From the smoke train's timings, expect the prior
+   build alone to be ~9 min and the Fisher rotation to dominate the pre-training cost.
+   **Expect `k`~`x_scale` to stay aliased** — §4.4.1 is the third measurement saying so. The
+   hypotheses worth testing on the result are `f_scale` (unmeasured → measurable, 213× on `‖g‖`),
+   `t_scale` and `lam`.
 6. **Run SBC stratified by probe count** (n = 2, 6, `CHI_K_PAD`) as well as pooled. A pooled SBC over
    a mixture of probe counts can be flat while each count is miscalibrated in compensating
    directions — and `posterior_chi_08042026` is the standing proof that flat SBC is not by itself
@@ -403,7 +469,7 @@ before a retrain:
 GUI cannot yet enter per-probe frequencies even though the core accepts them — see §6.
 
 > ~~**Caveat:** the `scripts/` diagnostics were not updated for chi-mode.~~ **DONE** (2026-07-28,
-> top Appendix A entry). All 11 now build their config through `scripts/_common.py`.
+> top Appendix A entry). All of them now build their config through `scripts/_common.py`.
 > `sbc_characterize`, `retrain_convergence` and `degeneracy_map` are chi-aware; `diagnose_fmax`,
 > `identifiability_offgt` and `feature_candidate_test` **refuse loudly** under `CHI=1` because their
 > metrics are defined over the 41-feature single-frequency set. A posterior whose mode disagrees with
@@ -690,6 +756,177 @@ advisory (`inf`) so it stops being reported as a verdict, with the reasoning at 
 > `(0.03, 0.3)`, which is two multi-day runs and was never worth it before a first working posterior
 > exists.
 
+### 4.3.3 The smoke train's finding: **77 % of training probes were MASKED**
+
+> ✅ **RESOLVED 2026-08-07 — 76.7 % → 36.8 %.** §4.3.4 is the diagnosis, §4.3.5 and §4.3.6 the two
+> halves of the fix. This section is the original finding, kept because it is the only record of what
+> the pipeline looked like before, and because the *way* it was found — an end-to-end run, after the
+> unit tests were all green — is the point.
+
+**Measured 2026-08-06** by `scripts/smoke_train.py` — the first end-to-end chi run on the real
+bounds/cell files, real stability-screened prior, `master.txt` (13-dim), rotation on. All four stages
+completed (prior 527 s, posterior 1744 s, validate 196 s, infer 195 s), so the **plumbing is sound**:
+mode widths, the sidecar round-trip, the duration ceiling and the chi block all agree end to end.
+
+**But the conditioning is nearly empty.** Pooled over the run: **4362 / 5690 probes masked = 76.7 %**,
+per batch 31 %–96 %. At `CHI_K_PAD = 12` with K drawn over 2–12, a typical training row therefore
+carries **~2 live probes**, and a chi observation conditioned on two probes is barely distinguishable
+from a spontaneous one. **That is `posterior_chi_08042026`'s exact failure signature — a
+well-calibrated posterior at the prior — reached from a different direction.** Training on this
+distribution is how you spend days to rediscover it.
+
+**Attribution (controlled A/B, identical θ and strata, only `max_cycles` differing):**
+
+| arm | masked | median cycles |
+|---|---|---|
+| ceiling ON (20) | 44.1 % | 2.60 |
+| ceiling OFF | 36.7 % | 5.96 |
+
+So the C-4 ceiling contributes **~7 pp and is not the cause** — masking is already 37 % without it.
+*(Those absolute figures come from a box-uniform θ stub, not the screened prior, so they are not
+comparable to the 76.7 % above; only the DIFFERENCE between the two arms is attributable.)*
+
+### 4.3.4 C-6 diagnosed: it is **Ω₀**, not `T`, and the masking is CORRECT
+
+`scripts/chi_mask_audit.py` separates the predicates the runtime warning lumps together, on the real
+screened prior (16 batches, 2752 probe-rows, `master.txt`).
+
+> ⚠ **My first reading of §4.3.3 was wrong and is corrected here.** I diagnosed a "(band × T)
+> interaction" in which short-`T` batches mask the band's lower half. The measurement says the live
+> fraction is **flat in `T`** (37 / 47 / 38 / 44 / 34 % across `T` buckets from <2 s to >30 s) and
+> **flat in multiplier** (38–46 % across the band). Neither is the driver. The plausible mechanism
+> was not the actual one.
+
+**Only one predicate is ever active** — the `CHI_MIN_CYCLES` floor accounts for 100 % of masking.
+Nyquist, non-finite frequencies and the packer's band filter each contribute **exactly zero**.
+
+**The driver is the row's own Ω₀, and the threshold is sharp:**
+
+| Ω₀ (Hz) | 0–0.3 | 0.3–1 | 1–3 | 3–10 | 10–30 | 30+ |
+|---|---|---|---|---|---|---|
+| live probes | 0.0 % | 0.0 % | 0.0 % | 14 % | 69 % | **98 %** |
+| median peak/median PSD power | *nan* | 6202 | 2378 | 273350 | 143863 | 7516 |
+
+**55 % of training rows have ZERO live probes** — they condition on the passive trace alone, so chi
+mode is inert for them.
+
+**And the second row of that table kills the obvious fix.** The natural guess is that low-Ω₀ draws
+are non-oscillatory junk — `peak_freq` is an argmax and returns the bottom of a 1/f spectrum when
+there is no peak — in which case screening the prior would be right. **Measured: they are genuine
+oscillators**, spectral peaks thousands of times the median power. A 0.5 Hz bundle really does
+oscillate at 0.5 Hz, and its χ at 0.015–0.15 Hz really is unmeasurable in ≤ 60 s. **The mask is
+correct physics.** The prior spans ~4 decades of Ω₀ while the protocol — a band *relative* to Ω₀,
+recordings ≤ 60 s — only reaches the fast end.
+
+*(Separately: the 0–0.3 Hz bucket returns a NaN prominence, i.e. those traces are degenerate rather
+than merely slow. ~16 % of rows. Worth its own look; it is not what C-6 turns on.)*
+
+**So the options are not the three I first listed.** Corrected, with the constraint that makes one of
+them cheap: probe frequencies are **already per-row** (`freqs = mults × f_peak` is `(B, K)`, each row
+driven at its own frequency), and `gen_chi_raw` already accepts a `(B, K)` multiplier tensor. Only
+the MULTIPLIERS are currently shared across the batch.
+
+1. **Per-ROW multipliers, chosen so the probes resolve** — draw each row's multipliers conditional on
+   its own `Ω₀ · T`. Costs **nothing**: same K simulations per batch, same force-tensor machinery,
+   and the encoder already sees placement explicitly via `u` and `logcyc`. Rescues every row down to
+   `Ω₀ ≥ 2/(0.3 · T)` ≈ 0.11 Hz at `T = 60 s`. **The trade is real and must be stated:** a slow row
+   can then only be probed near the band's TOP, so it gets resolution but little frequency *spread* —
+   and spread is what χ(ω) exists to measure. It converts inert rows into weakly-informative ones,
+   not into good ones.
+2. **Restrict the prior's Ω₀ range.** Defensible on science grounds — §4.3 records real per-cell
+   resonance as 7.6–23.2 Hz, so the sub-1 Hz mass may be outside the regime of interest — but it
+   changes the question the posterior answers and must be declared in the artifact.
+3. **Accept it.** 45 % of rows carry chi; the network learns to use it when present. Correct but
+   wasteful, and the waste lands on a multi-day run.
+4. ~~Raise `T_MAX_EXP_S`~~ — rescuing Ω₀ = 0.1 Hz needs ~600 s recordings. Outside experimental
+   reality and it would dominate the simulation budget.
+
+### 4.3.5 C-6 part 1: per-ROW probe placement — implemented, and not sufficient alone
+
+`chi.resolvable_multipliers` lifts each row's multipliers into the sub-band its own Ω₀ can resolve
+(affine in log-space, so the stratified jitter's ordering and relative spacing survive), wired in at
+`gen_chi_raw(adapt_placement=True)` — **the training path only**, since every other caller is
+reproducing an experiment whose frequencies are already fixed. It costs nothing: probe frequencies
+were always per-row (`freqs = mults × f_peak`), only the multipliers were shared.
+
+| | before | after |
+|---|---|---|
+| live probes | 41.1 % | **46.1 %** |
+| rows with ZERO live probes | 55.1 % | **47.9 %** |
+| live-probe frequency span, median | — | **4.99×** (band spans 10×) |
+| rows with exactly ONE live probe | — | 7.9 % |
+
+The span row is the one that says the rescue is real rather than cosmetic: **live count is not the
+objective.** A placement rule tuned on live count alone will happily park every probe on one
+frequency — perfectly resolved, and measuring no shape at all. The audit now reports span for exactly
+that reason, and it held (median 5× of the band's 10×, only 7.9 % single-probe rows).
+
+**A rejected variant, recorded so it is not retried.** The obvious next move is to bound placement by
+`CHI_MAX_CYCLES` as well as the floor, so no row needs the shared duration truncation. It collapses
+the band: `hi/lo` = 10 and `CHI_MAX_CYCLES/CHI_MIN_CYCLES` = 10, so requiring both leaves a row a
+single feasible multiplier for all but one value of `Ω₀·T`. The asymmetry that settles it — falling
+under the floor MASKS a probe, exceeding the ceiling only makes it noisier — is recorded at the
+function.
+
+**What still bound after part 1: the SHARED lock-in duration** — one `N_k` per batch keyed on the
+fastest row, which re-masked the slow rows placement had just rescued. That is **C-8**, below.
+
+### 4.3.6 C-6 part 2 (C-8): per-ROW lock-in durations — the change that actually moved it
+
+`chi.lock_in_batched` gained an `(B,) n_samples`: each row is integrated over its own prefix, by
+MASKING rather than slicing so the tensor stays rectangular and the chunked float64 accumulation and
+its memory bound are untouched. `gen_chi_raw` now computes an `(B,) N_row` from each row's own
+frequency, and the resolution filter, the chi normalisation and **`logcyc`** all read that per-row
+duration — `logcyc` especially, since it is the encoder's record of how much evidence a probe rests
+on and must describe the integration that really happened.
+
+| | original | + per-row multipliers (C-6) | + per-row durations (C-8) |
+|---|---|---|---|
+| live probes | 41.1 % | 46.1 % | **64.2 %** |
+| rows with ZERO live probes | 55.1 % | 47.9 % | **32.6 %** |
+| live-probe span, median | — | 4.99× | **5.38×** |
+| rows with ONE live probe | — | 7.9 % | **1.4 %** |
+
+By Ω₀: the 1–3 Hz band goes 4.4 % → **48.4 %** live, 0.3–1 Hz 0 % → 8.7 %. **Both quality measures
+improved alongside the count** — the span went up and single-probe rows nearly vanished — so this is
+not the count-for-shape trade the placement change had to be watched for.
+
+Two invariants had to survive the masking, and both fail silently:
+
+- **the mean is over each row's OWN prefix**, not the full width. Taking it over the full width
+  subtracts a level the row's samples never had, and the residual lands at DC where a sub-resonance
+  lock-in is most sensitive.
+- **the mask is applied AFTER demeaning.** Zeroing first leaves `-mean` standing in every dead
+  column — a step function at the prefix boundary, again with its energy at DC.
+
+Pinned by `test_lock_in_per_row_durations_match_locking_each_row_alone`, whose reference is the only
+unambiguous one available: lock each row in on its own, with no batching to get wrong. It also
+asserts the rows are *decoupled* — changing one row's length must not move another's chi, which is
+precisely what a shared mean or a shared sum would do. `n_samples=None` remains bit-identical to the
+pre-C-8 code, which `test_lock_in_chunking_matches_full_batch` still pins.
+
+**~33 % of rows are still inert**, and that residue is the genuinely unmeasurable tail: a 0.3 Hz
+bundle cannot deliver two drive cycles at 0.03–0.3× its Ω₀ inside 60 s at any placement or duration.
+Closing it further means changing the *prior*, not the estimator — §4.3.4 option 2.
+
+**Confirmed end-to-end** by re-running the smoke train (all four stages, 2764 s). The masked fraction
+differs by stage and the differences are the informative part:
+
+| stage | masked | reading |
+|---|---|---|
+| posterior (training) | **36.8 %** | the fix working — and it matches `chi_mask_audit`'s 35.8 %, which validates the cheap audit as a proxy for the full chain |
+| validate (SBC calibration) | 47.2 % | same code path as training; 180 probes, so mostly small-sample spread |
+| infer (PPC) | **79.9 %** | **unchanged, and correctly so** |
+
+The PPC is the one to understand before reading it as a regression. It drives at the OBSERVATION's
+absolute frequencies (`absolute_freqs=True`) against posterior *samples*, so it is deliberately never
+adapted — moving those probes would simulate a different experiment than the one being checked. Its
+masked fraction is therefore an indirect readout of **how well the posterior constrains Ω₀**: samples
+whose Ω₀ is far from the observation's cannot resolve at the observation's frequencies. At this
+smoke-train quality (4 batches, 5 epochs) the posterior is essentially the prior, so its samples span
+the prior's ~4 decades and mostly cannot. **Expect this number to fall on a real run — and treat it
+as a diagnostic of the posterior rather than of the probe machinery.**
+
 ### 4.4 What chi(ω) actually buys — measured
 
 `scripts/degeneracy_map.py`, master cell, forced (`master_weak`) vs chi (`master_spont`, retargeted
@@ -726,6 +963,99 @@ and V is meaningless. Cost: a chi rotation pays (1+K) simulations per Fisher eva
 so ≈ (K+1)/2 × a forced one. Pinned by
 `tests/test_user_sbi.py::test_chi_fisher_rotation_builds_over_the_chi_feature_set`, which fails both
 if `gen_chi_block` is never called and if `J` is allocated at 41 rows.
+
+### 4.4.1 Step 3 re-measured on the set encoder (2026-08-08) — and what the payload table says
+
+**Measured 2026-08-08**, `TOBS_S=4.5 SEED=0 M=32 M_NOISE=128`, forced (`master_weak`) vs chi
+(`master_spont`, K=6), `master.txt` bounds, after fixing trap **CHI10** in the script. Ω₀ measured
+22.78 Hz. Logs: `Resources/Plots/degeneracy_{forced,chi}_T4.5.log`; data: `degeneracy_map_*_T4.5.npz`.
+**The chi arm was re-run on 2026-08-10 under the post-C-9/C-10 Fisher set** (3 channels per probe,
+48 feature rows instead of 54), so these numbers describe the feature set the retrain's rotation will
+actually use. The forced arm is unaffected — it has no chi features — and was not re-run.
+
+> **Removing the duplicates IMPROVED the result, which is the tell that they were redundant rather
+> than informative.** `t_scale` went 0.371 → **0.447** and `lam` 0.411 → **0.472** when the four
+> duplicate `logcyc` rows left, because a unique-handle score is a residual against the span of the
+> other columns and near-duplicate rows inflate that span. `k`, `x_scale`, `delta_E` and `f_scale`
+> moved by ≤0.006 and the condition number by 1. Redundant rows were flattering nothing and
+> obscuring `t_scale`, the parameter chi is most supposed to help.
+
+> **Outputs are suffixed by mode AND `T_obs`, and the second half was learned the hard way.** The
+> forced control at 1.0 s below shares a mode with the primary run, so under a mode-only suffix it
+> silently overwrote the very result it exists to be compared against — the same defect the mode
+> suffix was added to fix, on an axis added later. Compare only equal-`T` runs.
+
+**The §4.4 baseline reproduces, so the set encoder lost nothing.** This is the question step 3
+existed to answer, and it is answered:
+
+| param | forced | chi | Δ | §4.4 forced | §4.4 chi |
+|---|---|---|---|---|---|
+| `k` | 0.040 | **0.091** | +0.051 | 0.040 | 0.102 |
+| `x_scale` | 0.043 | **0.125** | +0.082 | 0.043 | 0.147 |
+| `t_scale` | 0.219 | **0.447** | +0.228 | 0.224 | 0.501 |
+| `lam` | 0.278 | **0.472** | +0.194 | 0.261 | 0.359 |
+| `delta_E` | 0.091 | 0.102 | +0.011 | 0.085 | 0.126 |
+| `f_scale` | 0.871 | 0.695 | −0.176 | — | — |
+
+`k`~`x_scale`: **0.98 forced → 0.97 chi** (§4.4: 0.98 → 0.95). Condition number 2212 → 2092
+(§4.4: 2300 → 2034). Different `T_obs`, different band, different K, a rebuilt encoder and
+C-4/C-6/C-8 in between — and the numbers land on top of each other.
+
+> **`f_scale`'s unique handle FALLING is the largest gain in the table, not a loss.** Unique-handle is
+> a *ratio*: a parameter with no gradient is trivially orthogonal to everything. Forced `‖g‖_std` for
+> `f_scale` is **0.018** — it is not measured at all at this weak drive, so its 0.871 is noise being
+> unique. Under chi `‖g‖_std` is **3.789, a 213× increase**, and it becomes a real, partially
+> correlated handle. Read `‖g‖` beside `unique` or this row reads backwards.
+
+**THE PAYLOAD — which features break which alias.** This table was contaminated in every previous
+run (CHI10), so this is the first time it can be read at all:
+
+| param | what carries it under chi |
+|---|---|
+| `f_scale` | **all five slots are chi**: `chi1_cos`, `chi2_sin`, `chi0_sin`, `chi2_logmag`, `chi0_logmag` |
+| `t_scale` | `chi4_logmag` +9.65, `chi3_logmag` +7.81, `chi5_logmag` +6.54 — **three** of the top five, the top two above `A3_log_fpeak` (7.60) |
+| `lam` | **`chi2_sin` is the TOP feature** (+7.89), `chi0_sin` fifth |
+| `k` | `A1_mean` **+291**, then `A2_log_var` −124; chi_logmag only reaches −46 |
+| `x_scale` | `A1_mean` **−3.72**, `A2_log_var` +1.89; chi_logmag only reaches +0.51 |
+
+So the mechanism is specific, and it splits cleanly. **chi's PHASE channels (`cos`/`sin`) carry `lam`
+and `f_scale`; its MAGNITUDE channel carries `t_scale`.** And `k`~`x_scale` survives for exactly the
+reason §4.4 gave: both are led by `A1_mean` by a factor of 6, and a sub-resonance susceptibility does
+not touch the mean. **Three independent measurements now agree that chi does not break that pair.**
+Stop expecting it to.
+
+**A control that partly deflates the above — read it before quoting the deltas.** The forced arm's
+Group-G lock-in has no `CHI_MAX_CYCLES` counterpart, so at `T_obs = 4.5 s` it runs **142 drive
+cycles**, far past the ~31-cycle non-stationarity wall of §4.3.1. That inflates Group-G `fnoise` and
+deflates forced's gradients — biasing *in favour* of chi. Re-running forced at `T_obs = 1.0 s`
+(31.6 cycles) measures it:
+
+| | forced @1.0 s | forced @4.5 s | chi @4.5 s |
+|---|---|---|---|
+| `k` | 0.076 | 0.040 | 0.091 |
+| `x_scale` | 0.082 | 0.043 | 0.125 |
+| `t_scale` | 0.206 | 0.219 | 0.447 |
+| `lam` | 0.270 | 0.278 | 0.472 |
+| condition number | 1669 | 2212 | 2092 |
+
+**Two conclusions, opposite in sign.**
+
+1. **`k` and `x_scale`'s gains do not survive intact.** Against forced @1.0 s they shrink roughly by
+   half (+0.051 → +0.015, +0.082 → +0.043). The forced arm's own `T_obs` sensitivity is the same size
+   as the chi gain for these two, so the honest claim is "chi helps `k`/`x_scale` a little, within the
+   noise of how long you record", not the +0.05/+0.08 the matched pair suggests.
+2. **`t_scale`, `lam` and `f_scale` are untouched by it** (+0.241, +0.202, and 180× on `‖g‖`
+   respectively against the 1.0 s arm). Those three gains are real and are chi's actual product.
+
+**And the condition-number claim should be retired.** §4.4 reported 2300 → 2034 as a chi improvement.
+The `T_obs` effect alone moves it 1669 → 2212 — *larger, and in the other direction*. That number was
+never measuring chi. The `|cos|` pairs and the payload table are what survive this control; the
+scalar summaries are not.
+
+**Verdict for the retrain: GO on the information question.** chi buys real, mechanism-identified
+information on `f_scale` (from nothing to measurable), `t_scale` and `lam`. It does not buy
+`k`~`x_scale`, and no amount of retraining will change that. The blocker is elsewhere — see the two
+`decorrelate` items in §6.
 
 ### 4.5 Capability matrix
 
@@ -962,6 +1292,11 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   absent from the Fisher set ON PURPOSE: under a deterministic grid `u` is theta-independent, its
   float32 std is ~2.5e-8, and `fnoise = max(std, 1e-9)` does not protect — the central difference then
   writes entries of order 1 into `J` while `V` stays orthogonal and the tests pass.
+  ⚠ *Two corrections, both from measuring it (2026-08-08).* The std is **25× ABOVE** the 1e-9 clamp,
+  not below it — the clamp is irrelevant here and any guard keyed on it will miss this; the test has
+  to be **relative** to the channel's own magnitude. And this warning was **not enough**:
+  `degeneracy_map` carried it in a comment and violated it six lines later for three commits. See
+  **CHI10**.
 - **CHI2. The Fisher must pass `resolution_filter=False`.** The filter depends on `f_peak`, hence on
   theta, so a probe can CROSS the threshold between the ±dz arms. A mask step of 1 over a 1e-9 floor
   puts ~1e9 into the Jacobian and `V` becomes that discontinuity.
@@ -993,13 +1328,53 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   `gen_chi_raw` **on purpose**: it is the definition of the measurement, not a policy of one caller,
   and "simplifying" it up into `gen_training_data` would leave the Fisher, the PPC and the
   experimental path measuring something the network was never trained on, silently. Third, it is
-  keyed on the batch's **highest** `f_peak` so no row can exceed it; keying on the mean or the median
-  would put exactly the fastest rows — the ones nearest the wall — back over it.
+  applied **PER ROW** (`(B,) N_row`, since C-8 / §4.3.6) — it *used* to be one scalar keyed on the
+  batch's highest `f_peak`, which truncated the slow rows to a fraction of a cycle and masked them;
+  if you find a scalar `T_k` anywhere in this path, it is a regression.
   `CHI_MIN_CYCLES` guards the floor, `CHI_MAX_CYCLES` the ceiling, and `SimConfig.__post_init__`
   rejects a config where they cross (which would mask every probe in every observation).
 - **CHI8. Hz → cell frequency is `cfg.freq_si_to_cell`, NOT `get_unit_conversion_factor("Hz")`,**
   which returns 1.0 against an `ms` cell. A 1000× error lands as a wildly off-resonance but
   numerically valid chi.
+- **CHI10. A standardized Jacobian DIVIDES by an ensemble std, so any pinned channel is an
+  amplifier — and there are three ways to pin one.** `J = ΔF / (2·dz) / max(std, 1e-9)`
+  (`decorrelate.fisher_at`, `degeneracy_map`). A channel that does not vary with theta contributes
+  rounding-over-rounding, which is **order 1 to 10⁴**, not order zero — it then leads `‖g‖`, the
+  `|cos|` matrix, the SVD and the top-features table with nothing in the numbers marking it.
+  Measured 2026-08-08 on `master_spont`, `T_obs = 4.5 s`:
+
+  | how it pins | channel | ensemble std | what it did |
+  |---|---|---|---|
+  | theta-independent by construction | `u` (CHI1) | 2.5e-8 (ratio 1e-8) | `[:2]` unpack fed it in as `logcyc`; **wrong sign**, log(0.03)…log(0.30) against a correct +1.12…+3.00 |
+  | `CHI_MAX_CYCLES` ceiling binds | `logcyc` of a pinned probe | 8e-5 (ratio **2.7e-5**) | `max\|J\|` = **2.0e4** against 289 for the largest real feature; `sigma[0]` and a condition number of **56 000**, alone |
+  | duplicates an existing row | `logcyc` of an unpinned probe | healthy | `corr(chi_j_logcyc, A3_log_fpeak) = +1.000000`, elementwise ratio exactly 1.0 |
+
+  > ✅ **RESOLVED at the source, 2026-08-10 (C-9/C-10).** `logcyc` left `CHI_FISHER_CHANNELS`
+  > (now `("logmag", "cos", "sin")`, 3K) and `fisher_features` takes **one argument**, so rows 1 and 3
+  > of that table cannot occur and row 2's mis-wiring is a `TypeError`. What survives is the
+  > *principle*, which is why this trap is not deleted: **`fnoise` is a denominator, so a channel that
+  > barely varies is an amplifier.** Note the asymmetry that hid it — an *exactly* constant channel is
+  > harmless (`0/1e-9 = 0`, which is why chi mode's 11 zeroed Group-G columns cost nothing); it is the
+  > *nearly* constant one that is lethal. Apply that test to any channel added to any Fisher here.
+
+  **Each needs a different detector, and one detector cannot cover two.** The relative-std test
+  (`std <= 1e-6·|feat|`) catches the first and **provably misses the second** — 2.7e-5 is 27× above
+  it, and raising the constant until it catches is threshold-guessing that would start eating quiet
+  real features. The second is caught by **arithmetic instead**: `mult·Ω₀·T > CHI_MAX_CYCLES` says
+  which probes were capped, deterministically, before any statistics. The third is caught by neither
+  and needs no fix in the script (a duplicate row is redundant, not wrong) but does over-weight that
+  direction in `Jᵀ J` by K× — see §6.
+  > **Why `logcyc` pins, stated once:** `logcyc = log(mult_j) + log(f_peak) + log(T)` when the
+  > ceiling is clear — so `log(mult_j)` is a constant offset that vanishes under standardization and
+  > every unpinned probe's row is **exactly** `A3_log_fpeak`'s. When the ceiling binds,
+  > `freq·T_row → CHI_MAX_CYCLES` and all that is left is the sawtooth of `floor()`. `logcyc` is
+  > therefore *either* a duplicate *or* quantization, never independent information — which is the
+  > opposite of the justification in `chi.fisher_features`' docstring ("it genuinely varies with
+  > theta"). True, and insufficient: it varies *exactly as a row already in the set does*.
+  >
+  > That reasoning is about the FISHER set only. In the **conditioning** block `logcyc` is genuinely
+  > informative, because training varies placement AND duration per row (C-6/C-8) — so do not
+  > "simplify" this into a claim about `CHI_COND_CHANNELS`.
 
 ### X — Cross-cutting traps found during the 2026-07-28 remediation
 
@@ -1057,9 +1432,14 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 | — | **A trained chi-mode posterior + the calibration payoff.** See §4.1 for the gated order. | OPEN — the priority |
 | **C-1** | ~~Gate the chi band on `T_obs`.~~ | ✅ **DONE 2026-08-06** — §4.3.1. Result: the band's failures are a drive-CYCLE limit, not a frequency one. Superseded by **C-4**. |
 | **C-4** | ~~Cap each chi probe's lock-in DURATION at a cycle count.~~ | ✅ **DONE 2026-08-06** — `config.CHI_MAX_CYCLES = 20`, applied in `gen_chi_raw`, on the `SimConfig`, in the sidecar and checked on load. §4.3.1. |
+| **C-8** | ~~Per-ROW lock-in duration in `chi.lock_in_batched`.~~ | ✅ **DONE 2026-08-07** — §4.3.6. Live probes 46 % → **64 %**, inert rows 48 % → **33 %**, and the frequency span improved rather than traded away. |
+| **C-6** | **~33 % of training rows carry no live chi probe** (was 55 %; §4.3.3–§4.3.6). Both parts done — per-ROW placement (C-6) and per-ROW durations (C-8). The residue is the genuinely unmeasurable tail: a sub-1 Hz bundle cannot complete two drive cycles at 0.03–0.3× its Ω₀ within 60 s at any placement or duration. Closing it further means changing the PRIOR (§4.3.4 option 2), not the estimator — a science decision. **Diagnosis, kept because it explains the shape of the fix:** the `CHI_MIN_CYCLES` floor is the only active predicate, and the driver is the row's own **Ω₀**, not `T` and not the band — live fraction goes 0 % below 3 Hz to 98 % above 30 Hz, while the prior spans ~4 decades of Ω₀. The masked rows are **genuine oscillators** (spectral prominence in the thousands), so the mask is correct physics and screening them out would be wrong. | ✅ **DONE 2026-08-07** — no longer a blocker |
+| **C-9** | ~~The Fisher rotation amplifies ceiling-pinned `logcyc`.~~ **MEASURED on a real rotation 2026-08-10, and it does reproduce — but mildly, and INTERMITTENTLY, which is the part that matters.** `chi5_logcyc` pinned exactly as predicted (std 8.7e-05, ratio 2.9e-05, the same signature as the map) yet reached only `max\|J\|` = **6.0** — the *smallest* chi row, against the map's 2.0e4. The amplification depends on whether the ±dz arms straddle a `floor()` step; at that operating point they did not. A production rotation averages **8** operating points at m=48 over a ~4-decade Ω₀ prior, so this is a landmine that fires sometimes, not a constant — the worst kind to leave in. **Fixed with C-10 by the same one-line change.** | ✅ **DONE 2026-08-10** |
+| **C-10** | ~~`chi.fisher_features` emits K duplicate rows.~~ **Confirmed hard on the same rotation:** `chi0/1/2/3_logcyc` agreed to **6 significant figures** (`max\|diff\|` ~2e-5 against entries of 37.44), because with the ceiling clear `logcyc_j = log(mult_j) + log(f_peak) + log(T_obs)` and both constants vanish under standardization — so the row **is** `A3_log_fpeak`'s, K times over, weighting that direction K-fold in `Jᵀ J`. **Fix: `logcyc` removed from `CHI_FISHER_CHANNELS`** (now `("logmag", "cos", "sin")`, 3K not 4K) and `fisher_features` reduced to **one argument**, which makes trap CHI10's whole class of mis-wiring a `TypeError`. Every `logcyc` row was a duplicate, a degrading duplicate, or quantization — never independent information, so nothing was lost. Pinned by two updated assertions plus `test_fisher_features_takes_one_argument_and_its_channels_are_what_they_claim`. | ✅ **DONE 2026-08-10** |
+| **C-7** | ~~`build_prior`'s `num_iterations=50` is a hard-coded literal, and its stability sweep shares `cfg.hw.batch_size` with TRAINING.~~ Promoted to **`config.PRIOR_SWEEP_ITERATIONS`** and **`config.PRIOR_SWEEP_BATCH`** (0 = follow `hw.batch_size`, the historical behaviour and still the right default). The trap it removes: the sweep is ITERATION-bounded, so shrinking the shared batch for a quick run made the prior worse *without* making it faster — 527 s at batch 2048 against >70 min and unfinished at 32. Also recorded at the constant: total candidates = batch x iterations, each round pays a full trajectory whatever the batch, and the subclasses' `batch_size % num_iterations` guard is **vacuous** (`construct_prior` passes `batch*iterations` down), so do not rely on it. | ✅ **DONE 2026-08-10** |
 | **C-5** | ~~Settle the chi band's HIGH EDGE under the cap.~~ | ✅ **DONE 2026-08-06** — §4.3.2. `(0.03, 0.3)` **stands**: under the cap CV and SNR discriminate nowhere in 0.03–0.6, entrainment has a measured knee at 0.35–0.4×, and phase scatter is smooth so no threshold on it is evidence. The one residual is a judgement, not a gap: whether a phase-incoherent probe is worth including. Settling *that* needs two trained posteriors and is not worth it before a first working one exists. |
-| **C-2** | **The Infer tab's variable-length probe table.** The core accepts `(recording, frequency)` pairs at any count (§3.6), but the GUI still builds a fixed list from `chi.chi_multipliers_for(cfg)`, so the capability the set layout exists to deliver is not reachable from the UI. Two constraints when doing it: `_rebuild_chi_fields` must PRESERVE existing rows rather than destroying them (they will carry hand-typed frequencies, not regenerable paths), and a row must be ONE widget pair — parallel path/frequency lists let a middle deletion pair recording *k* with frequency *k+1* silently. `FloatField.value()` returns 0.0 on unparseable text, so a blank frequency box becomes a genuine 0 Hz DC probe unless validated. | OPEN |
-| **C-3** | **A GUI probe planner.** "In band for this cell: 0.42–4.2 Hz; a 0.42 Hz probe needs ≥ 4.8 s." Same predicates the experimental path already refuses/masks on, surfaced BEFORE a bench session rather than after. | OPEN, nice-to-have |
+| **C-2** | ~~The Infer tab's variable-length probe table.~~ The Infer tab now holds an add/remove probe table; each row is **one `_ChiProbeRow` widget** carrying its recording AND the frequency it was actually driven at, and `_infer` submits `(path, freq_Hz)` PAIRS. Both stated constraints are met and pinned by tests: `_rebuild_chi_fields` **preserves** existing rows (they hold hand-typed frequencies and browsed paths a rebuild cannot regenerate; it seeds only when empty, never tops up or trims), and one-widget-per-row makes the middle-deletion mispairing structurally impossible. A blank frequency box is caught before the run — `FloatField.value()` returns 0.0 on bad text, and 0 Hz is a genuine DC probe the lock-in would attempt. | ✅ **DONE 2026-08-10** |
+| **C-3** | ~~A GUI probe planner.~~ A **Plan probes…** button on the Infer tab's χ page measures Ω₀ from the selected passive recording and reports the in-band range in Hz, the minimum seconds to clear the `CHI_MIN_CYCLES` floor at the low edge, the length above which the ceiling truncates, and a per-row verdict at the entered `T_obs`. It also fills BLANK frequency boxes with a nominal in-band grid (blank only — a typed frequency is a record of what the bench did). **The predicates are not reimplemented:** they live in `chi.probe_verdict`, which `orchestrator.build_experiment_obs_chi` was refactored to call, so the planner and the run cannot disagree. | ✅ **DONE 2026-08-10** |
 | — | ~~Make the `scripts/` diagnostics chi-aware.~~ | ✅ **DONE 2026-07-28** — `scripts/_common.py`; see §4.1 |
 | — | Non-atomic `torch.save`/HDF5 writes against a cancel (narrow window; worst case a partial-but-valid sweep file, not corruption). | OPEN, low |
 | — | **Never run for real on a display** — ask before assuming these work: the Parameter-Inference Save buttons, Validate, Infer (simulated and experimental), a full FDT/CrossVal run, a cancel *during* live NN training, the nav click-through, the Simulate trace/heatmap/cancel, the model-builder round-trip, and the accent/Inter checkboxes. Headless tests cover the wiring, not the pixels. | ONGOING |
@@ -1519,6 +1899,190 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
+
+## 2026-08-10 — C-9/C-10: `logcyc` leaves the Fisher set, and the retrain is unblocked
+
+C-9 was catalogued on 2026-08-08 as inferred-from-construction, explicitly **not measured**, with a
+note that measuring it needed a real rotation. Measured now, on
+`build_latent_fisher_rotation` at `m=4, n_points=1` (structurally faithful, ~100× cheaper than the
+`REPARAM_FISHER_M=48 / _POINTS=8` defaults), instrumented from outside by spying on
+`chi.fisher_features` rather than by editing production.
+
+### The prediction was half right, and the half that was wrong is the more useful half
+
+**C-9 reproduced, but mildly.** `chi5_logcyc` pinned exactly as predicted — std 8.7e-05, ratio
+2.9e-05, the same signature the map showed — and then reached `max|J|` = **6.0**, the *smallest* chi
+row, against the map's 2.0e4. The amplification turns on whether the ±dz arms happen to straddle a
+`floor()` step. At that operating point they did not.
+
+**That is worse news than a clean reproduction, not better.** A deterministic 2.0e4 would announce
+itself on the first run. An intermittent one hides through every check and fires on one of the eight
+operating points a production rotation averages, over a prior spanning ~4 decades of Ω₀ — and `V` is
+frozen into the sidecar. "Measured, mild, intermittent" is the profile of a thing that ships.
+
+**C-10 reproduced hard**, and it is what actually justified the fix: `chi0/1/2/3_logcyc` agreed to
+**six significant figures** (`max|diff|` ~2e-5 against entries of 37.44). With the ceiling clear,
+`logcyc_j = log(mult_j) + log(f_peak) + log(T_obs)` — both constants vanish under standardization, so
+the row **is** `A3_log_fpeak`'s, K times over.
+
+### One change closes both
+
+`CHI_FISHER_CHANNELS` drops to `("logmag", "cos", "sin")` and `fisher_features` takes **one
+argument**. Every `logcyc` row was a duplicate, a degrading duplicate, or quantization — never
+independent information — so nothing was lost, and the one-argument signature turns trap CHI10's
+whole class of mis-wiring into a `TypeError` rather than a rebind.
+
+Verified surgical: after the change the rotation's chi block has 18 rows instead of 24, **zero**
+pinned (minimum std/|feat| = 0.0149, four orders clear), and every surviving row's std and `max|J|`
+is **identical** to the pre-fix run — it removed exactly the bad rows and perturbed nothing else.
+
+> **No artifact shape changes, which is less obvious than it sounds.** The Fisher's feature width is
+> an *internal* dimension: `J` is `(n_features, P)` and only ever leaves as `V = eigenbasis(JᵀJ)`,
+> which is `(P, P)` — parameter space. So `chi_layout`, `chi_k_pad`, `chi_elem_w`, `input_dim` and
+> every width the sidecar guards are untouched, and this changes the *values* of `V`, never any
+> shape. That is exactly why it was free today and would not have been after a posterior existed:
+> nothing would have failed loudly, the coordinates would just have been different ones.
+
+### The lesson worth keeping, since the trap survives its own fix
+
+`fnoise` is a **denominator**. A channel that barely varies with theta is an amplifier, not a quiet
+row. And the asymmetry is what makes it invisible: an **exactly** constant channel is harmless
+(`0/1e-9 = 0` — which is why chi mode's 11 zeroed Group-G columns cost nothing), while a **nearly**
+constant one writes order-1-to-1e4 entries into the matrix defining the flow's coordinate system,
+with `V` still orthogonal to 1e-4 and every test green. Apply that test to any channel added to any
+Fisher in this repo.
+
+### Same day — C-2, C-3 and C-7, which closes the C series
+
+**C-7** promoted two literals: `PRIOR_SWEEP_ITERATIONS` and `PRIOR_SWEEP_BATCH` (0 = follow
+`hw.batch_size`, i.e. unchanged behaviour). Worth knowing beyond the refactor — the subclasses'
+`batch_size % num_iterations` guard is **vacuous**: `construct_prior` passes `batch*iterations` down
+as `batch_size`, so the modulo is always 0. Do not rely on it to catch a bad value.
+
+**C-2 + C-3 were one problem wearing two hats,** and the fix is a shared predicate rather than two
+features. The Infer tab now has an add/remove probe table submitting `(recording, frequency_Hz)`
+pairs, and a **Plan probes…** button that says what is in band for this cell and how long each probe
+must be recorded. Those two must agree, and the only way to guarantee that was to stop them each
+owning a copy of the rules: `chi.probe_verdict` is now the single source of the refuse / mask /
+truncate split, and `orchestrator.build_experiment_obs_chi` was refactored to call it. It returns a
+verdict rather than raising, because a planner has to be able to *describe* a bad probe without dying
+on it; the runtime is what turns `"refuse"` into a `ValueError`.
+
+Two design points that are easy to get wrong and are pinned by tests:
+
+- **One widget per row, not parallel lists.** Deleting from the middle of two parallel lists pairs
+  recording *k* with frequency *k+1*, and that is invisible: a lock-in at the wrong frequency decays
+  like a sinc, so it returns a smaller number rather than an obviously wrong one.
+- **A rebuild must PRESERVE the rows.** They hold hand-typed drive frequencies and browsed paths — a
+  record of a bench session that already happened, which nothing in the GUI can regenerate. Contrast
+  the forcing rows, which *are* derivable from the config and so are rebuilt freely. The table seeds
+  only when empty; it never tops up or trims.
+
+And the blank-frequency trap is real rather than theoretical: `FloatField.value()` returns `0.0` on
+unparseable text, so an empty box is indistinguishable from a deliberate zero — and 0 Hz is a genuine
+DC probe the lock-in would happily attempt.
+
+## 2026-08-08 — step 3 run at last, after fixing the script that produces it
+
+§4.1 step 3 was "the only thing left before the retrain" and had been runnable-looking for three
+commits. It was not: `degeneracy_map` sliced `gen_chi_raw(...)[:2]`, binding `logcyc_v` to `u`.
+Full account in §4.4.1 and trap **CHI10**; the result itself is a **GO on the information question**
+and a **NO-GO pending C-9** on the machinery.
+
+### The trap was written down, then walked into six lines later
+
+The comment at the call site described the `u` hazard precisely and the code below it did exactly
+that. Both existed in the same commit. The lesson taken is not "read comments harder" — it is that a
+warning a reader must act on is worth less than an assertion the program acts on, so the guard is now
+a **printed equality**: predicted `log(cycles integrated)` against the measured 4th Fisher channel,
+per probe, `SystemExit` on a mismatch over 0.5. Under the bug it read log(0.03)…log(0.30) — negative
+across a sub-resonance band, against a correct +1.12…+3.00. Unmissable, and it costs one array read
+of an ensemble already simulated.
+
+### One fix uncovered the next, and only the second matters for the retrain
+
+With the unpack right, the top probe's `logcyc` — pinned by `CHI_MAX_CYCLES` to log(20) plus
+`floor()` quantization — became the largest entry in the whole Jacobian: `max|J|` = 2.0e4 against 289
+for the largest real feature, setting `sigma[0]` and a condition number of **56 000** by itself.
+Removing it: **1033**. The relative-std guard **provably could not catch it** (ratio 2.7e-5, 27×
+above the gate), which is why the second detector is arithmetic — the cap already knows which probes
+it capped. **`decorrelate.fisher_at` has the identical construction over the identical feature set**
+(C-9), and that is the retrain blocker; it was not run here.
+
+### Three measurements, three different lifespans
+
+- **Reproduces:** the §4.4 baseline, on a rebuilt encoder, new band, new K, and C-4/C-6/C-8 in
+  between (`k` 0.040→0.092, `x_scale` 0.043→0.127, cond 2212→2093). The set conditioning lost nothing.
+- **New:** the payload table, readable for the first time. chi's **phase** channels carry `lam` and
+  `f_scale`; its **magnitude** channel carries `t_scale`; `k`~`x_scale` is led by `A1_mean` at 6× any
+  chi feature and does not move (0.98 → 0.96 — the third independent confirmation).
+- **Retired:** the condition-number claim. §4.4 read 2300 → 2034 as a chi gain; a forced control at
+  `T_obs = 1.0 s` moves it 1669 → 2212, *larger and in the other direction*. That number was never
+  measuring chi. The same control halves `k`/`x_scale`'s apparent gain but leaves `t_scale`, `lam`
+  and `f_scale` untouched — so those three are chi's actual product.
+
+### Two process notes
+
+- **`TOBS_S` defaulted to 1.0 s and that silently voided 12 of 54 feature rows** — three probes under
+  `CHI_MIN_CYCLES`, returning demeaned residual drift, with `resolution_filter=False` so nothing
+  masked them. Drift is finite, reproducible and has a healthy std, so it passes every *statistical*
+  guard; only cycle arithmetic sees it. The band's span (10×) exactly equals the cycle window's
+  (10×), so no `T_obs` clears both edges — err above the collision at `T* = 2.93 s`.
+- **A ratio needs its numerator quoted beside it.** `f_scale`'s unique handle *falls* 0.871 → 0.701
+  under chi, which reads as a regression and is the single largest gain in the table: forced `‖g‖` is
+  0.018, i.e. not measured at all, and chi takes it to 3.789.
+
+## 2026-08-07 — the smoke train's finding, and C-6/C-8
+
+The first end-to-end chi run (`scripts/smoke_train.py`, new) completed all four stages and then said
+the thing that mattered: **77 % of training probes were masked**, a typical row conditioning on ~2
+live probes out of 12 slots. Well-calibrated and at the prior is `posterior_chi_08042026`'s
+signature, and this would have reproduced it from a new direction — days of GPU to rediscover a known
+failure. Tests 169 → 171. Full account in §4.3.3–§4.3.6.
+
+### Two wrong diagnoses, both mine, both corrected by measuring
+
+1. **"It's a (band × T) interaction — short-`T` batches mask the band's lower half."** Plausible
+   arithmetic, and false: the live fraction is **flat in `T`** (37–47 % from <2 s to >30 s) and flat
+   in multiplier. `scripts/chi_mask_audit.py` (new) separates the predicates the runtime warning
+   lumps together; the `CHI_MIN_CYCLES` floor turned out to be the **only** one ever active, and the
+   driver is the row's own **Ω₀** — 0 % live below 3 Hz against 98 % above 30 Hz, over a prior
+   spanning ~4 decades.
+2. **"Those low-Ω₀ rows are non-oscillatory junk, so screen the prior."** `peak_freq` is an argmax
+   and does return the bottom of a 1/f spectrum when there is no peak, so this was worth believing.
+   Measured peak-over-median PSD power: **thousands**. They are genuine sharp oscillators. A 0.5 Hz
+   bundle really oscillates at 0.5 Hz and its χ at 0.015–0.15 Hz really is unmeasurable in ≤ 60 s, so
+   the mask is correct physics and screening them out would have been wrong.
+
+### The fix, in two parts
+
+**C-6, per-ROW placement.** `chi.resolvable_multipliers` lifts each row's multipliers into the
+sub-band its own Ω₀ can resolve. Free — frequencies were always per-row, only the multipliers were
+shared. 41 % → 46 % live. A variant bounding placement by `CHI_MAX_CYCLES` too was implemented and
+**reverted**: `hi/lo` = 10 and `ceiling/floor` = 10, so requiring both leaves one feasible multiplier
+for all but a single `Ω₀·T` — every probe on one frequency, measuring no shape.
+
+**C-8, per-ROW durations.** The real one. `lock_in_batched` gained `(B,) n_samples` (masked, not
+sliced, so the chunked float64 accumulation is untouched) and `gen_chi_raw` an `(B,) N_row`. 46 % →
+**64 %** live, inert rows 55 % → **33 %**.
+
+### What kept the work honest
+
+**Live count is not the objective.** chi(ω) measures the shape of a curve, so a placement rule tuned
+on live count alone will happily park every probe on one frequency — perfectly resolved and carrying
+nothing. The audit reports the live probes' frequency SPAN for that reason, and it is what would have
+caught the rejected variant had the arithmetic not. Both parts improved span (4.99× → 5.38×) and cut
+single-probe rows (7.9 % → 1.4 %) *alongside* the count, which is why this is a fix and not a trade.
+
+### Two process notes that cost real time
+
+- **`RUN_SIZE` shrank the PRIOR's stability sweep too**, because `cfg.hw.batch_size` is both. The
+  sweep is iteration-bounded, so that made the prior worse without making it faster: **527 s at batch
+  2048 versus >70 min and unfinished at batch 32.** `smoke_train.py` now applies `RUN_SIZE` only from
+  the posterior stage on; the underlying literal is **C-7**.
+- **Do not edit source under a running suite.** `test_cufft_plan_cache_is_cleared_between_training_batches`
+  reads its own source with `inspect.getsource`, which re-reads from disk, so an edit mid-run made it
+  fail spuriously and cost a full hour-long re-run to clear.
 
 ## 2026-08-06 (last) — the band's high edge (C-5)
 

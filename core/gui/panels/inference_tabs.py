@@ -12,6 +12,8 @@ never run concurrently. The screen owns the SbiSession and greys tabs via setTab
 reads/writes the session through ``self._screen`` and calls ``self._screen.refresh_gates()`` after a
 stage completes.
 """
+import math
+
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -86,7 +88,13 @@ HELP = {
                  "wherever t_scale puts it, instead of sitting at fixed absolute frequencies.",
     "chi_passive": "The passive (undriven) recording. Its power spectrum sets Ω₀, which anchors the "
                    "frequency of every driven recording below.",
-    "chi_forced": "The driven recording for this multiple of Ω₀ (.csv or .npy; last column = values).",
+    "chi_forced": "One row per single-tone forced recording: the file, and the frequency you "
+                  "ACTUALLY drove it at in Hz. Type the real frequency rather than the nominal "
+                  "one — a lock-in decays like a sinc, so being off by a fraction of 1/T_obs "
+                  "destroys the estimate while every number still looks plausible. Any count from 1 "
+                  "to the posterior's probe slots works, at any frequencies in band: the encoder is "
+                  "permutation-invariant and carries each probe's frequency explicitly. Use "
+                  "'Plan probes…' to see what is in band for this cell and how long each must be.",
     "chi_f0_si": "The physical drive amplitude used for the forced recordings. χ cancels the amplitude "
                  "in the linear regime, so this only sets the lock-in normalisation.",
     "bounds_source": "Pick a bounds file, or edit the numbers directly. Direct entry starts FROM the "
@@ -126,6 +134,56 @@ class _ChiRangeRow(LabeledFieldRow):
         return self.values()
 
 
+class _ChiProbeRow(QWidget):
+    """ONE forced recording and the frequency it was ACTUALLY driven at, as a SINGLE widget.
+
+    One object per probe is the entire point, not a layout convenience. Parallel path/frequency lists
+    let a middle deletion pair recording *k* with frequency *k+1*, and that failure is invisible: a
+    lock-in decays like a sinc, so a mismatch of a fraction of 1/T_obs destroys the estimate while
+    every number on screen still looks reasonable. Deleting this widget deletes the pair, so the two
+    cannot drift apart by construction.
+
+    The frequency is entered, never derived. The frequencies a bench can actually achieve are not
+    exactly ``mult_k * Omega_0``, and even aiming for them your Omega_0 estimate is not
+    ``chi.peak_freq``'s -- different trace length, windowing, bin resolution. See
+    orchestrator.build_experiment_obs_chi, which stopped guessing them for the same reason.
+    """
+
+    def __init__(self, on_remove, freq_hz: float = 0.0, parent=None):
+        super().__init__(parent)
+        self.path = PathField()
+        self.freq = FloatField(freq_hz)
+        self.freq.setMaximumWidth(96)
+        self.btn_remove = QPushButton("✕")
+        self.btn_remove.setMaximumWidth(32)
+        self.btn_remove.setToolTip("Remove this probe")
+        self.btn_remove.clicked.connect(lambda: on_remove(self))
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.path, 1)
+        row.addWidget(QLabel("at"))
+        row.addWidget(self.freq)
+        row.addWidget(QLabel("Hz"))
+        row.addWidget(self.btn_remove)
+
+    def pair(self) -> tuple:
+        return self.path.value(), self.freq.value()
+
+    def problems(self, index: int) -> list:
+        """Why this row cannot be run, phrased for a user. Structural only -- whether the probe is in
+        band or long enough is chi.probe_verdict's job, and the planner reports it."""
+        out = []
+        if not self.path.value():
+            out.append(f"probe {index + 1}: no recording selected")
+        # FloatField.value() returns 0.0 on unparseable text, so a BLANK box is indistinguishable from
+        # a deliberate zero unless it is checked here -- and 0 Hz is a genuine DC probe the lock-in
+        # would happily attempt. This is the check that stops a typo becoming a measurement.
+        f = self.freq.value()
+        if not (math.isfinite(f) and f > 0):
+            out.append(f"probe {index + 1}: drive frequency must be a positive number (got {f:g})")
+        return out
+
+
 # ── worker-callable runners (module-level so a Worker can call them with an injected fig_sink) ─────
 def _run_simulated_inference(cfg, posterior, cell_path, T_obs_s, *, gt_dicts=None, inferred_prior=None,
                              force_prior=None, fig_sink=None):
@@ -160,12 +218,18 @@ def _run_experimental_inference(cfg, posterior, spont_path, forced_path, T_obs_s
     orchestrator.infer_and_visualize(cfg, posterior, obs_stats, obs_data, t_dim, show_truth=False, fig_sink=fig_sink)
 
 
-def _run_experimental_inference_chi(cfg, posterior, spont_path, forced_paths, T_obs_s, F0_si,
+def _run_experimental_inference_chi(cfg, posterior, spont_path, forced_pairs, T_obs_s, F0_si,
                                     *, fig_sink=None):
-    """chi(omega) experimental inference: ONE passive recording (which sets Omega_0) plus K single-tone
-    forced recordings, the k-th driven at the k-th multiple of Omega_0."""
+    """chi(omega) experimental inference: ONE passive recording (which sets Omega_0) plus ANY NUMBER
+    of single-tone forced recordings, each locked in at THE FREQUENCY IT WAS ACTUALLY DRIVEN AT.
+
+    ``forced_pairs`` is a list of ``(path, drive_frequency_Hz)``. It used to be a bare list of paths
+    whose frequencies were assumed to be ``chi.chi_multipliers_for(cfg)``, which is what backlog C-2
+    was about: the core has accepted per-probe frequencies at any count for some time, and the GUI
+    was the only thing still forcing a fixed grid on it."""
     x_spont = file_manager.load_experimental_data(spont_path, dtype=cfg.hw.dtype)
-    x_forced = [file_manager.load_experimental_data(p, dtype=cfg.hw.dtype) for p in forced_paths]
+    x_forced = [(file_manager.load_experimental_data(p, dtype=cfg.hw.dtype), float(f))
+                for p, f in forced_pairs]
     obs_stats, obs_data, t_dim = orchestrator.build_experiment_obs_chi(
         cfg, x_spont, x_forced, T_obs_s, F0_si)
     orchestrator.infer_and_visualize(cfg, posterior, obs_stats, obs_data, t_dim, show_truth=False,
@@ -781,7 +845,25 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
         add_help_row(self.chi_form, "Passive", self.chi_spont, HELP["chi_passive"])
         add_help_row(self.chi_form, "T_obs (s)", self.chi_tobs, HELP["tobs"])
         add_help_row(self.chi_form, "Drive F₀ (N)", self.chi_f0_si, HELP["chi_f0_si"])
-        self._chi_anchor = QLabel("(build a χ config to list drive frequencies)")
+        # The probe table (backlog C-2). Rows live in their OWN container rather than as form rows, so
+        # adding and removing one is a local layout edit that cannot disturb the fields above it.
+        self._chi_probe_host = QWidget()
+        self._chi_probe_layout = QVBoxLayout(self._chi_probe_host)
+        self._chi_probe_layout.setContentsMargins(0, 0, 0, 0)
+        add_help_row(self.chi_form, "Forced probes", self._chi_probe_host, HELP["chi_forced"])
+        self._chi_buttons = chi_btns = QWidget(); chi_btns_l = QHBoxLayout(chi_btns)
+        chi_btns_l.setContentsMargins(0, 0, 0, 0)
+        self.btn_chi_add = QPushButton("+ Add probe")
+        self.btn_chi_add.clicked.connect(lambda: self._add_chi_probe())
+        self.btn_chi_plan = QPushButton("Plan probes…")
+        self.btn_chi_plan.setToolTip("Measure Ω₀ from the passive recording and report what is in "
+                                     "band, and how long each probe must be recorded.")
+        self.btn_chi_plan.clicked.connect(self._plan_chi_probes)
+        chi_btns_l.addWidget(self.btn_chi_add)
+        chi_btns_l.addWidget(self.btn_chi_plan)
+        chi_btns_l.addStretch(1)
+        self.chi_form.addRow(chi_btns)
+        self._chi_anchor = QLabel("(build a χ config to enable the probe table)")
         self.chi_form.addRow(self._chi_anchor)
         self.infer_stack.addWidget(chi_w)
         v.addWidget(self.infer_stack)
@@ -856,23 +938,126 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
         mode = cfg.observation_mode if cfg is not None else "forced"
         self.infer_stack.setCurrentIndex(2 if mode == "chi" else 1)
 
+    def _add_chi_probe(self, freq_hz: float = 0.0):
+        """Append one probe row, up to the posterior's slot capacity."""
+        cfg = self.session.cfg
+        cap = cfg.chi_k_pad if cfg is not None and cfg.chi_mode else config.CHI_K_PAD
+        if len(self._chi_forced_fields) >= cap:
+            self.log_pane.append_line(
+                f"This posterior reserves {cap} probe slots (CHI_K_PAD), which is frozen into the "
+                f"trained artifact — it cannot take more probes than that.", "warning")
+            return None
+        row = _ChiProbeRow(self._remove_chi_probe, freq_hz)
+        self._chi_forced_fields.append(row)
+        self._chi_probe_layout.addWidget(row)
+        return row
+
+    def _remove_chi_probe(self, row):
+        if row not in self._chi_forced_fields:
+            return
+        self._chi_forced_fields.remove(row)
+        self._chi_probe_layout.removeWidget(row)
+        row.setParent(None)
+        row.deleteLater()
+
     def _rebuild_chi_fields(self, cfg):
-        """One forced-recording PathField per χ probe frequency, labelled with its multiple of Ω₀."""
-        for fld in self._chi_forced_fields:
-            self.chi_form.removeRow(fld)
-        self._chi_forced_fields = []
+        """Enable/disable the probe table for the built config, PRESERVING every existing row.
+
+        Rows are never destroyed on a rebuild, and that is deliberate. They carry hand-typed drive
+        frequencies and browsed recording paths -- neither of which this method could regenerate, and
+        both of which represent a bench session that already happened. Rebuilding the config (to fix
+        a bounds file, say) must not silently discard them. Contrast _rebuild_forcing_fields, whose
+        rows ARE derivable from the config's forcing schema and so are rebuilt freely.
+
+        Count and placement are both free (handoff 3.6): the encoder is permutation-invariant and
+        carries each probe's frequency explicitly, so the table seeds a suggested number of rows and
+        then gets out of the way. `cfg.chi_n_freqs` is a suggestion, NOT a requirement -- the core
+        accepts 1..chi_k_pad probes at whatever frequencies the experiment achieved.
+        """
         if self._chi_anchor is not None:
             self.chi_form.removeRow(self._chi_anchor)
             self._chi_anchor = None
-        if not cfg.chi_mode:
-            self._chi_anchor = QLabel("(build a χ config to list drive frequencies)")
+        on = bool(cfg.chi_mode)
+        self.btn_chi_add.setEnabled(on)
+        self.btn_chi_plan.setEnabled(on)
+        # setRowVisible, not setVisible: hiding the widget alone strands its form LABEL, so a
+        # non-chi config would show a "Forced probes" caption with nothing under it.
+        self.chi_form.setRowVisible(self._chi_probe_host, on)
+        self.chi_form.setRowVisible(self._chi_buttons, on)
+        if not on:
+            self._chi_anchor = QLabel("(build a χ config to enable the probe table)")
             self.chi_form.addRow(self._chi_anchor)
             return
-        from core.SBI import chi as _chi
-        for mult in _chi.chi_multipliers_for(cfg).tolist():
-            fld = PathField()
-            self._chi_forced_fields.append(fld)
-            add_help_row(self.chi_form, f"Forced @ {mult:.3g}×Ω₀", fld, HELP["chi_forced"])
+        # Seed only when EMPTY -- never top up, never trim. A user who deleted rows meant it.
+        if not self._chi_forced_fields:
+            for _ in range(max(1, min(int(cfg.chi_n_freqs), cfg.chi_k_pad))):
+                self._add_chi_probe()
+
+    def _plan_chi_probes(self):
+        """Backlog C-3: say what is in band for THIS cell, and how long each probe must be recorded.
+
+        Every predicate comes from chi.probe_verdict, the same function build_experiment_obs_chi
+        refuses and masks on -- so this cannot tell the user one thing and the run another. That is
+        the point of the exercise: these answers were previously only discoverable by running the
+        inference, i.e. after the bench session rather than before it.
+
+        The band is RELATIVE to the cell's own Ω₀, so nothing useful can be said until a passive
+        recording exists. Measuring it needs one load and one FFT, which is why this is a button
+        rather than something recomputed on every keystroke.
+        """
+        cfg = self.session.cfg
+        if cfg is None or not cfg.chi_mode:
+            return
+        path = self.chi_spont.value()
+        if not path:
+            self.log_pane.append_line(
+                "Select the passive recording first — Ω₀ is measured from it, and the χ band is "
+                "defined relative to Ω₀, so there is nothing to plan without it.", "warning")
+            return
+        try:
+            from core.SBI import chi as _chi
+            x = file_manager.load_experimental_data(path, dtype=cfg.hw.dtype)
+            f_peak = float(_chi.peak_freq(x.unsqueeze(0), cfg.dt_exp))
+        except Exception as e:                                  # noqa: BLE001 -- a planner must never
+            self.log_pane.append_line(f"Could not measure Ω₀ from {path}: {e}", "error")   # break the panel
+            return
+        hz = cfg.get_unit_conversion_factor("s")
+        lo_hz, hi_hz = _chi.band_hz(cfg, f_peak)
+        n_samp = max(1, int(round(self.chi_tobs.value() * hz / cfg.dt_exp)))
+        self.log_pane.append_line(
+            f"Ω₀ = {f_peak * hz:.4g} Hz for this recording. In band for this cell: "
+            f"{lo_hz:.3g}–{hi_hz:.3g} Hz "
+            f"({cfg.chi_freq_bounds[0]:g}–{cfg.chi_freq_bounds[1]:g}×Ω₀).")
+        self.log_pane.append_line(
+            f"At the band's low edge a probe needs ≥ {config.CHI_MIN_CYCLES / lo_hz:.3g} s to clear "
+            f"the {config.CHI_MIN_CYCLES:g}-cycle floor; above "
+            f"{cfg.chi_max_cycles / hi_hz:.3g} s the high edge is truncated to the "
+            f"{cfg.chi_max_cycles:g}-cycle ceiling (which is fine — only the tail is dropped).")
+        # Fill blank frequency boxes with the nominal in-band grid so the table is usable immediately.
+        # Only BLANK ones: a typed frequency is a record of what the bench actually did.
+        blanks = [r for r in self._chi_forced_fields if r.freq.value() <= 0]
+        if blanks:
+            grid = _chi.chi_multipliers(n_freqs=len(blanks), bounds=cfg.chi_freq_bounds).tolist()
+            for row, mult in zip(blanks, grid):
+                row.freq.setText(f"{mult * f_peak * hz:.4g}")
+            self.log_pane.append_line(
+                f"Filled {len(blanks)} blank frequency box(es) with a nominal log-spaced in-band "
+                f"grid. These are SUGGESTIONS — replace each with the frequency you actually drove "
+                f"at, because a lock-in decays like a sinc and a small mismatch destroys it.")
+        # Now report each row's verdict against the T_obs entered.
+        for i, row in enumerate(self._chi_forced_fields):
+            f = row.freq.value()
+            if not (math.isfinite(f) and f > 0):
+                self.log_pane.append_line(f"  probe {i + 1}: no frequency entered.", "warning")
+                continue
+            v = _chi.probe_verdict(cfg, f_peak, f, n_samp)
+            if v.action == "use":
+                self.log_pane.append_line(
+                    f"  probe {i + 1}: {f:g} Hz — OK, {v.cycles:.1f} drive cycles at "
+                    f"T_obs = {self.chi_tobs.value():g} s.")
+            else:
+                self.log_pane.append_line(f"  probe {i + 1}: {f:g} Hz — {v.action.upper()}: "
+                                          f"{v.reason}.", "warning" if v.action != "refuse" else "error")
 
     def _rebuild_forcing_fields(self, cfg):
         for fld in self._forcing_fields.values():
@@ -913,13 +1098,28 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
                           inferred_prior=self.session.inf_prior, force_prior=self.session.force_prior,
                           provide_fig_sink=True)
         elif cfg.observation_mode == "chi":          # experimental, χ(ω): 1 passive + K forced
-            paths = [f.value() for f in self._chi_forced_fields]
-            if not self.chi_spont.value() or not all(paths):
-                self.log_pane.append_line(
-                    f"Select the passive recording and all {len(self._chi_forced_fields)} forced "
-                    "recordings first.", "warning")
+            if not self.chi_spont.value():
+                self.log_pane.append_line("Select the passive recording first — it sets Ω₀.",
+                                          "warning")
                 return
-            self.dispatch(_run_experimental_inference_chi, cfg, post, self.chi_spont.value(), paths,
+            if not self._chi_forced_fields:
+                self.log_pane.append_line(
+                    "Add at least one forced probe. χ mode conditions on a passive recording plus "
+                    "any number of single-tone forced ones, but zero probes is a spontaneous "
+                    "observation wearing a χ conditioning vector.", "warning")
+                return
+            problems = [p for i, r in enumerate(self._chi_forced_fields) for p in r.problems(i)]
+            if problems:
+                self.log_pane.append_line("Fix the probe table first: " + "; ".join(problems),
+                                          "warning")
+                return
+            # (recording, drive frequency in Hz) PAIRS, never a bare path list. The core locks in at
+            # the frequency it is TOLD, rather than assuming mult_k * Omega_0 -- the frequencies a
+            # bench achieves are not exactly that, and a lock-in at the wrong frequency decays like a
+            # sinc. Pairs come straight off each row widget, so they cannot be mismatched by an
+            # add/remove in the middle of the table.
+            pairs = [r.pair() for r in self._chi_forced_fields]
+            self.dispatch(_run_experimental_inference_chi, cfg, post, self.chi_spont.value(), pairs,
                           self.chi_tobs.value(), self.chi_f0_si.value(), provide_fig_sink=True)
         elif not cfg.has_forcing:                    # experimental, passive (no drive)
             if not self.exp_spont.value():

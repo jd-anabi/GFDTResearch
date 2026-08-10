@@ -349,8 +349,176 @@ def test_width_is_k_independent():
     assert chi_mod.n_chi_features(12) == W * 12
     assert chi_mod.n_chi_features(12) == chi_mod.n_chi_features(12)
     assert len(chi_mod.chi_labels(12)) == W * 12
-    assert len(chi_mod.chi_labels(7, chi_mod.CHI_FISHER_CHANNELS)) == 4 * 7
-    assert "u" not in chi_mod.CHI_FISHER_CHANNELS and "mask" not in chi_mod.CHI_FISHER_CHANNELS
+    # Pin the CONTENTS, not just a width: the exclusions are the point, and a count would still pass
+    # if someone swapped one banned channel for another.
+    assert chi_mod.CHI_FISHER_CHANNELS == ("logmag", "cos", "sin")
+    assert len(chi_mod.chi_labels(7, chi_mod.CHI_FISHER_CHANNELS)) == 3 * 7
+    for banned in ("u", "mask", "logcyc"):
+        assert banned not in chi_mod.CHI_FISHER_CHANNELS, (
+            f"`{banned}` is back in the Fisher set. A standardized Jacobian divides by an ensemble "
+            f"std, so a channel that barely varies with theta is an AMPLIFIER: `u` is pure float32 "
+            f"rounding, `mask` is a step, and `logcyc` is either an exact duplicate of A3_log_fpeak "
+            f"or floor() quantization. See trap CHI10 / backlog C-9/C-10.")
+
+
+class _PlannerCfg:
+    """Minimal SimConfig stand-in for chi.probe_verdict / chi.band_hz.
+
+    Deliberately a stub rather than a real SimConfig: the predicates are pure arithmetic over six
+    scalars, and building a real config would drag in bounds files, a cell and a time grid -- turning
+    a millisecond test into one that needs Resources/ on disk and fails for reasons unrelated to what
+    it pins. The fields below ARE the whole contract; if probe_verdict starts reading anything else,
+    this stub breaks loudly, which is the intended alarm.
+    """
+    dt_exp = 1.0                       # ms cell time units -> 1 kHz sampling, Nyquist 500 Hz
+    chi_freq_bounds = (0.03, 0.3)
+    chi_max_cycles = 20.0
+    freq_si_to_cell = 1.0 / 1000.0     # Hz -> cycles per ms
+
+    @staticmethod
+    def get_unit_conversion_factor(_unit):
+        return 1000.0                  # cell time units per second
+
+
+def test_probe_verdict_matches_the_experimental_paths_refuse_mask_truncate_split():
+    """The planner (C-3) and build_experiment_obs_chi share ONE predicate, so pin all four verdicts.
+
+    The split being pinned is not about severity -- it is about train/eval consistency. Training masks
+    a sub-cycle probe and keeps the row, so the experimental path must mask it too rather than reject
+    an observation the network handles fine. What it DOES refuse is different in kind: a frequency
+    that is not a frequency, one past Nyquist, or one outside the band the posterior was trained over.
+    Collapsing these into one behaviour is the mistake this test exists to prevent.
+    """
+    cfg = _PlannerCfg()
+    f_peak_cell = 22.6 / 1000.0                     # 22.6 Hz in cycles/ms, the master cell's Omega_0
+    lo_hz, hi_hz = chi_mod.band_hz(cfg, f_peak_cell)
+    assert abs(lo_hz - 0.678) < 1e-3 and abs(hi_hz - 6.78) < 1e-2, (lo_hz, hi_hz)
+
+    # In band, long enough, under the ceiling -> used in full.
+    v = chi_mod.probe_verdict(cfg, f_peak_cell, 2.0, 5000)          # 2 Hz over 5 s = 10 cycles
+    assert v.action == "use" and v.reason == "" and v.n_use == 5000
+    assert abs(v.cycles - 10.0) < 1e-9
+
+    # Over the ceiling -> TRUNCATED, not masked and not refused: the recording is fine, its tail is not.
+    v = chi_mod.probe_verdict(cfg, f_peak_cell, 2.0, 50_000)        # 100 cycles, ceiling is 20
+    assert v.action == "truncate" and v.n_use == 10_000
+    assert abs(v.cycles - 20.0) < 1e-9, v.cycles
+
+    # Under the floor -> MASKED, and the message must say how long a recording would fix it.
+    v = chi_mod.probe_verdict(cfg, f_peak_cell, 1.0, 1000)          # 1 Hz over 1 s = 1 cycle
+    assert v.action == "mask" and "MASKED" in v.reason
+    assert abs(v.min_seconds - 2.0) < 1e-9                          # 2 cycles / 1 Hz
+    assert abs(v.max_seconds - 20.0) < 1e-9                         # 20 cycles / 1 Hz
+
+    # Structural mistakes -> REFUSED, each naming its own cause.
+    for bad, needle in ((0.0, "positive"), (float("nan"), "positive"), (-3.0, "positive")):
+        assert chi_mod.probe_verdict(cfg, f_peak_cell, bad, 5000).action == "refuse"
+    assert "Nyquist" in chi_mod.probe_verdict(cfg, f_peak_cell, 490.0, 5000).reason
+    out = chi_mod.probe_verdict(cfg, f_peak_cell, 25.0, 5000)       # well above the band's top edge
+    assert out.action == "refuse" and "outside the band" in out.reason
+    # ... and the refusal must quote the band IN HZ for this cell, which is the only actionable form:
+    # the band is relative to Omega_0, so it is not a property of the posterior alone.
+    assert f"{lo_hz:g}-{hi_hz:g} Hz" in out.reason, out.reason
+
+    # A probe just inside the band edge survives; CHI_UHAT_MAX = 1.25 allows a margin past `hi`, so
+    # test the band edge itself rather than guessing where the refusal starts.
+    assert chi_mod.probe_verdict(cfg, f_peak_cell, hi_hz, 20_000).action in ("use", "truncate")
+    assert chi_mod.probe_verdict(cfg, f_peak_cell, lo_hz, 20_000).action in ("use", "truncate")
+
+
+def test_fisher_features_takes_one_argument_and_its_channels_are_what_they_claim():
+    """The Fisher block must be (log|chi|, cos, sin) per probe, in that order, from ONE argument.
+
+    Both halves are regressions, not hypotheticals (trap CHI10):
+
+    * `fisher_features` used to take `(chi_stack, logcyc)`, and scripts/degeneracy_map passed it
+      `gen_chi_raw(...)[:2]` -- so `u` arrived wearing `logcyc`'s name and nothing complained,
+      because a 4-tuple sliced to 2 unpacks into 2 names perfectly happily. A one-argument signature
+      makes that a TypeError. Pin the arity so it cannot quietly grow a second parameter back.
+    * `cos^2 + sin^2 == 1` is the identity that says channels 1 and 2 really are the cosine and sine
+      of ONE angle. It is the same invariant the packer uses to tell a real probe from a phantom, and
+      it is the only cheap check that survives a reordering of the channel tuple.
+    """
+    import inspect
+
+    sig = inspect.signature(chi_mod.fisher_features)
+    assert len(sig.parameters) == 1, (
+        f"fisher_features takes {len(sig.parameters)} arguments; it must take exactly one. A second "
+        f"channel argument is how `u` was fed in under the name `logcyc` for three commits.")
+
+    B, K = 4, 5
+    g = torch.Generator().manual_seed(11)
+    mag = torch.rand(B, K, generator=g) * 3.0 + 0.25
+    ang = (torch.rand(B, K, generator=g) * 2 - 1) * math.pi
+    chi_stack = torch.polar(mag, ang)
+
+    out = chi_mod.fisher_features(chi_stack)
+    assert out.shape == (B, 3 * K), out.shape
+    assert torch.isfinite(out).all()
+
+    f = out.reshape(B, K, 3)
+    assert torch.allclose(f[..., 0], torch.log(mag), atol=1e-5)            # channel 0 = log|chi|
+    assert torch.allclose(f[..., 1], torch.cos(ang), atol=1e-6)            # channel 1 = cos
+    assert torch.allclose(f[..., 2], torch.sin(ang), atol=1e-6)            # channel 2 = sin
+    assert torch.allclose(f[..., 1] ** 2 + f[..., 2] ** 2,
+                          torch.ones(B, K), atol=1e-5), "cos^2 + sin^2 != 1"
+
+    # The labels must describe the block they are printed beside, or a diagnostic table lies about
+    # which feature carries which parameter -- which is exactly the payload of scripts/degeneracy_map.
+    labels = chi_mod.chi_labels(K, chi_mod.CHI_FISHER_CHANNELS)
+    assert len(labels) == 3 * K
+    assert labels[:3] == ["chi0_logmag", "chi0_cos", "chi0_sin"], labels[:3]
+
+
+def test_resolvable_multipliers_rescue_slow_rows_without_leaving_the_band():
+    """Per-ROW placement: a slow row must be given probes it can actually resolve, and a fast row
+    must be left alone.
+
+    WHY (backlog C-6, handoff 4.3.4). Probes sit at ``mult * Omega_0``, so one shared multiplier set
+    across a prior spanning ~4 decades of Omega_0 cannot resolve for everyone: measured, 55 % of
+    training rows carried ZERO live probes, 0 % live below 3 Hz against 98 % above 30 Hz. The masked
+    rows are genuine oscillators, so the mask is right and the PLACEMENT is what has to move.
+
+    Four properties, and the last two are the ones that would fail silently:
+      * a slow row's probes clear CHI_MIN_CYCLES afterwards where they did not before;
+      * a fast row -- one whose whole band already resolves -- is left EXACTLY as drawn, so this
+        cannot quietly reshape the training distribution where it was never broken;
+      * nothing leaves the band, or the packer's CHI_UHAT_MAX filter would mask what placement just
+        rescued, trading one silent loss for another;
+      * ORDER and relative spacing survive, because the stratified jitter sample_multipliers produces
+        is what keeps a row's probes spanning the band with no holes -- a rescue that collapsed them
+        onto one frequency would resolve perfectly and measure no SHAPE at all.
+    """
+    lo, hi = config.CHI_FREQ_BOUNDS
+    floor, T = config.CHI_MIN_CYCLES, 10.0
+    drawn = chi_mod.chi_multipliers(n_freqs=5, bounds=(lo, hi))                 # (5,) ascending
+    # fast: even the band's LOW edge resolves.  slow: not even the HIGH edge does, at this T.
+    f_fast = floor / (lo * T) * 10.0
+    f_mid = floor / (0.5 * (lo + hi) * T)
+    f_hopeless = floor / (hi * T) * 0.1
+    f_peak = torch.tensor([f_fast, f_mid, f_hopeless])
+
+    out = chi_mod.resolvable_multipliers(drawn, f_peak, T, bounds=(lo, hi), min_cycles=floor)
+    assert out.shape == (3, 5), out.shape
+    assert bool(((out >= lo - 1e-6) & (out <= hi + 1e-6)).all()), \
+        f"placement left the band {(lo, hi)}: {out}"
+
+    # the fast row is untouched -- its whole band already resolved
+    assert torch.allclose(out[0], drawn.to(out.dtype), rtol=1e-5, atol=1e-7), \
+        f"a row that never needed rescuing was moved: {out[0]} vs {drawn}"
+
+    # the mid row is rescued: every probe now clears the floor, and none did at the low edge before
+    assert float((drawn[0] * f_mid * T)) < floor, "the mid row's low probe already resolved -- vacuous"
+    assert bool((out[1] * f_mid * T >= floor - 1e-4).all()), \
+        f"a rescuable row still has sub-floor probes: {out[1] * f_mid * T}"
+
+    # the hopeless row parks at the top edge; it stays masked, which is the honest outcome
+    assert torch.allclose(out[2], torch.full((5,), hi, dtype=out.dtype), rtol=1e-5), out[2]
+
+    # order and distinctness survive for the rescued row
+    assert bool((out[1][1:] > out[1][:-1]).all()), f"placement lost its ordering: {out[1]}"
+    assert len(set(round(float(v), 9) for v in out[1])) == 5, \
+        f"placement collapsed probes onto one frequency, measuring no shape: {out[1]}"
 
 
 if __name__ == "__main__":

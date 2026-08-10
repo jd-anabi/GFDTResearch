@@ -22,6 +22,7 @@ from tqdm import tqdm
 from .config import (
     SimConfig, PRIOR_PATH, POSTERIOR_PATH, PLOT_PATH, T_MIN_EXP_S, T_MAX_EXP_S,
     CHUNK_LEN, N_ND_MAX, PPC_BIN_SIZE, SBC_N_CAL, STABILITY_SWEEP_ND_UNITS, TRAINING_NUM_RUNS,
+    PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH,
     DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS, NSF_NUM_BINS,
     TRAINING_NUM_ROUNDS, TRAINING_BATCH_SIZE, TRAINING_LEARNING_RATE,
     TRAINING_STOP_AFTER_EPOCHS, TRAINING_MAX_NUM_EPOCHS, TRAINING_SHOW_SUMMARY, FORCING_SI_UNITS,
@@ -431,14 +432,20 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     n_stab_fine = int(STABILITY_SWEEP_ND_UNITS / cfg.dt_nd_min)
     t_stab = cfg.t[:n_stab_fine]
     prior_segs = max(1, math.ceil(n_stab_fine / CHUNK_LEN))
+    # The sweep's batch is its OWN knob (C-7), not the training batch. They were the same number,
+    # and because the sweep is ITERATION-bounded rather than accept-bounded, shrinking that number for
+    # a cheap run made the prior worse WITHOUT making it faster -- 527 s at batch 2048 against >70 min
+    # and unfinished at batch 32. PRIOR_SWEEP_BATCH = 0 keeps the historical behaviour (follow the
+    # hardware batch), which is still what a real run wants; see config for when to set it.
+    sweep_batch = PRIOR_SWEEP_BATCH or cfg.hw.batch_size
     nd_prior = pipeline.gen_prior(
         model=cfg.model, t=t_stab,
-        global_batch_size=cfg.hw.batch_size,
-        local_batch_size=(cfg.hw.batch_size // 2),
+        global_batch_size=sweep_batch,
+        local_batch_size=(sweep_batch // 2),
         segs=prior_segs,
         prior_bounds=cfg.nd_params_bounds,
         state_dep_drift=cfg.state_dep_drift,
-        num_iterations=50,
+        num_iterations=PRIOR_SWEEP_ITERATIONS,
         log_mask=nd_log_mask(cfg),   # geometric/log box on the configured ND scale params (REPARAM_LOG_PARAMS)
         dtype=cfg.hw.dtype, device=cfg.hw.device,
     )
@@ -1615,7 +1622,6 @@ def build_experiment_obs_chi(
             f"(expected ~{expected_N} points).", stacklevel=2)
 
     f_peak = chi.peak_freq(X_spont_b, cfg.dt_exp)             # (1,) Omega_0/2pi (cell freq units)
-    nyq = 0.5 / cfg.dt_exp
     n_probes = len(X_forced_list)
     if not (1 <= n_probes <= cfg.chi_k_pad):
         raise ValueError(
@@ -1627,75 +1633,46 @@ def build_experiment_obs_chi(
         mults = chi.chi_multipliers(dtype=dtype, device=torch.device("cpu"),
                                     n_freqs=n_probes, bounds=cfg.chi_freq_bounds)
 
-    lo_b, hi_b = cfg.chi_freq_bounds
-    u_mid, u_half = chi.band_norm(cfg.chi_freq_bounds)
     chis, u_list, logcyc_list, valid = [], [], [], []
     for k, item in enumerate(X_forced_list):
         if paired:
             Xf, freq_hz = item[0], float(item[1])
-            if not (math.isfinite(freq_hz) and freq_hz > 0):
-                raise ValueError(f"chi probe {k}: drive frequency must be finite and positive, "
-                                 f"got {freq_hz} Hz.")
-            # freq_si_to_cell, NOT get_unit_conversion_factor("Hz") -- the latter returns 1.0 against
-            # an ms cell, a silent 1000x error landing as a wildly off-resonance but valid-looking chi.
-            f_cell = torch.tensor([freq_hz * cfg.freq_si_to_cell], dtype=dtype)
         else:
-            Xf, f_cell = item, (mults[k] * f_peak)
+            Xf = item
+            # The legacy grid, expressed in Hz so ONE predicate path serves both forms.
+            freq_hz = float(mults[k] * f_peak) / cfg.freq_si_to_cell
         Xf_b = Xf.to(dtype=dtype).unsqueeze(0)               # (1, N_k)
         N_k = Xf_b.shape[-1]
-        T_k = N_k * cfg.dt_exp
+
+        # EVERY predicate lives in chi.probe_verdict, which the GUI's probe planner also calls. They
+        # used to be written out here and nowhere else, so "what will be refused" could only be
+        # discovered by running the thing -- after a bench session rather than before it (backlog
+        # C-3). Refusal is still raised HERE: a planner has to be able to describe a bad probe without
+        # dying on it, so the shared function returns a verdict and the runtime decides it is fatal.
+        v = chi.probe_verdict(cfg, float(f_peak), freq_hz, N_k)
+        if v.action == "refuse":
+            raise ValueError(f"chi probe {k}: {v.reason}.")
+        if v.action == "truncate":
+            # TRUNCATE rather than mask -- the recording is fine, only its tail is unusable, and the
+            # leading prefix is exactly what training measured. Warned, not silent: the user recorded
+            # that length on purpose and is entitled to know only part of it was used. Above the
+            # ceiling |chi| stops being reproducible at fixed parameters (trap CHI9) and logcyc would
+            # report a cycle count no training row ever carried.
+            warnings.warn(f"chi probe {k}: {v.reason}.", stacklevel=2)
+        elif v.action == "mask":
+            # UNDER-RESOLVED IS MASKED, NOT REFUSED, and the distinction is train/eval consistency.
+            # Training masks a sub-cycle probe and keeps the row, so the network has learned to
+            # condition on sets with absent probes; refusing here would reject an observation it
+            # handles perfectly well, and at the band's low edge that is common.
+            warnings.warn(f"chi probe {k}: {v.reason}.", stacklevel=2)
+
+        f_cell = torch.tensor([freq_hz * cfg.freq_si_to_cell], dtype=dtype)
         f_val = float(f_cell)
-        # Refuse per row, naming the row -- the old code's only guard was a count check, and deleting
-        # that without replacement would let a 2-probe set run clean against a 12-slot posterior and
-        # return a near-prior answer: the first chi posterior's exact signature from another cause.
-        if f_val >= 0.9 * nyq:
-            raise ValueError(
-                f"chi probe {k}: {freq_hz if paired else f_val:g} is at or above the recording's "
-                f"Nyquist limit ({0.9 * nyq / cfg.freq_si_to_cell:g} Hz at dt_exp={cfg.dt_exp:g}).")
-        u_k = math.log(f_val / float(f_peak))
-        if abs((u_k - u_mid) / u_half) > config.CHI_UHAT_MAX:
-            in_band = (lo_b * float(f_peak) / cfg.freq_si_to_cell,
-                       hi_b * float(f_peak) / cfg.freq_si_to_cell)
-            raise ValueError(
-                f"chi probe {k}: {f_val / cfg.freq_si_to_cell:g} Hz is outside the band this "
-                f"posterior was trained over. For this cell (Omega_0 = "
-                f"{float(f_peak) / cfg.freq_si_to_cell:g} Hz) that is {in_band[0]:g}-{in_band[1]:g} Hz.")
-        # THE DURATION CEILING (config.CHI_MAX_CYCLES) -- the same one gen_chi_raw applies to every
-        # training row. A bench recording is routinely far longer than the ceiling, and locking in
-        # over all of it would be wrong twice over: |chi| goes past the reproducibility wall (trap
-        # CHI9), and logcyc reports a cycle count no training row ever carried, so the encoder is
-        # extrapolating on the one channel that tells it how much to trust the probe. TRUNCATE rather
-        # than mask -- the recording is fine, only its tail is unusable, and the leading prefix is
-        # exactly what training measured. Warned, not silent: the user recorded that length on
-        # purpose and is entitled to know only part of it was used.
-        n_cap = max(1, int(math.floor(cfg.chi_max_cycles / f_val / cfg.dt_exp)))
-        if n_cap < N_k:
-            warnings.warn(
-                f"chi probe {k}: {N_k} samples give {f_val * T_k:.1f} drive cycles, above the "
-                f"{cfg.chi_max_cycles:g}-cycle ceiling; locking in over the first {n_cap} samples "
-                f"({n_cap * cfg.dt_exp / s_to_cell:.3g} s) only. Above the ceiling |chi| stops being "
-                f"reproducible at fixed parameters, so the extra recording carries no information "
-                f"the network can use.", stacklevel=2)
-            Xf_b, N_k = Xf_b[:, :n_cap], n_cap
-            T_k = N_k * cfg.dt_exp
-        # UNDER-RESOLVED IS MASKED, NOT REFUSED -- unlike the structural errors above.
-        #
-        # The distinction is train/eval consistency. Training MASKS a sub-cycle probe and keeps the
-        # row, so the network has learned to condition on sets with absent probes; refusing here
-        # would reject an observation the network handles perfectly well, and at the band's low edge
-        # that is common (at Omega_0 = 7.6 Hz the 0.03x probe has a 4.4 s period, so a 1 s recording
-        # cannot resolve it however carefully it was made). The other checks above are different in
-        # kind: a bad frequency, an aliased probe or an out-of-band one indicate a mistake the user
-        # must fix, not a limitation of the recording.
-        resolved = f_val * T_k >= config.CHI_MIN_CYCLES
-        if not resolved:
-            need_s = config.CHI_MIN_CYCLES / f_val / s_to_cell
-            warnings.warn(
-                f"chi probe {k}: {N_k} samples give only {f_val * T_k:.2f} drive cycles, below the "
-                f"{config.CHI_MIN_CYCLES:g}-cycle floor, so it is MASKED and contributes nothing. "
-                f"Record >= {need_s:.3g} s at this frequency to use it.", stacklevel=2)
+        Xf_b, N_k = Xf_b[:, :v.n_use], v.n_use
+        T_k = N_k * cfg.dt_exp
+        resolved = v.action != "mask"
         chis.append(chi.lock_in_batched(Xf_b, 2.0 * math.pi * f_cell, F0, T_k, cfg.dt_exp))
-        u_list.append(torch.tensor([u_k], dtype=dtype))
+        u_list.append(torch.tensor([math.log(f_val / float(f_peak))], dtype=dtype))
         logcyc_list.append(torch.tensor([math.log(f_val * T_k)], dtype=dtype))
         valid.append(resolved)
 

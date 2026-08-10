@@ -390,6 +390,28 @@ STABILITY_SWEEP_ND_UNITS = 1000  # ND time units used to screen parameter stabil
                                 # prior construction (global + local sweeps). Short enough
                                 # to be cheap, long enough for instabilities to manifest.
 
+PRIOR_SWEEP_ITERATIONS = 50     # sweep ROUNDS inside gen_prior's global stability map. Total
+                                # candidates screened = PRIOR_SWEEP_BATCH x this, and each round pays
+                                # a full STABILITY_SWEEP_ND_UNITS trajectory whatever the batch is --
+                                # so rounds cost wall-clock and batch costs memory. Was a bare literal
+                                # at the gen_prior call site until C-7.
+                                # (Prior.construct_prior passes batch*iterations down as `batch_size`,
+                                # so the subclasses' `batch_size % num_iterations` guard is vacuous by
+                                # construction -- do not rely on it to catch a bad value here.)
+
+PRIOR_SWEEP_BATCH = 0           # candidates per prior sweep; 0 = follow HardwareConfig.batch_size
+                                # (the historical behaviour, and still the right default -- the sweep
+                                # wants the largest batch that fits).
+                                #
+                                # IT EXISTS BECAUSE SHARING hw.batch_size WITH TRAINING IS A TRAP.
+                                # That one number used to drive both, so shrinking it for a quick run
+                                # made the PRIOR worse without making it faster: the sweep is
+                                # iteration-bounded, so a smaller batch runs the same 50 rounds and
+                                # merely accepts fewer points each. Measured (backlog C-7): 527 s at
+                                # batch 2048, versus >70 min and STILL UNFINISHED at batch 32. Set
+                                # this only to bound prior-sweep MEMORY; to make a smoke run cheap,
+                                # shrink the training batch instead and leave this at 0.
+
 @lru_cache(maxsize=1)
 def unit_registry():
     """The process-wide pint UnitRegistry.

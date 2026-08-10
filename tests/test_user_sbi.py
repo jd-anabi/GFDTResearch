@@ -329,11 +329,14 @@ def test_chi_fisher_rotation_builds_over_the_chi_feature_set():
 
     assert calls, "the chi probes were never simulated: the Fisher was built over the wrong features"
     assert {c[0] for c in calls} == {K}, calls
-    # The Fisher must use the RAW lock-ins, so its feature width is 4 per probe (log|chi|, cos, sin,
-    # logcyc) -- NOT the 6-channel conditioning block. `u` and `mask` are theta-independent here and
-    # would write float32 rounding into the Jacobian at the magnitude of a real feature.
-    assert len(chi_mod.CHI_FISHER_CHANNELS) == 4
-    assert "u" not in chi_mod.CHI_FISHER_CHANNELS and "mask" not in chi_mod.CHI_FISHER_CHANNELS
+    # The Fisher must use the RAW lock-ins, so its feature width is 3 per probe (log|chi|, cos, sin)
+    # -- NOT the 6-channel conditioning block. `u`, `mask` and `logcyc` are all excluded because
+    # fnoise is a DENOMINATOR: a channel that barely varies with theta is an amplifier, not a quiet
+    # row. (`logcyc` left on 2026-08-10, C-9/C-10 -- it is an exact duplicate of A3_log_fpeak with the
+    # ceiling clear, and floor() quantization with it binding.)
+    assert chi_mod.CHI_FISHER_CHANNELS == ("logmag", "cos", "sin")
+    for banned in ("u", "mask", "logcyc"):
+        assert banned not in chi_mod.CHI_FISHER_CHANNELS, f"`{banned}` is back (trap CHI10)"
     # The resolution filter MUST be off: it depends on f_peak, hence on theta, so a probe crossing
     # the cycle threshold between the +dz and -dz arms is a mask step of 1 over fnoise's 1e-9 floor.
     assert all(rf is False for _, rf in calls), "the Fisher must disable the resolution filter"
@@ -442,6 +445,47 @@ def _lock_in_reference(x, omega, F0, T_obs, dt):
     e_iwt = torch.complex(torch.cos(phase), torch.sin(phase))
     F0 = F0.to(torch.float64).reshape(-1) if torch.is_tensor(F0) else float(F0)
     return (2.0 / (F0 * float(T_obs))) * (x.to(torch.complex128) * e_iwt).sum(dim=-1) * float(dt)
+
+
+def test_lock_in_per_row_durations_match_locking_each_row_alone():
+    """``n_samples`` must make ONE batched call equal B separate calls, each over its own prefix.
+
+    WHY (backlog C-8, handoff 4.3.5). Omega_0 spans ~4 decades inside a training batch, so a single
+    shared lock-in duration has to be keyed on the FASTEST row to respect CHI_MAX_CYCLES -- which
+    truncated the slow rows below CHI_MIN_CYCLES and masked them. ~48 % of training rows carried no
+    live probe. Per-row durations are the fix, and the reference here is the only unambiguous one:
+    lock each row in on its own, with no batching to get wrong.
+
+    The subtle half is the MEAN. It has to be over each row's OWN prefix -- the samples that row
+    actually contributes -- and the mask has to be applied AFTER demeaning. Zeroing first leaves
+    ``-mean`` standing in every dead column, a step function at the prefix boundary whose energy
+    lands at DC, which is exactly where a sub-resonance lock-in is most sensitive. Both wrong forms
+    return finite, plausible numbers; the incommensurate omega below is what makes them differ.
+    """
+    torch.manual_seed(4)
+    B, n, dt = 5, 3000, 0.011
+    x = torch.randn(B, n, dtype=torch.float64) + torch.linspace(0, 3, n).unsqueeze(0)  # + a DC ramp
+    omega = torch.tensor([0.31, 0.77, 1.19, 2.03, 3.47], dtype=torch.float64)          # incommensurate
+    F0 = torch.tensor([1.0, 2.0, 0.5, 1.5, 3.0], dtype=torch.float64)
+    n_samples = torch.tensor([n, 2500, 1200, 640, 137])                                # incl. full-length
+    T_row = n_samples.to(torch.float64) * dt
+
+    got = chi_mod.lock_in_batched(x, omega, F0, T_row, dt, n_samples=n_samples)
+    for b in range(B):
+        nb = int(n_samples[b])
+        want = _lock_in_reference(x[b:b + 1, :nb], omega[b:b + 1], F0[b:b + 1], nb * dt, dt)
+        assert torch.allclose(got[b], want[0], rtol=1e-9, atol=1e-12), (
+            f"row {b} (n={nb}) got {got[b]} want {want[0]} -- one batched call must equal locking "
+            f"that row alone over its own prefix")
+
+    # The rows must not influence each other: re-run with a different row-0 length and every OTHER
+    # row is unchanged. Without the mask this couples them through the shared mean and sum.
+    other = n_samples.clone()
+    other[0] = 900
+    got2 = chi_mod.lock_in_batched(x, omega, F0, other.to(torch.float64) * dt, dt, n_samples=other)
+    assert torch.allclose(got[1:], got2[1:], rtol=1e-12, atol=1e-14), \
+        "changing one row's duration moved another row's chi -- the rows are coupled"
+    assert not torch.allclose(got[0], got2[0]), "row 0's own chi did not respond to its length"
 
 
 def test_lock_in_chunking_matches_full_batch():

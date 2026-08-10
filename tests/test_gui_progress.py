@@ -1212,6 +1212,97 @@ def test_inference_pickers_repoint_from_draft_and_config():
     assert inf.session.draft is not None, "install_config must not wipe the draft/session"
 
 
+def _chi_cfg(k=3, pad=12):
+    """Stub config that puts the Infer tab on its chi page (mirrors the SimConfig fields it reads)."""
+    from core import config
+
+    class Cfg:
+        model = "NADROWSKI"
+        params_dict = {}
+        rescale_params = {}
+        force_params_dict = {}
+        has_forcing = False
+        chi_mode = True
+        chi_n_freqs = k
+        chi_k_pad = pad
+        chi_freq_bounds = config.CHI_FREQ_BOUNDS
+        chi_max_cycles = config.CHI_MAX_CYCLES
+        observation_mode = "chi"
+    return Cfg()
+
+
+def test_chi_probe_table_is_variable_length_and_capped_by_the_posteriors_slots():
+    """Backlog C-2. The core has always accepted 1..chi_k_pad probes at arbitrary frequencies; the GUI
+    was the only thing forcing a fixed grid. Rows must be addable and removable, and the cap must be
+    chi_k_pad -- which is FROZEN into the trained artifact, so exceeding it is not a soft limit."""
+    from core.gui.screens.inference_screen import InferenceScreen
+
+    _app()
+    inf = InferenceScreen()
+    inf.install_config(_chi_cfg(k=3, pad=5))
+    panel = inf.infer_panel
+    assert len(panel._chi_forced_fields) == 3, "should seed chi_n_freqs rows when empty"
+
+    panel._add_chi_probe()
+    panel._add_chi_probe()
+    assert len(panel._chi_forced_fields) == 5
+    panel._add_chi_probe()                                   # over capacity
+    assert len(panel._chi_forced_fields) == 5, "must refuse to exceed chi_k_pad slots"
+
+    panel._remove_chi_probe(panel._chi_forced_fields[0])
+    assert len(panel._chi_forced_fields) == 4
+
+
+def test_chi_probe_rows_keep_each_recording_paired_with_its_own_frequency():
+    """The one-widget-per-row invariant. Parallel path/frequency lists let a MIDDLE deletion pair
+    recording k with frequency k+1 -- silent, because a lock-in at the wrong frequency decays like a
+    sinc and simply returns a smaller number. Delete from the middle and check the survivors."""
+    from core.gui.screens.inference_screen import InferenceScreen
+
+    _app()
+    inf = InferenceScreen()
+    inf.install_config(_chi_cfg(k=4))
+    panel = inf.infer_panel
+    for i, row in enumerate(panel._chi_forced_fields):
+        row.path.edit.setText(f"/tmp/rec{i}.csv")
+        row.freq.setText(str(1.0 + i))
+
+    panel._remove_chi_probe(panel._chi_forced_fields[1])      # delete from the MIDDLE
+    pairs = [r.pair() for r in panel._chi_forced_fields]
+    assert pairs == [("/tmp/rec0.csv", 1.0), ("/tmp/rec2.csv", 3.0), ("/tmp/rec3.csv", 4.0)], pairs
+
+
+def test_chi_probe_table_survives_a_config_rebuild_and_rejects_a_blank_frequency():
+    """Two C-2 constraints in one place, because both are about data the GUI cannot regenerate.
+
+    PRESERVATION: rows carry hand-typed drive frequencies and browsed paths -- a record of a bench
+    session that already happened. Rebuilding the config (to fix a bounds file, say) must not discard
+    them, unlike the forcing rows, which ARE derivable from the config.
+
+    BLANK FREQUENCY: FloatField.value() returns 0.0 on unparseable text, so an empty box is
+    indistinguishable from a deliberate zero -- and 0 Hz is a genuine DC probe the lock-in would
+    happily attempt. It has to be caught before the run, not after.
+    """
+    from core.gui.screens.inference_screen import InferenceScreen
+
+    _app()
+    inf = InferenceScreen()
+    inf.install_config(_chi_cfg(k=2))
+    panel = inf.infer_panel
+    panel._chi_forced_fields[0].path.edit.setText("/tmp/keep.csv")
+    panel._chi_forced_fields[0].freq.setText("2.5")
+
+    inf.install_config(_chi_cfg(k=2))                         # rebuild
+    assert len(panel._chi_forced_fields) == 2, "a rebuild must not add or drop rows"
+    assert panel._chi_forced_fields[0].pair() == ("/tmp/keep.csv", 2.5), \
+        "a rebuild destroyed hand-entered probe data"
+
+    # Row 1 still has a blank frequency -> 0.0 -> must be reported, naming the row.
+    probs = [p for i, r in enumerate(panel._chi_forced_fields) for p in r.problems(i)]
+    assert any("probe 2" in p and "positive" in p for p in probs), probs
+    assert not any("probe 1" in p for p in probs), probs
+
+
 def test_config_units_control_declares_units_and_validates_them():
     """Units DECLARE what the numbers in the files mean (never converting them). Typed units must reach
     the built config, and unusable tokens must be rejected when the model is applied -- not mid-run."""
