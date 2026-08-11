@@ -405,8 +405,10 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
                       duration must be keyed on the fastest row to respect CHI_MAX_CYCLES, and that
                       truncates the slow rows below CHI_MIN_CYCLES and masks them (backlog C-6/C-8,
                       handoff 4.3.5). Rows are MASKED rather than sliced -- the tensor stays
-                      rectangular, so the chunked float64 accumulation and its memory bound are
-                      unchanged.
+                      rectangular, so the chunked float64 accumulation is unchanged and the memory
+                      bound grows by one BOOL mask per chunk: +16 MiB at B=2048, chunk=8192, against
+                      a 553.7 MiB unmasked peak. (C-8 claimed "unchanged" and shipped a float64 mask,
+                      which was +128 MiB. See _mask.)
     :return: (B,) complex128 susceptibilities.
     """
     B, n = x.shape[0], x.shape[-1]
@@ -423,11 +425,24 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
         n_live = limit.to(torch.float64)
 
     def _mask(s, e):
-        """(B, e-s) float64 0/1 -- whether column j is inside that row's prefix."""
+        """(B, e-s) BOOL -- whether column j is inside that row's prefix.
+
+        BOOL, NOT float64, and the distinction is 112 MiB. This mask is only ever multiplied into a
+        float64 tensor, where torch promotes it to exactly 1.0 / 0.0 -- so every result below is
+        BIT-IDENTICAL to a float64 mask (verified with torch.equal), while the mask itself costs one
+        byte per element instead of eight. At the training batch (B=2048, chunk=8192) that is 16 MiB
+        rather than 128 MiB.
+
+        C-8 shipped this as float64, and the claim in this function's docstring that per-row masking
+        leaves "the chunked float64 accumulation and its memory bound ... unchanged" was wrong by one
+        full (B, chunk) float64 tensor. Measured peak for the whole call at that batch: 553.7 MiB
+        unmasked (pre-C-8), 681.7 MiB as C-8 shipped it, 569.7 MiB now. The regression was invisible
+        because the only end-to-end exercise was the smoke train at RUN_SIZE=32, where 128 MiB is 2 MB.
+        """
         if limit is None:
             return None
         cols = torch.arange(s, e, device=dev).unsqueeze(0)                    # (1, e-s)
-        return (cols < limit.unsqueeze(1)).to(torch.float64)
+        return cols < limit.unsqueeze(1)
 
     # pass 1: the float64 row mean over each row's OWN prefix (see invariant 1 above)
     acc = torch.zeros(B, dtype=torch.float64, device=dev)
@@ -452,7 +467,14 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
             # Mask AFTER demeaning: zeroing first would leave -mean in the dead columns, which is a
             # step function at the prefix boundary -- exactly the DC-adjacent artefact invariant 1
             # exists to prevent, and it grows with how much of the row is dead.
-            xc = xc * m
+            #
+            # IN PLACE, which is safe HERE and only here. `xc` is the result of `... - mean`, so it is
+            # always a freshly allocated tensor that cannot alias the caller's `x`. Pass 1's `xs` is
+            # NOT: when `x` already arrives as float64, `.to(torch.float64)` returns the input VIEW,
+            # and mutating it would corrupt the caller's tensor between the two calls
+            # test_lock_in_per_row_durations_match_locking_each_row_alone makes on one array -- which
+            # would surface as "the rows are coupled", pointing at the wrong bug entirely.
+            xc.mul_(m)
         re += (xc * torch.cos(phase)).sum(dim=-1)
         im += (xc * torch.sin(phase)).sum(dim=-1)
 

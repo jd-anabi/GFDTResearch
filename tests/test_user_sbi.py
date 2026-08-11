@@ -1066,6 +1066,179 @@ def test_sim_batch_planning():
                 n_vars=3, n_ch=1, n_out=1, dtype=f32) == 2048
 
 
+def _oom_gen_obs_setup():
+    """(kwargs for gen_obs at batch 8) -- the same CPU config the split test uses."""
+    model, B, n = "NADROWSKI", 8, 80
+    sdd = registry.state_dep_drift(model)
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)], sdd,
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+    inits = cfg.inits_tensor.expand(B, -1).contiguous()
+    n_ch = forcing.n_force_channels(model, cfg.forcing_idx, inits.shape[-1])
+    return dict(model=model, params=cfg.params_tensor.expand(B, -1).contiguous(),
+                t=torch.linspace(0, 1.0, n, dtype=cfg.hw.dtype), inits=inits,
+                force=torch.zeros((B, n_ch, n), dtype=cfg.hw.dtype),
+                n_segs=1, steady_idx=10, state_dep_drift=sdd, batch_size=B,
+                var_idx=0, dtype=cfg.hw.dtype, device=cfg.hw.device)
+
+
+def _flaky_gen_obs_one(fail_at_or_above, widths):
+    """Stand-in for _gen_obs_one that raises a REALISTIC OOM above a width and delegates below it.
+
+    Reports the width it was asked for via params.shape[0] rather than the positional batch_size arg:
+    gen_obs' own contract is that dim 0 of params IS the batch, so this cannot drift with the
+    signature. The raised error is shaped exactly like the real one -- a torch.AcceleratorError (the
+    RAW DRIVER form, which is what the 2026-08 retrain actually died with) wrapped in SimulationError
+    by Simulator.__sols -- so the test exercises _is_oom's chain walk, not a convenient stub.
+    """
+    from core.Simulator.simulator import SimulationError
+    real = pipeline_mod._gen_obs_one
+
+    def stub(*a, **k):
+        b = a[1].shape[0]
+        widths.append(b)
+        if b >= fail_at_or_above:
+            try:
+                raise torch.AcceleratorError("CUDA error: out of memory")
+            except RuntimeError as e:
+                raise SimulationError(
+                    f"NadrowskiModel euler_compiled failed after 50 steps (batch={b}, segs=1, "
+                    f"device=cpu, dtype=torch.float32): AcceleratorError: CUDA error: out of memory"
+                ) from e
+        return real(*a, **k)
+    return stub
+
+
+def test_gen_obs_halves_the_batch_on_an_oom_instead_of_dying():
+    """A CUDA OOM must be answered by RE-RUNNING that chunk at half the batch, not by killing a run.
+
+    The predictive guard cannot prevent this on a shared card: it budgets from
+    torch.cuda.mem_get_info(), and on Windows/WDDM that reports other processes' EVICTABLE surfaces as
+    free -- measured 15037 MiB against nvidia-smi's 5814 MiB at one instant on the 2026-08 box, an
+    overstatement of 9.2 GiB. The plan is a hint; this retry is the mechanism. Forced on CPU by
+    patching _gen_obs_one, so halving, stitching and reporting are all exercised without a GPU.
+    """
+    widths, saved, floor = [], pipeline_mod._gen_obs_one, pipeline_mod._MIN_SIM_CHUNK
+    try:
+        pipeline_mod._MIN_SIM_CHUNK = 1              # module-level, so _gen_obs_retry re-reads it
+        pipeline_mod._gen_obs_one = _flaky_gen_obs_one(4, widths)     # 8 and 4 fail; 2 succeeds
+        out = pipeline_mod.gen_obs(**_oom_gen_obs_setup())
+    finally:
+        pipeline_mod._gen_obs_one, pipeline_mod._MIN_SIM_CHUNK = saved, floor
+
+    assert out.shape == (1, 8, 70), f"retried gen_obs returned {tuple(out.shape)}"
+    assert torch.isfinite(out).all(), "retried gen_obs produced non-finite values"
+    # Depth-first halving, and chunks that ALREADY SUCCEEDED are never recomputed.
+    assert widths == [8, 4, 2, 2, 4, 2, 2], f"unexpected retry ladder {widths}"
+
+
+def test_gen_obs_stops_halving_at_the_floor_and_re_raises_the_original():
+    """The retry is BOUNDED. At the floor it must give up and re-raise the real SimulationError with
+    its __cause__ intact -- grinding a 5000-batch round out a few rows at a time takes days, and a
+    CUDA context that a sticky error has already killed must cost a few fast failures, not a hang."""
+    from core.Simulator.simulator import SimulationError
+    widths, saved, floor = [], pipeline_mod._gen_obs_one, pipeline_mod._MIN_SIM_CHUNK
+    try:
+        pipeline_mod._MIN_SIM_CHUNK = 2
+        pipeline_mod._gen_obs_one = _flaky_gen_obs_one(0, widths)     # every width OOMs
+        try:
+            pipeline_mod.gen_obs(**_oom_gen_obs_setup())
+            raise AssertionError("an unrecoverable OOM must still raise")
+        except SimulationError as e:
+            assert isinstance(e.__cause__, torch.AcceleratorError), \
+                f"the driver error must survive as __cause__, got {e.__cause__!r}"
+    finally:
+        pipeline_mod._gen_obs_one, pipeline_mod._MIN_SIM_CHUNK = saved, floor
+    assert widths == [8, 4, 2], f"halving must stop at the floor, got {widths}"
+
+
+def test_oom_detection_covers_the_allocator_and_the_raw_driver_form():
+    """torch.OutOfMemoryError and torch.AcceleratorError both derive DIRECTLY from RuntimeError and
+    NEITHER subclasses the other, so no single isinstance() covers both. The 2026-07-28 cuFFT leak and
+    the 2026-08 chi retrain BOTH produced the driver form -- a predicate that only knew
+    torch.OutOfMemoryError would have retried on neither."""
+    from core.Simulator.simulator import SimulationError
+    is_oom = pipeline_mod._is_oom
+    assert is_oom(torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"))
+    assert is_oom(torch.AcceleratorError("CUDA error: out of memory"))
+    try:                                              # how it actually arrives: wrapped by the solver
+        try:
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        except RuntimeError as e:
+            raise SimulationError("NadrowskiModel euler_compiled failed after 81616 steps") from e
+    except SimulationError as e:
+        assert is_oom(e), "an OOM wrapped by Simulator.__sols must still be recognised"
+    # ...and must NOT fire on ordinary failures, or a real bug becomes a silent retry loop.
+    assert not is_oom(RuntimeError("shape '[2, 3]' is invalid for input of size 5"))
+    assert not is_oom(ValueError("bounds are out of order"))
+
+
+def test_a_cancel_is_not_mistaken_for_an_oom_and_retried():
+    """A cooperative cancel must reach Worker.run untouched -- not be read as a resource problem and
+    re-run at ever-smaller widths. WorkerCancelled derives from BaseException exactly so it slips
+    past `except RuntimeError`; this pins that the RETRY layer honours that, not just __sols."""
+    from core.gui.streams import WorkerCancelled
+    calls, saved = [], pipeline_mod._gen_obs_one
+
+    def cancelling(*a, **k):
+        calls.append(a[1].shape[0])
+        raise WorkerCancelled()
+    try:
+        pipeline_mod._gen_obs_one = cancelling
+        try:
+            pipeline_mod.gen_obs(**_oom_gen_obs_setup())
+            raise AssertionError("WorkerCancelled was swallowed; the GUI cancel path is broken")
+        except WorkerCancelled:
+            pass
+    finally:
+        pipeline_mod._gen_obs_one = saved
+    assert calls == [8], f"a cancel must not be retried, but the batch was re-run: {calls}"
+
+
+def test_the_memory_budget_learns_from_an_oom_and_recovers():
+    """The learned cap is the fix for a free-memory reading that Windows overstates by the size of the
+    desktop. It must tighten below what just failed, and must climb back afterwards -- a card that was
+    busy when the first OOM landed may be idle an hour later, and a run throttled to that one moment
+    for days would be the wrong kind of safe."""
+    saved_cap, saved_clean = pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs
+    try:
+        pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs = None, 0
+        assert pipeline_mod._budget_cap() == math.inf, "no cap until something has actually failed"
+
+        pipeline_mod._budget_note_oom(1_000_000)
+        assert pipeline_mod._budget_cap() == 800_000, pipeline_mod._budget_cap()
+        pipeline_mod._budget_note_oom(2_000_000)      # a LARGER failure must not loosen the cap
+        assert pipeline_mod._budget_cap() == 800_000, "the cap must be a running minimum"
+        pipeline_mod._budget_note_oom(500_000)
+        assert pipeline_mod._budget_cap() == 400_000, "a smaller failure must tighten it further"
+
+        for _ in range(pipeline_mod._BUDGET_RECOVER_AFTER - 1):
+            pipeline_mod._budget_note_ok()
+        assert pipeline_mod._budget_cap() == 400_000, "must not probe upward before the run of successes"
+        pipeline_mod._budget_note_ok()
+        assert pipeline_mod._budget_cap() > 400_000, "the cap must recover once the card settles"
+
+        pipeline_mod._budget_note_oom(100_000)        # a fresh OOM resets the success counter
+        assert pipeline_mod._budget_clean_runs == 0
+
+        # A batch that SPLIT must still count as clean, and this is the deadlock the first cut had:
+        # once an OOM tightens the cap, the tighter cap makes _max_sim_batch split every subsequent
+        # batch, so if recovery were keyed on un-split batches no batch would ever count and the cap
+        # could never climb back for the remaining days of the run.
+        saved_planner = pipeline_mod._max_sim_batch
+        try:
+            pipeline_mod._max_sim_batch = lambda batch_size, *a, **k: 3      # force a split on CPU
+            pipeline_mod._budget_clean_runs = 0
+            pipeline_mod.gen_obs(**_oom_gen_obs_setup())
+            assert pipeline_mod._budget_clean_runs == 1, \
+                "a split batch must count toward recovery, or the cap deadlocks once it tightens"
+        finally:
+            pipeline_mod._max_sim_batch = saved_planner
+    finally:
+        pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs = saved_cap, saved_clean
+
+
 def test_split_gen_obs_concatenates_correctly():
     """When the guard does split, gen_obs must stitch the chunks back into one batch -- including a
     ragged final chunk. Forced on CPU (where the guard never fires on its own) by patching the

@@ -69,11 +69,11 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 |---|---|---|
 | `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
 | `tests/test_user_models.py` | 29 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry |
-| `tests/test_user_sbi.py` | 30 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever** |
+| `tests/test_user_sbi.py` | 35 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget** |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 10 | the master Bounds/Cells triple, bounds resolution, and the prior/posterior identity guards — **eval box comes from the sidecar, not the config** |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **176** | |
+| **Total** | **181** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -456,6 +456,15 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    **Expect `k`~`x_scale` to stay aliased** — §4.4.1 is the third measurement saying so. The
    hypotheses worth testing on the result are `f_scale` (unmeasured → measurable, 213× on `‖g‖`),
    `t_scale` and `lam`.
+
+   > **VRAM, because the first attempt died on it (2026-08-10 Appendix entry, trap X6).** Check
+   > `nvidia-smi --query-gpu=memory.used --format=csv` before starting — **not**
+   > `torch.cuda.mem_get_info()`, which overstates free VRAM by the size of your desktop (measured:
+   > 15037 MiB against nvidia-smi's 5814 MiB). The run now survives a busy card by splitting and
+   > retrying, but survival is not speed: under 7 GiB of pressure a worst-geometry batch took **136 s
+   > against 18.6 s** unpressured. Closing the browsers is worth more than any constant in this file.
+   > Watch for `OOM at simulation batch ...` lines in the log — a few are fine, a steady stream means
+   > the card is tighter than the split machinery can absorb and `TRAINING_RUN_SIZE` is the lever.
 6. **Run SBC stratified by probe count** (n = 2, 6, `CHI_K_PAD`) as well as pooled. A pooled SBC over
    a mixture of probe counts can be flat while each count is miscalibrated in compensating
    directions — and `posterior_chi_08042026` is the standing proof that flat SBC is not by itself
@@ -1401,6 +1410,16 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   reports) premised on the box round-trip producing `±inf`; it cannot on torch 2.9. Pinned by
   `test_box_roundtrip_never_yields_a_nonfinite_latent_target`, which exists precisely so a version
   bump that removes that clamp surfaces as a test failure rather than a dead training run.
+- **X6. `torch.cuda.mem_get_info()` OVERSTATES free VRAM on Windows — by the size of the desktop.**
+  Measured on the 16 GB RTX 5070 Ti: `mem_get_info` said **15037 MiB** free while `nvidia-smi` said
+  **5814 MiB**, at the same instant. Under WDDM the OS virtualises VRAM, so other processes' surfaces
+  are *evictable* and get reported to you as free. Anything that sizes a batch from that number is
+  planning against memory it does not have, and the failure it produces is a **raw driver**
+  `AcceleratorError: CUDA error: out of memory` (the driver lost an eviction race) rather than
+  `torch.OutOfMemoryError` — so a handler that only knows the latter will not catch it. This is what
+  killed the first chi retrain, hours in. `config.memory_budget_elements` is therefore a HINT:
+  `pipeline._BUDGET_CAP_ELEMENTS` learns the real ceiling from OOMs and `_gen_obs_retry` is what
+  actually recovers. **When measuring headroom by hand, read `nvidia-smi`, never `mem_get_info`.**
 - **X5. `CAL_N_SCALES` is `t_scale`'s effective SBC sample size.** Every row in a calibration batch is
   *assigned* that batch's `t_scale`, so their ranks are not independent. Lowering the pair count to
   buy wall-clock is a different measurement, and it damages precisely the parameter chi(ω) exists to
@@ -1899,6 +1918,83 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
+
+## 2026-08-10 (later) — the retrain OOM'd, and the free-memory reading is why
+
+The first real retrain died hours in with
+`AcceleratorError: CUDA error: out of memory` at `batch=2048, segs=3` — the RAW DRIVER form, not
+`torch.OutOfMemoryError`.
+
+### The guard was fine. Its input was lying.
+
+`_max_sim_batch` budgets from `config.memory_budget_elements` → `torch.cuda.mem_get_info()`. Measured
+at one instant on the 16 GB RTX 5070 Ti with an ordinary desktop running:
+
+| source | free VRAM |
+|---|---|
+| `torch.cuda.mem_get_info()` — what the guard reads | **15037 MiB** |
+| `nvidia-smi` — what the card actually has | **5814 MiB** |
+
+**Optimistic by 9.2 GiB, which is exactly the desktop.** Under Windows/WDDM the OS virtualises VRAM:
+other processes' surfaces are *evictable*, so the driver reports them to you as free. The planner then
+green-lights a batch the driver can only satisfy by **evicting Firefox**, and returns
+`cudaErrorMemoryAllocation` only when eviction cannot keep up — which is why the failure wears the raw
+driver form and why it lands hours in rather than immediately.
+
+The cost model itself is accurate to <1 % (predicted 5.34 GiB against a measured 5.35 GiB peak at
+B=2048/n_fine=100k), and it already sizes **per geometry**, which matters because `n_fine` swings from a
+median ~40k to a p99 ~283k. **Only the budget was wrong.**
+
+### Three changes, and one that was deliberately NOT made
+
+1. **A learned budget** (`_BUDGET_CAP_ELEMENTS`, AIMD). On an OOM at N elements, cap to 0.8·N — we now
+   *know* N does not fit. After 32 clean batches, probe up 10 %, re-clamped by the reading on every
+   call so it can only ever be more conservative than it. Deliberately AIMD **on the budget in bytes,
+   not on the batch width**: fitting is width × *geometry*, and the planner already handles geometry.
+   Adapting width would fight it and oscillate.
+2. **A reactive retry** in `gen_obs` (`_gen_obs_retry`). Catches an OOM and re-runs that chunk at half
+   the width, recursively, down to `_MIN_SIM_CHUNK`. `except RuntimeError`, narrow, so `WorkerCancelled`
+   still reaches `Worker.run`. Announces every retry on **stderr** — `warnings.warn`'s "once per
+   location" filter would collapse hundreds of events into one line, and parts of `gen_training_data`
+   run under `simplefilter("ignore")`.
+3. **`TRAINING_RUN_SIZE`**, a *ceiling* (0 = off, and it should stay off). A ceiling rather than a
+   replacement because `smoke_train.py` and three tests shrink runs by writing `cfg.hw.batch_size`
+   directly; a replacing knob would override them and quietly drive the CPU suite at 1024.
+
+**NOT done: lowering the training batch.** An earlier draft dropped it to 1024 and doubled
+`TRAINING_NUM_RUNS`. That pays ~2× wall-clock on *every* batch to solve a problem only the ~25 % tail
+has, and halves the `(t_scale, T)` stratum count for a fixed row budget. Per-geometry splitting pays
+k× only where it is needed. The historical **5000 × 2048** shape stands.
+
+**NOT done: `expandable_segments:True`.** Measured a no-op here — *"expandable_segments not supported
+on this platform"*, `is_expandable=False`; the Windows cu130 build does not define
+`PYTORCH_C10_DRIVER_API_SUPPORTED`. It would be right on Linux. Note also that torch 2.9 renamed the
+variable: `PYTORCH_CUDA_ALLOC_CONF` warns "deprecated, use `PYTORCH_ALLOC_CONF`". Do not re-try this.
+
+### A C-8 memory regression, found on the way
+
+`chi.lock_in_batched._mask` returned a `(B, chunk)` **float64** tensor. At B=2048/chunk=8192 that is
+128 MiB per mask; as a **bool** it is 16 MiB, and the results are **bit-identical** (verified with
+`torch.equal` at three chunk sizes) because it is only ever multiplied into a float64 tensor, where
+torch promotes it to exactly 1.0/0.0. Measured +128 MiB → **+16.1 MiB**. C-8's docstring claimed the
+masking left "the memory bound ... unchanged"; it is now corrected to +16 MiB rather than deleted.
+
+Invisible until now because the only end-to-end exercise was the smoke train at `RUN_SIZE=32`, where
+128 MiB is 2 MB. **Neither lock-in test would have caught it** — they pin numerics, not allocation.
+
+### What this actually buys, stated honestly
+
+Under 7 GiB of artificial pressure the 245k-step geometry at batch 2048 **completed in 136 s against
+18.6 s unpressured** — a 7× slowdown, because the predictive guard split it all the way to the
+`_MIN_SIM_CHUNK` floor. It survived, which is the point; it was not fast. **Closing the browsers is
+still the largest single lever.** These changes make the run survive a busy desktop, not enjoy one.
+
+> **Measuring headroom: use `nvidia-smi`, never `torch.cuda.mem_get_info()`.** They disagree by 9.2 GiB
+> on this machine. Working budget ≈ `15.92 GiB − (what other processes hold) − ~0.8 GiB CUDA context`.
+
+**Known gap:** the prior stability sweep bypasses `gen_obs` — `Priors/*_prior.py` build a `Simulator`
+and call `.simulate()` directly — so the retry does **not** protect it. Acceptable today: fixed, small
+geometry (`n_stab_fine = 40_000` → ~2.3 GiB at batch 2048) and it completed in 561 s. Not coverage.
 
 ## 2026-08-10 — C-9/C-10: `logcyc` leaves the Fisher set, and the retrain is unblocked
 

@@ -22,7 +22,7 @@ from tqdm import tqdm
 from .config import (
     SimConfig, PRIOR_PATH, POSTERIOR_PATH, PLOT_PATH, T_MIN_EXP_S, T_MAX_EXP_S,
     CHUNK_LEN, N_ND_MAX, PPC_BIN_SIZE, SBC_N_CAL, STABILITY_SWEEP_ND_UNITS, TRAINING_NUM_RUNS,
-    PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH,
+    PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH, TRAINING_RUN_SIZE,
     DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS, NSF_NUM_BINS,
     TRAINING_NUM_ROUNDS, TRAINING_BATCH_SIZE, TRAINING_LEARNING_RATE,
     TRAINING_STOP_AFTER_EPOCHS, TRAINING_MAX_NUM_EPOCHS, TRAINING_SHOW_SUMMARY, FORCING_SI_UNITS,
@@ -612,11 +612,23 @@ def build_posterior(
     else:
         V, T_train, train_prior = None, T, latent_inferred_prior
 
+    # The training batch's OWN ceiling -- not hw.batch_size, and deliberately not PRIOR_SWEEP_BATCH's
+    # twin. A CEILING rather than a replacement, because smoke_train.py and three pipeline tests shrink
+    # runs by writing cfg.hw.batch_size directly and a replacing knob would silently override them.
+    # Announced when it binds: a cap that changes the shape of a multi-day run is not allowed to be
+    # silent, and the printed row count is also the check that TRAINING_NUM_RUNS was moved to match.
+    run_size = cfg.hw.batch_size
+    if TRAINING_RUN_SIZE and TRAINING_RUN_SIZE < run_size:
+        print(f"Training batch capped at {TRAINING_RUN_SIZE} (hardware default {run_size}) — "
+              f"{TRAINING_NUM_RUNS} batches x {TRAINING_RUN_SIZE} = "
+              f"{TRAINING_NUM_RUNS * TRAINING_RUN_SIZE:,} training rows.")
+        run_size = TRAINING_RUN_SIZE
+
     training_params = {
         "model": cfg.model,
         "prior": train_prior,                         # <-- latent (rotated if REPARAM_ROTATE)
         "t": cfg.t,
-        "run_size": cfg.hw.batch_size,
+        "run_size": run_size,
         "num_runs": TRAINING_NUM_RUNS,
         "steady_idx": cfg.steady_idx,
         "dt_nd_min": cfg.dt_nd_min,

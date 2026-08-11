@@ -1,4 +1,5 @@
 import math
+import sys
 import warnings
 
 import torch
@@ -90,6 +91,97 @@ _SIM_MEM_FRACTION = 0.85
 _MIN_SIM_CHUNK = 256
 
 
+# ── The LEARNED memory budget ─────────────────────────────────────────────────────────────────────
+#
+# WHY A LEARNED CAP EXISTS AT ALL: on Windows, the free-memory reading is a lie, and it is the input
+# _max_sim_batch plans from. config.memory_budget_elements reads torch.cuda.mem_get_info(), and under
+# WDDM the OS virtualises VRAM -- other processes' surfaces are EVICTABLE, so the driver reports them
+# to you as free. Measured at one instant on a 16 GB RTX 5070 Ti with an ordinary desktop running
+# (2026-08-10): mem_get_info said 15037 MiB free while nvidia-smi said 5814 MiB. Optimistic by 9.2 GiB,
+# which is exactly the desktop.
+#
+# The planner then green-lights a batch the driver can only satisfy by EVICTING the browser, and
+# returns cudaErrorMemoryAllocation only when eviction cannot keep up -- which is why that failure
+# arrives as a raw driver AcceleratorError rather than torch.OutOfMemoryError, and why it lands hours
+# into a run rather than immediately. No amount of tuning _SIM_MEM_FRACTION fixes a wrong input.
+#
+# So: stop treating the reading as authoritative and learn the real ceiling from OUTCOMES. AIMD, on
+# the budget in ELEMENTS rather than on the batch width -- width is the wrong variable, because
+# whether a batch fits is width x GEOMETRY and _max_sim_batch already handles geometry correctly (a
+# 2048-row batch at n_fine=40k fits comfortably; the same width at 283k does not). Adapting width
+# would fight the planner and oscillate; adapting its budget composes with it.
+#
+# Deliberately process-local and NOT persisted: the right cap depends on what else is on the card
+# right now, which is a property of this run, not of the machine.
+_BUDGET_CAP_ELEMENTS = None          # None = no learned cap yet; trust memory_budget_elements alone
+_BUDGET_OOM_BACKOFF = 0.8            # on an OOM at N elements, cap to 0.8*N -- we KNOW N did not fit
+_BUDGET_RECOVER_AFTER = 32           # consecutive clean batches before probing upward again
+_BUDGET_RECOVER_STEP = 1.1           # ...and how far. Additive-ish increase, multiplicative decrease.
+_budget_clean_runs = 0
+
+
+def _budget_cap() -> float:
+    """The learned element cap, or +inf before anything has failed."""
+    return math.inf if _BUDGET_CAP_ELEMENTS is None else _BUDGET_CAP_ELEMENTS
+
+
+def _budget_note_oom(elements: int) -> None:
+    """Record that an allocation of ``elements`` did NOT fit, and tighten the cap below it."""
+    global _BUDGET_CAP_ELEMENTS, _budget_clean_runs
+    _budget_clean_runs = 0
+    if elements <= 0:
+        return
+    cap = int(elements * _BUDGET_OOM_BACKOFF)
+    _BUDGET_CAP_ELEMENTS = cap if _BUDGET_CAP_ELEMENTS is None else min(_BUDGET_CAP_ELEMENTS, cap)
+
+
+def _budget_note_ok() -> None:
+    """Record a clean batch; after enough of them, probe the cap upward.
+
+    The recovery half matters as much as the backoff: a desktop that was holding 6 GB when the first
+    OOM landed may have closed a browser since, and without this the run would stay throttled to that
+    moment for days. It probes multiplicatively but is re-clamped by memory_budget_elements on every
+    call to _max_sim_batch, so it can never climb past what the (optimistic) reading allows anyway --
+    the cap only ever makes the plan MORE conservative than that reading, never less.
+    """
+    global _BUDGET_CAP_ELEMENTS, _budget_clean_runs
+    if _BUDGET_CAP_ELEMENTS is None:
+        return
+    _budget_clean_runs += 1
+    if _budget_clean_runs >= _BUDGET_RECOVER_AFTER:
+        _budget_clean_runs = 0
+        _BUDGET_CAP_ELEMENTS = int(_BUDGET_CAP_ELEMENTS * _BUDGET_RECOVER_STEP)
+
+
+def _is_oom(err: BaseException) -> bool:
+    """Is this failure -- or anything it was raised FROM -- a device out-of-memory?
+
+    THREE FORMS ARRIVE HERE AND THEY ARE NOT ONE CLASS:
+      * ``torch.OutOfMemoryError``  -- PyTorch's caching allocator could not serve a request.
+      * ``torch.AcceleratorError``  -- a RAW driver cudaErrorMemoryAllocation, from an allocation
+        PyTorch does not own (a cuFFT plan, a cuBLAS workspace, the allocator's own cudaMalloc for a
+        new segment) or, on Windows/WDDM, a lost eviction race against the desktop. This is the form
+        the 2026-08 chi retrain died with and the form the 2026-07-28 cuFFT plan-cache leak produced.
+      * either of the above wrapped in ``SimulationError`` by Simulator.__sols, which is how anything
+        raised inside the solver actually reaches this module.
+
+    ``torch.OutOfMemoryError`` and ``torch.AcceleratorError`` both derive DIRECTLY from RuntimeError
+    and neither subclasses the other, so no single isinstance() covers both -- hence the message test
+    as well as the type test. Being loose is the SAFE direction here: the only thing a caller does
+    with a True is retry smaller, which costs a little wall-clock on a false positive, whereas a false
+    negative costs the whole run. ``seen`` guards a cause cycle, which would otherwise hang.
+    """
+    seen = set()
+    while err is not None and id(err) not in seen:
+        seen.add(id(err))
+        if isinstance(err, torch.OutOfMemoryError):
+            return True
+        if "out of memory" in str(err).lower():
+            return True
+        err = err.__cause__ or err.__context__
+    return False
+
+
 def _max_sim_batch(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n_ch: int,
                    n_out: int, dtype: torch.dtype, device: torch.device) -> int:
     """
@@ -114,7 +206,8 @@ def _max_sim_batch(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n
     per_chunk_sample = n_vars * n_fine + n_ch * n_fine + max(n_vars * seg, n_keep)
     if per_chunk_sample <= 0:
         return batch_size
-    budget = config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION)
+    budget = min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION),
+                 _budget_cap())
     if per_chunk_sample * batch_size <= budget:
         return batch_size            # the whole batch fits; splitting would only cost wall-clock
     # It does not fit. Now the previous chunks' results ARE extra, so reserve the full output.
@@ -194,13 +287,106 @@ def gen_obs(model: str, params: torch.Tensor, t: torch.Tensor, inits: torch.Tens
         outs = []
         for s in range(0, batch_size, max_b):               # plain range: the tqdm nest is already 4 deep
             e = min(s + max_b, batch_size)
-            outs.append(_gen_obs_one(
+            outs.append(_gen_obs_retry(
                 model, params[s:e], t, inits[s:e],
                 force[s:e] if force.shape[0] == batch_size else force,
                 n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device))
+        # Counted as CLEAN even though it split. What _budget_note_ok tracks is "no OOM happened",
+        # not "no split happened" -- a predictive split is the guard working, not failing. Keying
+        # recovery on un-split batches instead would deadlock the cap: after one OOM tightens it, the
+        # tighter cap makes _max_sim_batch split every subsequent batch, so no batch would ever be
+        # counted clean and the cap could never climb back for the rest of the run.
+        _budget_note_ok()
         return torch.cat(outs, dim=1)                      # dim 1 is the batch: (n_out, batch, T')
-    return _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
-                        state_dep_drift, batch_size, var_idx, dtype, device)
+    out = _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
+                         state_dep_drift, batch_size, var_idx, dtype, device)
+    _budget_note_ok()
+    return out
+
+
+def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
+                   state_dep_drift, batch_size, var_idx, dtype, device):
+    """One simulation batch, halving and re-running if it hits an out-of-memory.
+
+    THE COMPANION TO _max_sim_batch, NOT A REPLACEMENT. That guard is PREDICTIVE, and on a shared card
+    a prediction cannot be made reliable: it budgets from a free-memory reading that Windows overstates
+    by the size of the desktop (see the learned-budget block above), and even where the reading is
+    honest it is stale by the time the allocation lands. So the plan is a HINT and this is the
+    MECHANISM: fail, shed half the rows, try again. _max_sim_batch's job shrinks to keeping the common
+    case off this path, and _budget_note_oom's job is to make sure the next plan is wiser.
+
+    Splitting here is licensed by exactly the argument gen_obs already makes for the predictive split:
+    rows are independent and params/inits/force are all row-indexed, so a slice keeps them aligned. It
+    re-draws the SDE noise in smaller blocks -- distributionally identical (still iid), not
+    bit-reproducible against an unsplit run.
+
+    BOUNDED IN BOTH DIRECTIONS. Halving stops at _MIN_SIM_CHUNK (the same floor the predictive guard
+    uses, so there is one number and one meaning), giving at most log2(batch/256)+1 widths. A NON-OOM
+    failure re-raises on the first attempt with its traceback intact, so a genuine model blow-up cannot
+    become a retry loop -- and a CUDA context that a sticky error has already killed costs a few fast
+    failures rather than a hang.
+
+    STAYS ON POWERS OF TWO for a power-of-two input, because the solver specializes on the batch
+    dimension and every new width pays a fresh compile -- the same reason _max_sim_batch quantizes.
+    Testing ``< 2 * _MIN_SIM_CHUNK`` rather than ``<= _MIN_SIM_CHUNK`` is what stops a
+    non-power-of-two batch halving BELOW the floor.
+
+    NOT gated on device.type == "cuda": the halving costs nothing on CPU and gating it would make this
+    path untestable without a GPU. Only the cache clears are CUDA-only.
+    """
+    try:
+        return _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
+                            state_dep_drift, batch_size, var_idx, dtype, device)
+    except RuntimeError as err:
+        # RuntimeError, NOT Exception: every OOM form derives from it (SimulationError,
+        # torch.OutOfMemoryError, torch.AcceleratorError), and staying this narrow is also what keeps
+        # streams.WorkerCancelled -- a BaseException, on purpose -- sailing straight through to
+        # Worker.run. Widening here would turn every GUI cancel into a spurious retry storm.
+        # _MIN_SIM_CHUNK is read from the MODULE rather than captured in a default argument, so a test
+        # can lower the floor by rebinding it.
+        if batch_size < 2 * _MIN_SIM_CHUNK or not _is_oom(err):
+            raise                    # a real failure, or the floor: fail loudly, traceback intact
+        note = f"{type(err).__name__}: {str(err).splitlines()[0][:200]}"
+        n_keep = (1 if var_idx is not None else inits.shape[-1]) * max(0, t.shape[0] - steady_idx)
+        _budget_note_oom(batch_size * (inits.shape[-1] * t.shape[0]
+                                       + (force.shape[1] if force.dim() > 2 else 1) * t.shape[0]
+                                       + max(inits.shape[-1] * min(t.shape[0], CHUNK_LEN), n_keep)))
+
+    # EVERYTHING BELOW IS OUTSIDE THE HANDLER, AND THAT IS LOAD-BEARING. `err` owns a traceback, which
+    # owns the frames of the failed attempt, which own its tensors -- Simulator.simulate's entire
+    # (n_vars, batch, T) buffer among them, plus whatever the chained __cause__'s solver frames hold.
+    # Calling empty_cache() while `err` is still bound frees NOTHING, so the retry OOMs again at half
+    # the width and the whole mechanism reads as "the retry does not work". Python drops `err` at the
+    # end of the except clause; only then is a release worth asking for. Hence `note` is a STRING.
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        # The plan cache lives OUTSIDE the caching allocator, so empty_cache() cannot touch it -- see
+        # the per-batch clear in gen_training_data. It is not this call's memory, but at the one moment
+        # we are provably short it is the cheapest few hundred MB on the card and every plan is
+        # re-mintable. This is also the real defragmentation step: handing every cached segment back to
+        # the driver is what expandable_segments would buy, and cannot buy on Windows.
+        torch.backends.cuda.cufft_plan_cache.clear()
+
+    half = batch_size // 2
+    # NOT SILENT, and on stderr rather than warnings.warn. This repo has no silent caps: a run that
+    # halves on a large fraction of its batches has its geometry or its card wrong, and the only way
+    # anyone learns that is if it says so EVERY time. warnings.warn cannot -- the default filter
+    # ("once per location") would collapse hundreds of events into one line, and parts of
+    # gen_training_data run under simplefilter("ignore"). stderr also lands in the GUI log as a
+    # WARNING row, which is the right weight for an event that costs 2x on this batch.
+    free = (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free (optimistic on "
+            f"Windows -- see the learned-budget note)") if device.type == "cuda" else ""
+    print(f"OOM at simulation batch {batch_size}; retrying in chunks of {half}{free}. "
+          f"Original: {note}", file=sys.stderr, flush=True)
+
+    outs = []
+    for s in range(0, batch_size, half):
+        e = min(s + half, batch_size)
+        outs.append(_gen_obs_retry(
+            model, params[s:e], t, inits[s:e],
+            force[s:e] if force.shape[0] == batch_size else force,
+            n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device))
+    return torch.cat(outs, dim=1)                          # dim 1 is the batch: (n_out, batch, T')
 
 
 def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,

@@ -168,6 +168,35 @@ SBC_N_CAL = 2000       # calibration datasets for SBC in validate(). n_cal=1000 
                        # miscalibration only surfaces reliably at n_cal>=2000 (KS power grows with n_cal).
 TRAINING_NUM_RUNS = 5000  # number of (t_scale_k, T_k) batches per training round (data budget)
 
+TRAINING_RUN_SIZE = 0   # CEILING on simulations per training batch; 0 = follow DeviceConfig.batch_size.
+                        #
+                        # DEFAULTS TO OFF, and should normally stay off. Batch width is nearly free in
+                        # wall-clock -- the SDE solver is a kernel-launch-bound sequential time loop, so
+                        # a batch costs about the same whatever its width (measured on a 5070 Ti at
+                        # n_fine=100k: 7.37 s at 2048 against 7.74 s at 1024, i.e. the SMALLER batch is
+                        # slightly slower). Lowering this therefore does NOT speed anything up; it trades
+                        # training rows for peak VRAM at roughly 1:1, and TRAINING_NUM_RUNS has to rise to
+                        # compensate, which DOES cost wall-clock proportionally.
+                        #
+                        # It is an ESCAPE HATCH, not the memory fix. The memory fix is per-geometry: a
+                        # training batch's cost is width x n_fine, and n_fine swings from a median ~40k to
+                        # a p99 ~283k, so at a fixed width the tail is ~7x the median. pipeline's
+                        # _max_sim_batch already sizes each batch against its OWN geometry, and its
+                        # learned budget plus _gen_obs_retry handle the tail by SPLITTING -- which costs
+                        # k x wall-clock on the few percent of batches that need it rather than on all of
+                        # them. Reach for this only if the retry notices show splitting on a large
+                        # fraction of batches, i.e. the card is tighter than the split machinery can
+                        # absorb.
+                        #
+                        # A CEILING, NOT A REPLACEMENT (unlike PRIOR_SWEEP_BATCH, which replaces).
+                        # scripts/smoke_train.py and three pipeline tests shrink a run by writing
+                        # cfg.hw.batch_size directly; a replacing knob would override them and quietly
+                        # drive the CPU test suite at this width -- landing as "the tests got slow", not
+                        # as an error. The asymmetry is principled: the prior sweep is iteration-bounded,
+                        # so a LARGER batch there is free accuracy and worth allowing; training is never
+                        # helped by a batch wider than the hardware default, since that is the thing that
+                        # OOMs.
+
 # === NEURAL POSTERIOR & TRAINING HYPERPARAMETERS ===
 # Capacity / convergence knobs for the SBI posterior. Raise the flow capacity and/or the
 # training budget to address broad SBC under-calibration; defaults match sbi's own.
