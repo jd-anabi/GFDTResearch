@@ -380,8 +380,10 @@ Without it, `T ~ logU[1 s, 60 s]` puts a large fraction of probes past the repro
 >
 > **Plus one that had NOT fired and would have:** `append_simulations` moved the whole 4.35 GiB
 > training tensor to the GPU and ran `torch.unique` on it twice (≥13 GiB) — at the END of a
-> multi-day run that is not checkpointed. Defused (`data_device="cpu"` + a capped z-score check),
-> but **never exercised on the real path** — one `scripts/smoke_train.py` is the only thing that does.
+> multi-day run that is not checkpointed. Defused (`data_device="cpu"` + a capped z-score check) and
+> **smoke-tested clean 2026-08-11** (all four stages, training masked 36.7 %, zero OOM retries). Note
+> the smoke train ran it on **128 rows**, so it proves the path executes, not the memory claim at
+> scale — see that Appendix entry.
 >
 > **The single largest lever is still closing the browsers.** `mem_get_info` overstates free VRAM by
 > the size of the desktop (measured 15037 MiB against nvidia-smi's 5814), so a busy card is not just
@@ -472,14 +474,12 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    argument. The rotation's chi block went 24 rows → 18 with **zero** pinned channels, every
    surviving row untouched. **Nothing now stands between here and the retrain.**
 
-4c. **Run `scripts/smoke_train.py` FIRST.** ⬅ **NEXT, and it is ~46 min against a multi-day run.**
-   It is the only thing that exercises `append_simulations` on the real path, and that fix
-   (`data_device="cpu"` + the capped z-score check, 2026-08-11) has never run end to end. It also
-   re-checks the chi path after the batch-retry refactor, which the handoff requires after ANY chi
-   change. Watch three things: the masked fraction (~35 % is correct, §4.3.6), any
-   `OOM ... OUTSIDE the simulator retry` lines, and the `[mem]` peak-allocated figure.
+4c. ~~**Run `scripts/smoke_train.py` after the OOM work.**~~ ✅ **DONE 2026-08-11** — all four stages
+   in 8827 s, training masked **36.7 %** (against §4.3.6's 36.8 %), zero OOM retries, and the
+   `append_simulations` fix exercised end to end. Re-run it after any further chi-path change; watch
+   the masked fraction, any `OOM ...` lines, and the `[mem]` peak-allocated figure.
 
-5. **The retrain** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4).
+5. **The retrain** ⬅ **NEXT** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4).
    C-6 is resolved, step 3 says go, and C-9/C-10 are closed. Budget
    ≈ (1 + E[K]) / 2 × a spontaneous run for the training data, plus (K+1)/2 × a forced-mode Fisher
    for the rotation. At `CHI_K_PAD = 12`, `E[K] = 7`. From the smoke train's timings, expect the prior
@@ -2033,6 +2033,35 @@ It also caught a real slip: `inits` is passed **positionally** to `gen_chi_block
 keyword-based slicing sweep. That surfaced as `Batch size: 2 cannot differ from dim 0 of parameters
 tensor` — loudly, but only because the simulator cross-validates those two. A name that broadcast
 instead would have produced plausible, wrong training rows.
+
+## 2026-08-11 (later) — smoke train after the OOM work: clean, with one honest gap
+
+`scripts/smoke_train.py`, chi, `TOBS_S=4.5`, on a card with 13.6 GiB free (browsers closed). **All
+four stages completed, 8827 s** (prior 547, posterior 7192, validate 262, infer 826).
+
+| signal | result | reading |
+|---|---|---|
+| training masked | **36.7 %** | matches §4.3.6's 36.8 % and the pre-refactor 35.7 % — C-6/C-8 survived the batch-retry refactor |
+| PPC masked | 59.0 % | expected; a readout of posterior quality at smoke sizes, not of the probe machinery (§4.3.6) |
+| OOM retries, either level | **0** | nothing needed rescuing at 13.6 GiB free — which is the point about closing browsers, not evidence the retries work |
+| sbi "Moving x to the data_device" | **absent** | `data_device="cpu"` took effect; the tensor was already on the host and stayed there |
+| `[mem]` breadcrumb | peak allocated 1.09 GiB on batch 1 | the line works, and its peak-not-instantaneous figure is the one that trends before a death |
+| batch tag | `training batch 2/4 [t_scale=5.171, T=3.44e+04, n_fine=279096, N_points=34387, rows=32]: chi: 17/96 probes masked` | exactly the forensic line whose absence made the 2026-08-11 failure take a full investigation to localise |
+
+### The gap this does NOT close, stated plainly
+
+At smoke sizes the training set is `NUM_RUNS=4 x RUN_SIZE=32 = 128 rows`. `append_simulations`
+therefore handled a **128-row** tensor, not the 10.24M-row one whose `torch.unique` was the ≥13 GiB
+bomb. So this run proves the fixed path **executes correctly** — `data_device="cpu"` is accepted, the
+scoped z-score patch applies and restores, nothing downstream breaks — and proves **nothing** about
+the memory claim at scale, which rests on arithmetic plus a unit test asserting the check never sees
+more than 200k rows.
+
+The same caveat applies to both retries: with 13.6 GiB free, neither fired. Their behaviour is pinned
+by CPU tests with injected failures (including a full `gen_training_data` recovery), and by one GPU
+run under artificial pressure that exercised the *predictive* split rather than the reactive retry.
+**Reproducing a genuine reactive CUDA OOM needs a second process holding VRAM, which has not been
+staged.** Treat the retries as tested-by-construction until a real run exercises them.
 
 ## 2026-08-10 (later) — the retrain OOM'd, and the free-memory reading is why
 
