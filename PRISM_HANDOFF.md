@@ -69,11 +69,11 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 |---|---|---|
 | `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
 | `tests/test_user_models.py` | 29 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry |
-| `tests/test_user_sbi.py` | 35 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget** |
+| `tests/test_user_sbi.py` | 39 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check** |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 10 | the master Bounds/Cells triple, bounds resolution, and the prior/posterior identity guards — **eval box comes from the sidecar, not the config** |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **181** | |
+| **Total** | **185** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -348,7 +348,7 @@ and the 2026-08-05 Appendix A entry.
   `B1_log_Q` fix (§7.6) and the consolidation. Their §4.2 numbers stand as historical record only.
 
 **The chi conditioning is now a padded probe SET (layout 2, §3.6) and the Fisher rotation is
-available under χ (§4.4). All 171 tests across six suites pass.**
+available under χ (§4.4). All 185 tests across six suites pass.**
 
 **C-6 is resolved** (§4.3.3–§4.3.6). The first end-to-end smoke train found 77 % of training probes
 masked — a typical row conditioning on ~2 live probes, which is `posterior_chi_08042026`'s
@@ -366,6 +366,30 @@ not of the probe machinery — see §4.3.6.
 measure the same observable, carried on the `SimConfig`, frozen into the sidecar and checked on load.
 Without it, `T ~ logU[1 s, 60 s]` puts a large fraction of probes past the reproducibility wall
 (§4.3.1) and a retrain spends days reproducing `posterior_chi_08042026`'s failure mode.
+
+> ### ⚠ THE RETRAIN HAS BEEN ATTEMPTED TWICE AND DIED BOTH TIMES — ON MEMORY, NOT SCIENCE
+>
+> Neither failure said anything about chi(ω); both were CUDA out-of-memory on a **16 GB card shared
+> with a Windows desktop**, and each was a different unguarded allocation. Read traps **X6/X7/X8** and
+> the two Appendix entries (2026-08-10, 2026-08-11) before restarting.
+>
+> | | died in | wrapped? | fix |
+> |---|---|---|---|
+> | 2026-08-10 | the SDE solver, mid-generation | yes (`SimulationError`) | learned memory budget + `_gen_obs_retry` |
+> | 2026-08-11 | a chi batch, **outside** the solver | **no** | `_rows_with_oom_retry` (per-batch, halves ROWS) + `gen_obs` preallocation |
+>
+> **Plus one that had NOT fired and would have:** `append_simulations` moved the whole 4.35 GiB
+> training tensor to the GPU and ran `torch.unique` on it twice (≥13 GiB) — at the END of a
+> multi-day run that is not checkpointed. Defused (`data_device="cpu"` + a capped z-score check),
+> but **never exercised on the real path** — one `scripts/smoke_train.py` is the only thing that does.
+>
+> **The single largest lever is still closing the browsers.** `mem_get_info` overstates free VRAM by
+> the size of the desktop (measured 15037 MiB against nvidia-smi's 5814), so a busy card is not just
+> slower — it is invisible to the planner. Under 7 GiB of pressure a worst-geometry batch took 136 s
+> against 18.6 s.
+>
+> **Nothing is checkpointed.** A death at batch 4000 of 5000 loses everything. The retries remove the
+> failure modes that have actually bitten, but a driver reset or reboot still costs the whole run.
 
 **The retrain is UNBLOCKED as of 2026-08-10.** Step 3 (§4.4.1) answered the information question —
 chi buys `f_scale`, `t_scale` and `lam`, does not buy `k`~`x_scale`, and the set encoder lost nothing
@@ -448,7 +472,14 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    argument. The rotation's chi block went 24 rows → 18 with **zero** pinned channels, every
    surviving row untouched. **Nothing now stands between here and the retrain.**
 
-5. **The retrain** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4). ⬅ **NEXT.**
+4c. **Run `scripts/smoke_train.py` FIRST.** ⬅ **NEXT, and it is ~46 min against a multi-day run.**
+   It is the only thing that exercises `append_simulations` on the real path, and that fix
+   (`data_device="cpu"` + the capped z-score check, 2026-08-11) has never run end to end. It also
+   re-checks the chi path after the batch-retry refactor, which the handoff requires after ANY chi
+   change. Watch three things: the masked fraction (~35 % is correct, §4.3.6), any
+   `OOM ... OUTSIDE the simulator retry` lines, and the `[mem]` peak-allocated figure.
+
+5. **The retrain** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4).
    C-6 is resolved, step 3 says go, and C-9/C-10 are closed. Budget
    ≈ (1 + E[K]) / 2 × a spontaneous run for the training data, plus (K+1)/2 × a forced-mode Fisher
    for the rotation. At `CHI_K_PAD = 12`, `E[K] = 7`. From the smoke train's timings, expect the prior
@@ -1410,6 +1441,23 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   reports) premised on the box round-trip producing `±inf`; it cannot on torch 2.9. Pinned by
   `test_box_roundtrip_never_yields_a_nonfinite_latent_target`, which exists precisely so a version
   bump that removes that clamp surfaces as a test failure rather than a dead training run.
+- **X7. An UNWRAPPED CUDA OOM rules out the solver — and that is the fastest thing to check.**
+  `Simulator.__sols` wraps everything raised inside `euler`/`euler_compiled` into a `SimulationError`
+  reading `"<Model> <method> failed after N steps (batch=..., segs=..., device=..., dtype=...)"`. So a
+  bare `CUDA error: out of memory` did NOT come from the SDE integration, which also means
+  `_gen_obs_retry` (which wraps only `_gen_obs_one`) never saw it. Both retrains died this way and the
+  distinction is what separated them: 2026-08-10 was wrapped (solver), 2026-08-11 was not (the batch's
+  own tensors). **Read the prefix before theorising.** Everything in a chi batch outside the solver is
+  linear in ROWS, not in the solver's batch — the zero-drive tensor, the per-probe force rebuilt K
+  times, `idx_c`, `x_spont_dim`, `gen_stats` — which is why the outer retry halves rows rather than
+  simulation width. And note `sbi`'s `append_simulations` is outside *both* retries: it is one
+  indivisible ≥13 GiB allocation that no halving can rescue, which is why it is defused rather than
+  retried.
+- **X8. `gen_training_data` is NOT reproducible from a torch seed alone.** The initial conditions come
+  from **numpy's** global RNG (`np.random.randint`), which `torch.manual_seed` does not touch —
+  measured, two runs of identical code differed by max|diff| 30.6 until `np.random.seed` was set too.
+  Any claim that "a seeded run reproduces" needs both, and any bit-identity check of this function is
+  meaningless without them.
 - **X6. `torch.cuda.mem_get_info()` OVERSTATES free VRAM on Windows — by the size of the desktop.**
   Measured on the 16 GB RTX 5070 Ti: `mem_get_info` said **15037 MiB** free while `nvidia-smi` said
   **5814 MiB**, at the same instant. Under WDDM the OS virtualises VRAM, so other processes' surfaces
@@ -1455,6 +1503,7 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 | **C-6** | **~33 % of training rows carry no live chi probe** (was 55 %; §4.3.3–§4.3.6). Both parts done — per-ROW placement (C-6) and per-ROW durations (C-8). The residue is the genuinely unmeasurable tail: a sub-1 Hz bundle cannot complete two drive cycles at 0.03–0.3× its Ω₀ within 60 s at any placement or duration. Closing it further means changing the PRIOR (§4.3.4 option 2), not the estimator — a science decision. **Diagnosis, kept because it explains the shape of the fix:** the `CHI_MIN_CYCLES` floor is the only active predicate, and the driver is the row's own **Ω₀**, not `T` and not the band — live fraction goes 0 % below 3 Hz to 98 % above 30 Hz, while the prior spans ~4 decades of Ω₀. The masked rows are **genuine oscillators** (spectral prominence in the thousands), so the mask is correct physics and screening them out would be wrong. | ✅ **DONE 2026-08-07** — no longer a blocker |
 | **C-9** | ~~The Fisher rotation amplifies ceiling-pinned `logcyc`.~~ **MEASURED on a real rotation 2026-08-10, and it does reproduce — but mildly, and INTERMITTENTLY, which is the part that matters.** `chi5_logcyc` pinned exactly as predicted (std 8.7e-05, ratio 2.9e-05, the same signature as the map) yet reached only `max\|J\|` = **6.0** — the *smallest* chi row, against the map's 2.0e4. The amplification depends on whether the ±dz arms straddle a `floor()` step; at that operating point they did not. A production rotation averages **8** operating points at m=48 over a ~4-decade Ω₀ prior, so this is a landmine that fires sometimes, not a constant — the worst kind to leave in. **Fixed with C-10 by the same one-line change.** | ✅ **DONE 2026-08-10** |
 | **C-10** | ~~`chi.fisher_features` emits K duplicate rows.~~ **Confirmed hard on the same rotation:** `chi0/1/2/3_logcyc` agreed to **6 significant figures** (`max\|diff\|` ~2e-5 against entries of 37.44), because with the ceiling clear `logcyc_j = log(mult_j) + log(f_peak) + log(T_obs)` and both constants vanish under standardization — so the row **is** `A3_log_fpeak`'s, K times over, weighting that direction K-fold in `Jᵀ J`. **Fix: `logcyc` removed from `CHI_FISHER_CHANNELS`** (now `("logmag", "cos", "sin")`, 3K not 4K) and `fisher_features` reduced to **one argument**, which makes trap CHI10's whole class of mis-wiring a `TypeError`. Every `logcyc` row was a duplicate, a degrading duplicate, or quantization — never independent information, so nothing was lost. Pinned by two updated assertions plus `test_fisher_features_takes_one_argument_and_its_channels_are_what_they_claim`. | ✅ **DONE 2026-08-10** |
+| **C-11** | **No checkpointing in `gen_training_data`.** A death at batch 4000 of 5000 loses every simulation — the accumulators are plain Python lists, concatenated only at the end, and nothing touches disk until `save_posterior_artifacts` after training. The 2026-08-10/11 retries remove the failure modes that have actually bitten, but a driver reset, a reboot or a power cut still costs the whole multi-day run. **Deliberately not built yet:** a CORRECT checkpoint must persist the Sobol arrays, torch's global RNG, `chi_gen`, **numpy's** RNG (trap X8) and the proposal — and a subtly wrong one resumes with silently non-uniform stratification, which is worse than crashing. Do it as its own change with its own tests if multi-day runs become routine. A cheap salvage variant (periodic `torch.save` of the rows so far, for a human to inspect — NOT resumable) is a two-liner if the accumulator is preallocated. | OPEN — the main risk left on a long run |
 | **C-7** | ~~`build_prior`'s `num_iterations=50` is a hard-coded literal, and its stability sweep shares `cfg.hw.batch_size` with TRAINING.~~ Promoted to **`config.PRIOR_SWEEP_ITERATIONS`** and **`config.PRIOR_SWEEP_BATCH`** (0 = follow `hw.batch_size`, the historical behaviour and still the right default). The trap it removes: the sweep is ITERATION-bounded, so shrinking the shared batch for a quick run made the prior worse *without* making it faster — 527 s at batch 2048 against >70 min and unfinished at 32. Also recorded at the constant: total candidates = batch x iterations, each round pays a full trajectory whatever the batch, and the subclasses' `batch_size % num_iterations` guard is **vacuous** (`construct_prior` passes `batch*iterations` down), so do not rely on it. | ✅ **DONE 2026-08-10** |
 | **C-5** | ~~Settle the chi band's HIGH EDGE under the cap.~~ | ✅ **DONE 2026-08-06** — §4.3.2. `(0.03, 0.3)` **stands**: under the cap CV and SNR discriminate nowhere in 0.03–0.6, entrainment has a measured knee at 0.35–0.4×, and phase scatter is smooth so no threshold on it is evidence. The one residual is a judgement, not a gap: whether a phase-incoherent probe is worth including. Settling *that* needs two trained posteriors and is not worth it before a first working one exists. |
 | **C-2** | ~~The Infer tab's variable-length probe table.~~ The Infer tab now holds an add/remove probe table; each row is **one `_ChiProbeRow` widget** carrying its recording AND the frequency it was actually driven at, and `_infer` submits `(path, freq_Hz)` PAIRS. Both stated constraints are met and pinned by tests: `_rebuild_chi_fields` **preserves** existing rows (they hold hand-typed frequencies and browsed paths a rebuild cannot regenerate; it seeds only when empty, never tops up or trims), and one-widget-per-row makes the middle-deletion mispairing structurally impossible. A blank frequency box is caught before the run — `FloatField.value()` returns 0.0 on bad text, and 0 Hz is a genuine DC probe the lock-in would attempt. | ✅ **DONE 2026-08-10** |
@@ -1918,6 +1967,72 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
+
+## 2026-08-11 — the retrain OOM'd AGAIN, outside everything the first fix guarded
+
+Second failure, and the message shape was the diagnosis: a **bare, unwrapped**
+`CUDA error: out of memory`, where the 2026-08-10 one had carried
+`NadrowskiModel euler_compiled failed after 81616 steps (batch=2048, ...)`. `Simulator.__sols` wraps
+everything raised inside the solver into `SimulationError`, so an unwrapped OOM **rules the solver
+out** — and `_gen_obs_retry` wraps only `_gen_obs_one`, so it never saw this one.
+
+The line before it was `chi: 1347/22528 probes masked`, emitted at the END of `gen_chi_block` inside
+the per-batch loop. So: during generation, inside a batch, outside the simulator. (22528/2048 ⇒ K=11.)
+
+### Two problems, only one of which had fired
+
+**What killed it:** everything in a chi batch that is not the solver, all unguarded and all linear in
+rows — the zero-drive tensor (~2.29 GiB), the per-probe `force` rebuilt K times (~2.29 GiB each),
+`idx_c` (0.92 GiB int64, live across the whole K loop), `x_spont_dim`, `gen_stats`, and — worst,
+because I introduced it — the `torch.cat(outs, dim=1)` reassembly in `gen_obs`, which runs **only on
+split batches** and holds every chunk plus the result at once.
+
+**What had not fired yet, and would have:** `append_simulations` was called with no `data_device`, so
+sbi defaults it to **cuda**, moves the whole (10.24M, 114) tensor to the GPU, filters it (8.7 GiB
+transient), and calls `warn_if_zscoring_changes_data` **unconditionally** — `torch.unique(x, dim=0)`,
+a full z-score, then `torch.unique` again: **≥13 GiB**, at the end of a multi-day run that is not
+checkpointed. It fires on **any** successful generation, chi or not. sbi's own warning text says it
+can be ignored when z-scoring is off, which chi mode always is (§3.6).
+
+### Four changes
+
+1. **`data_device="cpu"` + a capped z-score check.** Both halves needed: `data_device` alone
+   *relocates* the ≥13 GiB to host RAM and costs minutes of lexicographic sort. Capped rather than
+   disabled, because non-chi modes do z-score and the diagnostic is real there — and it is a
+   *proportion* test with a 10 % tolerance, so a **200k strided** sample answers it. Strided, not a
+   prefix: rows are grouped by batch and each batch is one `(t_scale, T)` stratum.
+   The patch rebinds the name in **every module that holds it** — `npe_base` does
+   `from sbi.utils import warn_if_zscoring_changes_data`, so patching `sbi.utils.sbiutils` alone is a
+   no-op. Found by identity scan rather than a hard-coded path, because sbi has already moved that
+   module once.
+2. **`gen_obs` preallocates** and each chunk writes into its slice via a new `out=` parameter.
+   Preallocating *without* also removing `_gen_obs_one`'s clone is a **regression at k=2** — the live
+   chunk would exist both in `out`'s span and as the return. Peaks (result 2.29, solver 6.87 GiB):
+   k=2 5.73→5.73, k=4 4.58→**4.01**, k=8 4.58→**3.15**.
+3. **Breadcrumbs.** `_BATCH_TAG` — batch index, `t_scale`, `T`, `n_fine`, `N_points`, rows — set
+   before the first allocation that can fail and consumed by the chi mask warning and both OOM
+   messages. Plus a `[mem]` line every 250 batches reporting **peak** allocated/reserved (reset each
+   interval, so it reads "worst batch in the last 250" — the series that trends up before a death).
+4. **A per-training-batch OOM retry** (`_rows_with_oom_retry`). The batch is the right unit: its
+   `(t_scale_k, T_k)` is an *index* into a pre-filtered Sobol array, and the probe count, multipliers
+   and durations are now drawn **above the seam** — so halving is a **repartition**, not a resample.
+   Shrinking `run_size` globally would instead change the *number of strata*, i.e. the training
+   distribution. Prefer the inner retry (a batch halve re-runs ~12 simulations plus a full
+   `gen_stats`); the outer is the backstop for what the inner cannot see.
+
+### What made the refactor safe, and what it caught
+
+The loop body became a closure that slices ~30 batch-level names to its row range. **Any one left at
+full width silently corrupts the batch**, so the gate was a **bit-identity harness**: seeded
+`gen_training_data`, all three branches, `torch.equal` before and after. It passed 6/6 — and building
+it turned up that **`gen_training_data` is not reproducible from a torch seed alone**: the initial
+conditions come from `np.random.randint`, so two runs of identical code differed by max|diff| 30.6
+until numpy was seeded too. Worth knowing for any "seeded run reproduces" claim.
+
+It also caught a real slip: `inits` is passed **positionally** to `gen_chi_block`, so it survived the
+keyword-based slicing sweep. That surfaced as `Batch size: 2 cannot differ from dim 0 of parameters
+tensor` — loudly, but only because the simulator cross-validates those two. A name that broadcast
+instead would have produced plausible, wrong training rows.
 
 ## 2026-08-10 (later) — the retrain OOM'd, and the free-memory reading is why
 

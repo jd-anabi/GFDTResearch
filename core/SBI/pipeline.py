@@ -1,3 +1,4 @@
+import contextlib
 import math
 import sys
 import warnings
@@ -153,6 +154,115 @@ def _budget_note_ok() -> None:
         _BUDGET_CAP_ELEMENTS = int(_BUDGET_CAP_ELEMENTS * _BUDGET_RECOVER_STEP)
 
 
+# ── Where are we? ─────────────────────────────────────────────────────────────────────────────────
+# A training round is thousands of batches over hours, and its warnings and failures are one line
+# each in a log the GUI shows WITHOUT the traceback (Worker.run keeps that for the error dialog). The
+# 2026-08-11 chi retrain died with a bare "CUDA error: out of memory" and the only clue to where was
+# that the preceding line happened to be gen_chi_block's mask warning -- which narrowed it to "inside
+# the per-batch loop" and no further. One f-string per batch, microseconds against a ~20 s batch,
+# removes that entire class of forensics.
+#
+# A module global rather than a parameter because the consumers are gen_chi_block and the two OOM
+# retries, none of which has any business taking a batch index. Single-writer by construction (one
+# gen_training_data at a time in this process -- BasePanel._running is class-level for exactly that
+# reason), and the only consumer is a log string, so the worst a concurrent run could do is mislabel.
+_BATCH_TAG = ""
+
+
+def _batch_tag() -> str:
+    """The batch currently being generated, or a neutral label outside gen_training_data."""
+    return _BATCH_TAG or "simulation"
+
+
+_MEM_LOG_EVERY = 250          # 21 lines over a 5000-batch run
+
+
+def _log_memory(device: torch.device, tag: str) -> None:
+    """One memory line, and RESET the peak so the next one describes the next interval.
+
+    PEAK allocated is the number that predicts an OOM. An instantaneous reading taken between batches
+    is always low, because the batch's big tensors are already gone by then -- so a series of those
+    would look flat right up until the run died. The allocator maintains the peak unconditionally, so
+    reading it is free, and resetting it turns the series into "worst batch in the last 250", which is
+    the thing that trends upward before a card runs out.
+
+    Reported-free is printed with its health warning attached: under WDDM other processes' evictable
+    surfaces count as free -- measured 15037 MiB against nvidia-smi's 5814 on this machine (trap X6).
+    """
+    if device.type != "cuda":
+        return
+    free_b, total_b = torch.cuda.mem_get_info(device)
+    cap = ("none" if _BUDGET_CAP_ELEMENTS is None
+           else f"{_BUDGET_CAP_ELEMENTS * 4 / 2 ** 30:.2f} GiB")
+    print(f"[mem] {tag}: peak allocated {torch.cuda.max_memory_allocated(device) / 2 ** 30:.2f} GiB, "
+          f"peak reserved {torch.cuda.max_memory_reserved(device) / 2 ** 30:.2f} GiB, "
+          f"{free_b / 2 ** 30:.2f}/{total_b / 2 ** 30:.2f} GiB reported free (optimistic on Windows), "
+          f"learned cap {cap}", file=sys.stderr, flush=True)
+    torch.cuda.reset_peak_memory_stats(device)
+
+
+_ZSCORE_CHECK_MAX_ROWS = 200_000
+
+
+@contextlib.contextmanager
+def _capped_zscore_check(max_rows: int = _ZSCORE_CHECK_MAX_ROWS):
+    """Run sbi's ``warn_if_zscoring_changes_data`` on a SUBSAMPLE for the duration of this block.
+
+    WHY IT HAS TO BE CAPPED AT ALL. append_simulations calls it UNCONDITIONALLY on the full training
+    tensor (sbi/inference/trainers/npe/npe_base.py:189). At the chi retrain's size -- 5000 x 2048 =
+    10.24M rows x 114 columns float32, 4.35 GiB -- it runs ``torch.unique(x, dim=0)``, then builds
+    ``zx = (x - x.mean(0)) / x.std(0)``, then runs ``torch.unique`` AGAIN. That is >= 13 GiB, and
+    since unique over dim=0 is a lexicographic sort of 10.24M rows by 114 keys it is also minutes of
+    single-threaded work. On a 16 GB card it is a guaranteed OOM at the END of a multi-day generation
+    run -- the worst possible moment, because nothing is checkpointed. It fires on ANY successful run,
+    chi or not, and no retry can help because it is one indivisible allocation.
+
+    WHY CAPPING RATHER THAN DISABLING. In chi mode the check is inapplicable: train_nn sets
+    ``z_score_x="none"`` whenever the embedding owns its standardization, and sbi's own warning text
+    ends "if you have already set z_score_x=False, this warning will still be displayed, but you can
+    ignore it." But spontaneous and forced modes DO train under ``z_score_x="independent"``, where a
+    collapse under z-scoring is a real finding worth hearing about. It is also a PROPORTION test with
+    a 10 % tolerance (``duplicate_tolerance``), so a 200k-row sample answers it to well within its own
+    resolution. STRIDED, not a prefix: rows are grouped by batch and each batch shares one
+    (t_scale, T) stratum, so ``x[:200_000]`` would sample ~98 of 5000 strata while ``x[::n]`` spans
+    all of them.
+
+    PATCHED BY REBINDING IN EVERY MODULE THAT HOLDS THE NAME, not just in sbiutils. npe_base does
+    ``from sbi.utils import ... warn_if_zscoring_changes_data``, so its call resolves against
+    npe_base's OWN globals -- patching sbi.utils.sbiutils alone changes nothing. Rather than hard-code
+    that module path (sbi has already moved it once: sbi.inference.snpe -> sbi.inference.trainers.npe)
+    this finds every module whose attribute IS the original function object. A few ms, once per round,
+    and it cannot rot.
+
+    SCOPED AND RESTORING, including on an exception: the patch is live only across append_simulations,
+    so nothing else in the process -- another panel, a script that imported sbi, a later round -- ever
+    sees a monkeypatched sbi.
+    """
+    import sbi.utils.sbiutils as _sbiutils
+    original = _sbiutils.warn_if_zscoring_changes_data
+
+    def _capped(x, duplicate_tolerance: float = 0.1):
+        stride = max(1, math.ceil(x.shape[0] / max_rows))
+        # .contiguous() explicitly: unique would materialise the strided view anyway, and doing it
+        # here keeps the copy's size obvious (<= max_rows x n_features) rather than implicit.
+        return original(x[::stride].contiguous(), duplicate_tolerance)
+
+    targets = []
+    for mod in list(sys.modules.values()):
+        try:
+            if getattr(mod, "warn_if_zscoring_changes_data", None) is original:
+                targets.append(mod)
+        except Exception:            # noqa: BLE001 -- a lazy module's __getattr__ must not break this
+            continue
+    try:
+        for mod in targets:
+            mod.warn_if_zscoring_changes_data = _capped
+        yield
+    finally:
+        for mod in targets:
+            mod.warn_if_zscoring_changes_data = original
+
+
 def _is_oom(err: BaseException) -> bool:
     """Is this failure -- or anything it was raised FROM -- a device out-of-memory?
 
@@ -284,20 +394,39 @@ def gen_obs(model: str, params: torch.Tensor, t: torch.Tensor, inits: torch.Tens
                            force.shape[1] if force.dim() > 2 else 1,
                            1 if var_idx is not None else inits.shape[-1], dtype, device)
     if max_b < batch_size:
-        outs = []
+        # PREALLOCATE the stitched result and have every chunk write STRAIGHT into its slice.
+        #
+        # This used to collect chunks in a list and torch.cat them. That cat is a DOUBLE RESIDENCY: at
+        # the moment it allocates, every chunk is still live, so a 2.29 GiB result costs 4.58 GiB --
+        # and it runs ONLY on split batches, i.e. exactly the ones already known not to fit. Wrong
+        # direction, and it sat outside every handler so it could not even be retried.
+        #
+        # It does NOT make the plan more optimistic: _max_sim_batch already reserves the full
+        # n_keep * batch_size off the budget for the whole split (the `budget -= ...` line above), so
+        # it has always assumed the result is resident throughout. This makes that true. Measured
+        # peaks at run_size=2048 / n_fine=280k (result 2.29 GiB, solver buffer 6.87 GiB):
+        #     split k     list+cat     this
+        #        2          5.73       5.73   (equal -- at k=2 the solver, not the cat, binds)
+        #        4          4.58       4.01
+        #        8          4.58       3.15
+        # torch.empty rather than zeros: on CUDA it touches nothing, and every element is written.
+        n_out = 1 if var_idx is not None else inits.shape[-1]
+        out = torch.empty((n_out, batch_size, max(0, t.shape[0] - steady_idx)),
+                          dtype=dtype, device=device)
         for s in range(0, batch_size, max_b):               # plain range: the tqdm nest is already 4 deep
             e = min(s + max_b, batch_size)
-            outs.append(_gen_obs_retry(
+            _gen_obs_retry(
                 model, params[s:e], t, inits[s:e],
                 force[s:e] if force.shape[0] == batch_size else force,
-                n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device))
+                n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device,
+                out=out[:, s:e, :])
         # Counted as CLEAN even though it split. What _budget_note_ok tracks is "no OOM happened",
         # not "no split happened" -- a predictive split is the guard working, not failing. Keying
         # recovery on un-split batches instead would deadlock the cap: after one OOM tightens it, the
         # tighter cap makes _max_sim_batch split every subsequent batch, so no batch would ever be
         # counted clean and the cap could never climb back for the rest of the run.
         _budget_note_ok()
-        return torch.cat(outs, dim=1)                      # dim 1 is the batch: (n_out, batch, T')
+        return out
     out = _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
                          state_dep_drift, batch_size, var_idx, dtype, device)
     _budget_note_ok()
@@ -305,7 +434,7 @@ def gen_obs(model: str, params: torch.Tensor, t: torch.Tensor, inits: torch.Tens
 
 
 def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
-                   state_dep_drift, batch_size, var_idx, dtype, device):
+                   state_dep_drift, batch_size, var_idx, dtype, device, out=None):
     """One simulation batch, halving and re-running if it hits an out-of-memory.
 
     THE COMPANION TO _max_sim_batch, NOT A REPLACEMENT. That guard is PREDICTIVE, and on a shared card
@@ -336,7 +465,7 @@ def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dic
     """
     try:
         return _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
-                            state_dep_drift, batch_size, var_idx, dtype, device)
+                            state_dep_drift, batch_size, var_idx, dtype, device, out=out)
     except RuntimeError as err:
         # RuntimeError, NOT Exception: every OOM form derives from it (SimulationError,
         # torch.OutOfMemoryError, torch.AcceleratorError), and staying this narrow is also what keeps
@@ -376,22 +505,124 @@ def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dic
     # WARNING row, which is the right weight for an event that costs 2x on this batch.
     free = (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free (optimistic on "
             f"Windows -- see the learned-budget note)") if device.type == "cuda" else ""
-    print(f"OOM at simulation batch {batch_size}; retrying in chunks of {half}{free}. "
-          f"Original: {note}", file=sys.stderr, flush=True)
+    print(f"{_batch_tag()}: OOM at simulation batch {batch_size}; retrying in chunks of "
+          f"{half}{free}. Original: {note}", file=sys.stderr, flush=True)
 
-    outs = []
+    # Same preallocation as gen_obs' predictive split, for the same reason -- and note it happens
+    # AFTER the empty_cache above, i.e. at the one moment in this function when the card is least
+    # full. When a splitting caller already handed us a destination, `out` is non-None and this level
+    # merely sub-divides that view, so the full result is allocated exactly ONCE however deep the
+    # halving recursion goes.
+    if out is None:
+        n_out = 1 if var_idx is not None else inits.shape[-1]
+        out = torch.empty((n_out, batch_size, max(0, t.shape[0] - steady_idx)),
+                          dtype=dtype, device=device)
     for s in range(0, batch_size, half):
         e = min(s + half, batch_size)
-        outs.append(_gen_obs_retry(
+        _gen_obs_retry(
             model, params[s:e], t, inits[s:e],
             force[s:e] if force.shape[0] == batch_size else force,
-            n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device))
-    return torch.cat(outs, dim=1)                          # dim 1 is the batch: (n_out, batch, T')
+            n_segs, steady_idx, fixed_dict, state_dep_drift, e - s, var_idx, dtype, device,
+            out=out[:, s:e, :])
+    return out
+
+
+def _rows_with_oom_retry(fn, lo: int, hi: int, *, per_row_elements: int,
+                         device: torch.device) -> torch.Tensor:
+    """Produce training rows [lo, hi) via ``fn(lo, hi)``, halving the ROW BLOCK on an out-of-memory.
+
+    THE OUTER OF TWO RETRIES, AND DELIBERATELY THE EXPENSIVE ONE. _gen_obs_retry sits INSIDE fn and
+    fires first, so by the time an OOM reaches here it is one the simulator-level split could not see:
+    the reassembly buffer in gen_obs, the (rows, n_force_ch, t_fine) zero-drive tensor, the per-probe
+    force rebuilt K times inside gen_chi_raw, the (rows, N_points) int64 gather index held across the
+    whole K loop, x_spont_dim, gen_stats' sub-batches, pack_probe_block. At run_size=2048 /
+    n_fine=280k those are ~2.29, ~2.29 x K, ~0.92 and ~0.46 GiB -- none of them inside _gen_obs_one,
+    all of them linear in the rows. Halving the rows halves all of them at once. This is the gap that
+    killed the 2026-08-11 retrain: a bare "CUDA error: out of memory" right after gen_chi_block's mask
+    warning, i.e. inside the batch but outside the simulator.
+
+    THE TRAINING BATCH IS THE RIGHT RETRY UNIT, and right in a way that lowering run_size is not. The
+    batch's (t_scale_k, T_k) pair is an INDEX into the pre-filtered Sobol array, not a draw, and every
+    row in the batch shares it -- as do the probe count, the multipliers and the durations, all drawn
+    once above the seam. So re-running the batch as two half-width halves yields the SAME rows, in the
+    SAME stratum, with the SAME probe set; the concatenation is the batch that would have been
+    produced, differing only in that the SDE noise was drawn in smaller blocks (distributionally
+    identical, not bit-reproducible -- the same licence _gen_obs_retry already takes). Shrinking
+    run_size globally instead would change the NUMBER of (t_scale, T) strata in the run, which is a
+    change to the training DISTRIBUTION rather than to its memory profile.
+
+    THE FLOOR IS _MIN_SIM_CHUNK -- the same number the predictive guard and _gen_obs_retry use, so
+    there is one number and one meaning.
+
+    PREFER THE INNER RETRY. A halve here re-runs EVERYTHING for those rows: the spontaneous run, the
+    summary statistics, and all K probe simulations -- about a dozen simulations plus a full gen_stats
+    at K=11, against the inner retry's one. Do NOT lower _MIN_SIM_CHUNK to make this fire more often.
+
+    NOT SHORT-CIRCUITED when the inner retry floored out, which is deliberate rather than an
+    oversight: an inner OOM even at 256 rows can be caused entirely by memory held OUTSIDE the
+    simulator (idx_c, x_spont_dim and the current probe's force are all live across the K loop), and
+    halving the rows sheds all of it. So the outer halve genuinely can rescue what the inner could not.
+
+    ``fn`` must be a pure function of its row range. It may read batch-level state, but it must not
+    consume randomness anything OUTSIDE the batch depends on. _subset_probe_rows does draw from
+    chi_gen inside fn -- harmless, because torch's CPU generator consumes one word per element, so
+    rand(n) and two rand(n/2) leave the stream in the same position; only the within-batch pairing of
+    draws to rows is re-permuted, which is a re-permutation of an iid draw.
+    """
+    n_rows = hi - lo
+    try:
+        return fn(lo, hi)
+    except RuntimeError as err:
+        # RuntimeError, NOT Exception -- the same reasoning as _gen_obs_retry: every OOM form derives
+        # from it, and staying this narrow is what keeps streams.WorkerCancelled (a BaseException, on
+        # purpose) sailing through to Worker.run rather than becoming a retry storm on every cancel.
+        if n_rows < 2 * _MIN_SIM_CHUNK or not _is_oom(err):
+            raise                    # a real failure, or the floor: fail loudly, traceback intact
+        note = f"{type(err).__name__}: {str(err).splitlines()[0][:200]}"
+        # Feed the learned budget even though this OOM may not have come from a simulator allocation.
+        # It is still literally true that a block of this WIDTH at this GEOMETRY did not fit, and that
+        # is the currency _max_sim_batch plans in -- so the next plan is wiser for the right reason.
+        _budget_note_oom(n_rows * per_row_elements)
+
+    # OUTSIDE THE HANDLER, AND EVEN MORE LOAD-BEARING HERE THAN IN _gen_obs_retry. `err` owns a
+    # traceback owning every frame between here and the failure -- fn's own (force0, x_spont_dim),
+    # gen_chi_raw's (idx_c, this probe's force, the accumulating chis list), gen_obs' and the
+    # solver's. That is several GiB in the chi path at run_size=2048. Calling empty_cache() while
+    # `err` is still bound frees NONE of it, the retry OOMs again at half the width, and the whole
+    # mechanism reads as "the retry does not work". Python drops `err` at the end of the except
+    # clause; only then is a release worth asking for. Hence `note` is a STRING.
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        # The cuFFT plan cache lives OUTSIDE the caching allocator, so empty_cache() cannot touch it.
+        # gen_stats mints several plan signatures per batch and chi.peak_freq another; at the one
+        # moment we are provably short they are the cheapest few hundred MB on the card, and every
+        # plan is re-mintable.
+        torch.backends.cuda.cufft_plan_cache.clear()
+
+    half = n_rows // 2
+    free = (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free (optimistic on "
+            f"Windows -- see the learned-budget note)") if device.type == "cuda" else ""
+    print(f"{_batch_tag()}: OOM with {n_rows} rows OUTSIDE the simulator retry; re-running this batch "
+          f"in halves of {half}{free}. Original: {note}", file=sys.stderr, flush=True)
+
+    parts = []
+    for s in range(lo, hi, half):
+        parts.append(_rows_with_oom_retry(fn, s, min(s + half, hi),
+                                          per_row_elements=per_row_elements, device=device))
+    # Cheap by construction: the parts are the CPU-side conditioning rows, (rows, 42 + 6*K_PAD)
+    # float32 -- under a megabyte at run_size=2048 -- so this cat is nothing like the device-side one
+    # gen_obs goes out of its way to avoid.
+    return torch.cat(parts, dim=0)
 
 
 def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
-                 state_dep_drift, batch_size, var_idx, dtype, device):
-    """One un-split simulation batch. Split planning lives in gen_obs; this is the body."""
+                 state_dep_drift, batch_size, var_idx, dtype, device, out=None):
+    """One un-split simulation batch. Split planning lives in gen_obs; this is the body.
+
+    ``out``, when given, is the ``(n_out, batch, T')`` DESTINATION these rows belong in -- normally an
+    ``out[:, s:e, :]`` view owned by a splitting caller. Writing into it instead of returning a fresh
+    clone is what makes splitting memory-NEUTRAL rather than memory-POSITIVE; see gen_obs.
+    """
     from core import registry
 
     full_params = params
@@ -423,8 +654,20 @@ def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
     # buffer, so narrowing to the one variable the caller reads is the difference between two
     # n_vars-deep tensors and one. Slicing keeps dim 0, so [0, :, :] means the same thing either way.
     sel = slice(None) if var_idx is None else slice(var_idx, var_idx + 1)
-    obs = sol[sel, 0, :, steady_idx:].clone()
-    del sol
+    src = sol[sel, 0, :, steady_idx:]
+    if out is None:
+        obs = src.clone()            # un-split call: nobody owns a destination, so materialise one
+    else:
+        # THE COPY THAT REPLACES A CLONE, and the whole point of the `out` parameter. A splitting
+        # caller has already reserved the full result, so cloning here would make this chunk resident
+        # TWICE -- once inside `out`'s span, once as the return value -- for the lifetime of the
+        # return. Measured at run_size=2048 / n_fine=280k that double is 2.29/k GiB per chunk, which
+        # at k=2 is 1.15 GiB, and it is exactly what makes a naive "preallocate and drop the cat" a
+        # REGRESSION rather than a fix. `out` is a strided view (contiguous in the last dim,
+        # batch-strided), which copy_ handles as a batch of contiguous row copies -- no staging buffer.
+        out.copy_(src)
+        obs = out
+    del sol, src
     return obs
 
 def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.Tensor,
@@ -796,7 +1039,8 @@ def gen_chi_block(*args, k_pad: int = None, bounds: tuple = None, **kwargs) -> t
     if dropped:
         # Silent attrition is what made the first chi posterior inexplicable. Make it a number.
         warnings.warn(
-            f"chi: {dropped}/{B * K} probes masked (below {config.CHI_MIN_CYCLES} drive cycles, "
+            f"{_batch_tag()}: chi: {dropped}/{B * K} probes masked "
+            f"(below {config.CHI_MIN_CYCLES} drive cycles, "
             f"at/above Nyquist, out of band, or a non-finite lock-in).", stacklevel=2)
     return block, mask
 
@@ -998,7 +1242,9 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     batch_t_scales = valid_t_scales[:n_runs]
     batch_Ts = valid_Ts[:n_runs]
 
-    with torch.no_grad():
+    global _BATCH_TAG
+    try:
+      with torch.no_grad():
         for batch_k in tqdm(range(n_runs), desc="Generating training data", leave=False):
             # --- Batch-level scale and duration (unchanged) ---
             t_scale_k = batch_t_scales[batch_k].item()
@@ -1010,6 +1256,13 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             n_fine_total = steady_idx + N_points_k * subsample_factor
             t_fine = t[:n_fine_total]
             n_segs_k = max(1, math.ceil(n_fine_total / CHUNK_LEN))
+            # Everything that determines this batch's memory footprint, in one string, set BEFORE the
+            # first allocation that could fail. K is deliberately absent: the probe count is drawn
+            # below, and the tag has to exist before force0 -- the largest single allocation in a chi
+            # batch and a thoroughly plausible place to die.
+            _BATCH_TAG = (f"training batch {batch_k + 1}/{n_runs} "
+                          f"[t_scale={t_scale_k:.4g}, T={T_k:.4g}, n_fine={n_fine_total}, "
+                          f"N_points={N_points_k}, rows={run_size}]")
 
             # 1. Sample inferred params. If theta_transform given, sampling_dist is latent.
             curr_thetas_raw = sampling_dist.sample((run_size,)).to(device=device, dtype=dtype)
@@ -1043,32 +1296,21 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             else:
                 curr_thetas_latent = curr_thetas_phys
 
-            x_scale  = curr_thetas_rescale[:, rescale_idx["x_scale"]].unsqueeze(1)
-            x_offset = curr_thetas_rescale[:, rescale_idx["x_offset"]].unsqueeze(1) if "x_offset" in rescale_idx else 0.0
-
+            # --- THE PROBE SET FOR THIS BATCH, drawn ABOVE the retry seam ---
+            # K is drawn per batch and the placement is stratified-jittered, so the encoder is trained
+            # ACROSS probe counts and frequencies rather than memorising one grid. A fixed grid would
+            # leave `u` taking only K distinct values in the entire training set, and an
+            # experimentalist's 0.07x recording would then be an out-of-distribution input to an MLP
+            # that extrapolates linearly and confidently.
+            #
+            # HOISTED OUT OF THE chi BRANCH so the two halves of a retried batch share one probe set.
+            # That is what makes a halve a REPARTITION rather than a resample: the halves differ only
+            # in SDE noise, so their concatenation is the batch that would have been produced. It also
+            # keeps chi_gen advancing by a FIXED amount per batch, so a seeded run reproduces whether
+            # or not the card happened to be short -- otherwise the training distribution would be a
+            # function of what the desktop was doing. RNG-neutral: these three already preceded
+            # _subset_probe_rows within a batch, so the stream is byte-identical to before the hoist.
             if chi_mode:
-                # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
-                # Conditioning [S(41, Group G zeroed) | log(T) | chi(3K)] -- chi replaces the forcing block.
-                force0 = torch.zeros((run_size, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
-                x_nd_spont_fine = gen_obs(
-                    model=model, params=curr_thetas_nd, t=t_fine, inits=inits,
-                    force=force0, n_segs=n_segs_k, steady_idx=steady_idx,
-                    fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                    batch_size=run_size, var_idx=0, dtype=dtype, device=device,
-                )[0, :, :]
-                x_spont_dim = helpers.rescale(
-                    x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                del x_nd_spont_fine, force0
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
-                                               device=device, spontaneous_only=True)   # (run, 41), G zeroed
-                # --- THE PROBE SET FOR THIS BATCH ---
-                # K is drawn per batch and the placement is stratified-jittered, so the encoder is
-                # trained ACROSS probe counts and frequencies rather than memorising one grid. A fixed
-                # grid would leave `u` taking only K distinct values in the entire training set, and an
-                # experimentalist's 0.07x recording would then be an out-of-distribution input to an
-                # MLP that extrapolates linearly and confidently.
                 k_b = (chi_k_fixed if chi_k_fixed is not None else
                        int(torch.randint(config.CHI_K_MIN_TRAIN, chi_k_pad + 1, (1,),
                                          generator=chi_gen).item()))
@@ -1080,106 +1322,166 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                                     torch.ones(k_b),
                                     torch.exp(torch.rand(k_b, generator=chi_gen)
                                               * (math.log(1.0) - math.log(0.3)) + math.log(0.3)))
-                chi_block, chi_mask = gen_chi_block(
-                    model, curr_thetas_nd, curr_thetas_rescale, x_spont_dim, t_fine, inits, rescale_idx,
-                    n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
-                    b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
-                    k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
-                    max_cycles=chi_max_cycles,
-                    # THE ONLY adapt_placement=True in the codebase. Training is the one path that
-                    # gets to choose where it probes; every other caller is reproducing an experiment
-                    # whose frequencies are already fixed.
-                    adapt_placement=True,
-                    dtype=dtype, device=device)
-                # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
-                # rows that keep the probe -- and it is the only way to decouple the probe count from
-                # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
-                # drive set and different subsets, which is a direct regulariser toward K-agnosticism.
-                #   SKIPPED under chi_k_fixed: subsetting is exactly what makes the per-row count
-                #   vary, so leaving it on would silently turn a "K = 6" calibration stratum into a
-                #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
-                if chi_k_fixed is None:
-                    chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
-                log_T_k_tensor = torch.full((run_size, 1), math.log(T_k), dtype=dtype)
-                training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
-                training_data.append(training_stats)
-                del x_spont_dim
-            elif spontaneous_only:
-                # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
-                force = torch.zeros((run_size, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
-                x_nd_spont_fine = gen_obs(
-                    model=model, params=curr_thetas_nd, t=t_fine, inits=inits,
-                    force=force, n_segs=n_segs_k, steady_idx=steady_idx,
-                    fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                    batch_size=run_size, var_idx=0, dtype=dtype, device=device,
-                )[0, :, :]
-                # Rescale STRAIGHT off the strided view: helpers.rescale materialises a fresh
-                # contiguous tensor, so nothing keeps a reference to the fine buffer and the `del`
-                # genuinely releases it. Binding the view to a name first (as this used to) pins the
-                # whole (run_size, n_fine) storage until that name dies -- the `del` frees nothing.
-                x_spont_dim = helpers.rescale(
-                    x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                del x_nd_spont_fine, force
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
-                                               device=device, spontaneous_only=True)
-                    log_T_k_tensor = torch.full((run_size, 1), math.log(T_k), dtype=dtype)
-                    # Conditioning [S | log(T)] -- no forcing block (forcing_dim = 0).
-                    training_stats = torch.cat((training_stats, log_T_k_tensor), dim=-1)
-                    training_data.append(training_stats)
-            else:
-                # 2. Build nondimensional force tensor at fine resolution (uses PHYSICAL rescale)
-                force = build_nondim_sin_force_tensor(
-                    curr_thetas_forcing, t_fine, curr_thetas_rescale, forcing_idx, rescale_idx
-                )
 
-                # 3. Simulate the FORCED run (drive on) -> Group G
-                x_nd_fine = gen_obs(
-                    model=model, params=curr_thetas_nd, t=t_fine, inits=inits,
-                    force=force, n_segs=n_segs_k, steady_idx=steady_idx,
-                    fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                    batch_size=run_size, var_idx=0, dtype=dtype, device=device,
-                )[0, :, :]
-                # 4a. Redimensionalize the forced run IMMEDIATELY (uses PHYSICAL rescale).
-                # Order matters: helpers.rescale materialises a fresh contiguous tensor, so the `del`
-                # below actually releases the fine buffer. Holding the strided VIEW in a name instead
-                # (as this used to) pinned the entire (run_size, n_fine) storage right across the
-                # second gen_obs call below -- two full fine trajectories resident where one
-                # subsampled slice was needed, several GB at run_size=2048. That also made
-                # _max_sim_batch split batches it did not need to, and k chunks cost k x wall-clock.
-                x_dim = helpers.rescale(
-                    x_nd_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                del x_nd_fine
+            def _rows(lo: int, hi: int):
+                """This batch's rows [lo, hi) -> (hi-lo, W) CPU conditioning tensor.
 
-                # 3b. Simulate the SPONTANEOUS run (zero force) -> Groups A-F
-                x_nd_spont_fine = gen_obs(
-                    model=model, params=curr_thetas_nd, t=t_fine, inits=inits,
-                    force=torch.zeros_like(force), n_segs=n_segs_k, steady_idx=steady_idx,
-                    fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                    batch_size=run_size, var_idx=0, dtype=dtype, device=device,
-                )[0, :, :]
-                # 4b. Same treatment for the spontaneous run.
-                x_spont_dim = helpers.rescale(
-                    x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                del x_nd_spont_fine, force
+                A CLOSURE, not a module-level function, because the body reads about thirty names from
+                this scope -- the geometry, the thetas, the probe set, every mode flag. A thirty-
+                argument function is a standing invitation to a call-site drift bug in code where a
+                wrong subsample_factor produces a PLAUSIBLE training row rather than a crash. The
+                logic worth testing -- the halving, the floor, the cancel pass-through -- lives in
+                _rows_with_oom_retry, which is module-level and takes a fake fn. Called synchronously
+                within this iteration and never stored, so the usual late-binding hazard of defining a
+                closure in a loop does not apply.
+                """
+                n = hi - lo
+                resc = curr_thetas_rescale[lo:hi]
+                nd = curr_thetas_nd[lo:hi]
+                init_rows = inits[lo:hi]
+                # None in the chi and spontaneous branches, where there is no drive to slice.
+                fparams = None if curr_thetas_forcing is None else curr_thetas_forcing[lo:hi]
+                # Derived HERE rather than at batch level so the "this model has no x_offset" case
+                # needs no branch: slicing the SOURCE works for both, slicing the float 0.0 does not.
+                x_scale  = resc[:, rescale_idx["x_scale"]].unsqueeze(1)
+                x_offset = (resc[:, rescale_idx["x_offset"]].unsqueeze(1)
+                            if "x_offset" in rescale_idx else 0.0)
 
-                # 5. Stats (A-F from spontaneous, G from forced) + conditioning
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    drive_amp = curr_thetas_forcing[:, forcing_idx["amp"]].cpu()
-                    drive_freq = curr_thetas_forcing[:, forcing_idx["freq"]].cpu()
-                    drive_phase = curr_thetas_forcing[:, forcing_idx["phase"]].cpu()
-                    training_stats = gen_stats(x_spont_dim.cpu(), x_dim.cpu(), dt_exp, drive_amp, drive_freq, drive_phase, device=device)
-                    log_T_k_tensor = torch.full((run_size, 1), math.log(T_k), dtype=dtype)
-                    # Canonical conditioning layout: [S(x_dim) | log(T) | theta_force].
-                    # log(T) rides with the summary pathway; theta_force is a separate block.
-                    # The embedding split in build_posterior depends on this exact order, so
-                    # keep it in sync with generate_observations / validate / infer_from_experiment.
-                    training_stats = torch.cat((training_stats, log_T_k_tensor, curr_thetas_forcing.cpu()), dim=-1)
-                    training_data.append(training_stats)
+                if chi_mode:
+                    # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
+                    # Conditioning [S(41, Group G zeroed) | log(T) | chi(3K)] -- chi replaces the forcing block.
+                    force0 = torch.zeros((n, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                    x_nd_spont_fine = gen_obs(
+                        model=model, params=nd, t=t_fine, inits=init_rows,
+                        force=force0, n_segs=n_segs_k, steady_idx=steady_idx,
+                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+                        batch_size=n, var_idx=0, dtype=dtype, device=device,
+                    )[0, :, :]
+                    x_spont_dim = helpers.rescale(
+                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+                    del x_nd_spont_fine, force0
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
+                                                   device=device, spontaneous_only=True)   # (run, 41), G zeroed
+                    chi_block, chi_mask = gen_chi_block(
+                        # init_rows, NOT inits: this one is passed POSITIONALLY, which is exactly how
+                        # it survived the row-slicing sweep -- gen_obs' calls name it `inits=` and were
+                        # caught. It surfaced as "Batch size: 2 cannot differ from dim 0 of parameters
+                        # tensor", i.e. loudly, only because the simulator validates the two against
+                        # each other; a tensor that happened to broadcast would have gone unnoticed.
+                        model, nd, resc, x_spont_dim, t_fine, init_rows, rescale_idx,
+                        n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
+                        b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
+                        k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
+                        max_cycles=chi_max_cycles,
+                        # THE ONLY adapt_placement=True in the codebase. Training is the one path that
+                        # gets to choose where it probes; every other caller is reproducing an experiment
+                        # whose frequencies are already fixed.
+                        adapt_placement=True,
+                        dtype=dtype, device=device)
+                    # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
+                    # rows that keep the probe -- and it is the only way to decouple the probe count from
+                    # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
+                    # drive set and different subsets, which is a direct regulariser toward K-agnosticism.
+                    #   SKIPPED under chi_k_fixed: subsetting is exactly what makes the per-row count
+                    #   vary, so leaving it on would silently turn a "K = 6" calibration stratum into a
+                    #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
+                    if chi_k_fixed is None:
+                        chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
+                    log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+                    training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
+                    return training_stats
+                    del x_spont_dim
+                elif spontaneous_only:
+                    # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
+                    force = torch.zeros((n, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                    x_nd_spont_fine = gen_obs(
+                        model=model, params=nd, t=t_fine, inits=init_rows,
+                        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
+                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+                        batch_size=n, var_idx=0, dtype=dtype, device=device,
+                    )[0, :, :]
+                    # Rescale STRAIGHT off the strided view: helpers.rescale materialises a fresh
+                    # contiguous tensor, so nothing keeps a reference to the fine buffer and the `del`
+                    # genuinely releases it. Binding the view to a name first (as this used to) pins the
+                    # whole (n, n_fine) storage until that name dies -- the `del` frees nothing.
+                    x_spont_dim = helpers.rescale(
+                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+                    del x_nd_spont_fine, force
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
+                                                   device=device, spontaneous_only=True)
+                        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+                        # Conditioning [S | log(T)] -- no forcing block (forcing_dim = 0).
+                        training_stats = torch.cat((training_stats, log_T_k_tensor), dim=-1)
+                        return training_stats
+                else:
+                    # 2. Build nondimensional force tensor at fine resolution (uses PHYSICAL rescale)
+                    force = build_nondim_sin_force_tensor(
+                        fparams, t_fine, resc, forcing_idx, rescale_idx
+                    )
 
-            # 6. Collect LATENT targets (not physical)
+                    # 3. Simulate the FORCED run (drive on) -> Group G
+                    x_nd_fine = gen_obs(
+                        model=model, params=nd, t=t_fine, inits=init_rows,
+                        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
+                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+                        batch_size=n, var_idx=0, dtype=dtype, device=device,
+                    )[0, :, :]
+                    # 4a. Redimensionalize the forced run IMMEDIATELY (uses PHYSICAL rescale).
+                    # Order matters: helpers.rescale materialises a fresh contiguous tensor, so the `del`
+                    # below actually releases the fine buffer. Holding the strided VIEW in a name instead
+                    # (as this used to) pinned the entire (n, n_fine) storage right across the
+                    # second gen_obs call below -- two full fine trajectories resident where one
+                    # subsampled slice was needed, several GB at n=2048. That also made
+                    # _max_sim_batch split batches it did not need to, and k chunks cost k x wall-clock.
+                    x_dim = helpers.rescale(
+                        x_nd_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+                    del x_nd_fine
+
+                    # 3b. Simulate the SPONTANEOUS run (zero force) -> Groups A-F
+                    x_nd_spont_fine = gen_obs(
+                        model=model, params=nd, t=t_fine, inits=init_rows,
+                        force=torch.zeros_like(force), n_segs=n_segs_k, steady_idx=steady_idx,
+                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+                        batch_size=n, var_idx=0, dtype=dtype, device=device,
+                    )[0, :, :]
+                    # 4b. Same treatment for the spontaneous run.
+                    x_spont_dim = helpers.rescale(
+                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+                    del x_nd_spont_fine, force
+
+                    # 5. Stats (A-F from spontaneous, G from forced) + conditioning
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        drive_amp = fparams[:, forcing_idx["amp"]].cpu()
+                        drive_freq = fparams[:, forcing_idx["freq"]].cpu()
+                        drive_phase = fparams[:, forcing_idx["phase"]].cpu()
+                        training_stats = gen_stats(x_spont_dim.cpu(), x_dim.cpu(), dt_exp, drive_amp, drive_freq, drive_phase, device=device)
+                        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+                        # Canonical conditioning layout: [S(x_dim) | log(T) | theta_force].
+                        # log(T) rides with the summary pathway; theta_force is a separate block.
+                        # The embedding split in build_posterior depends on this exact order, so
+                        # keep it in sync with generate_observations / validate / infer_from_experiment.
+                        training_stats = torch.cat((training_stats, log_T_k_tensor, fparams.cpu()), dim=-1)
+                        return training_stats
+
+            # Per-ROW element cost at THIS geometry, in the same currency _max_sim_batch plans in, so
+            # an OOM here tightens the SAME learned cap the predictive guard reads rather than
+            # inventing a second, incompatible notion of "too big".
+            _seg = min(n_fine_total, CHUNK_LEN)
+            _n_keep = max(0, n_fine_total - steady_idx)              # var_idx=0 on every path here
+            _per_row = (inits.shape[-1] * n_fine_total + n_force_ch * n_fine_total
+                        + max(inits.shape[-1] * _seg, _n_keep))
+            training_data.append(_rows_with_oom_retry(
+                _rows, 0, run_size, per_row_elements=_per_row, device=device))
+
+            # 6. Collect LATENT targets (not physical). OUTSIDE the retry on purpose: the targets are
+            # computed before any simulation and are already at full width, so a retry neither
+            # recomputes nor re-draws them -- the halves REPARTITION the batch's rows, they do not
+            # resample it.
             thetas.append(curr_thetas_latent.cpu())
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -1193,6 +1495,16 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 # nothing (the intra-batch reuse across gen_stats' sub-batches already happened)
                 # and is preferable to shrinking cufft_plan_cache.max_size, which WOULD thrash it.
                 torch.backends.cuda.cufft_plan_cache.clear()
+            # Batch 0 gives an immediate baseline (so a run that is doomed says so in the first
+            # minute rather than the fifth hour); after that, one line per _MEM_LOG_EVERY batches.
+            if batch_k == 0 or (batch_k + 1) % _MEM_LOG_EVERY == 0:
+                _log_memory(device, _BATCH_TAG)
+
+    finally:
+        # Cleared however we leave -- return, OOM, or a cooperative cancel. A stale tag would make the
+        # NEXT failure anywhere in the process claim a batch that finished hours ago, which is worse
+        # than no tag at all.
+        _BATCH_TAG = ""
 
     training_data_tensor = torch.cat(training_data, dim=0)
     thetas_tensor = torch.cat(thetas, dim=0)
@@ -1319,7 +1631,21 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             embedding_net.fit_standardization(data)
             assert embedding_net.standardization_fitted, "chi standardization silently did not fit"
 
-        infer.append_simulations(thetas, data, proposal=proposal)
+        # data_device="cpu": sbi otherwise defaults it to the TRAINING device (npe_base.py:174-175)
+        # and moves the whole conditioning tensor onto the GPU -- 10.24M x 114 float32 = 4.35 GiB
+        # resident, an 8.7 GiB transient for the `x = x[is_valid_x]` filter, two (10.24M,) bool masks
+        # from handle_invalid_x, and later a ~3.9 GiB gather when it slices the training split. All of
+        # that on the same card that has to hold the flow, and all of it AFTER a multi-day generation
+        # run that is not checkpointed. The data is ALREADY on the CPU here (gen_training_data appends
+        # .cpu() tensors), so this also silences validate_theta_and_x's "Moving x to the data_device"
+        # warning, which describes a 4.35 GiB copy nobody asked for.
+        #
+        # Training does not care: sbi's loop moves each minibatch to the training device itself, so a
+        # CPU-resident dataset costs one host-to-device copy of (training_batch_size, 114) float32 --
+        # tens of KB -- against a flow forward+backward that dominates it by orders of magnitude. It
+        # hands 4.35 GiB of VRAM back to the flow, which is a straight win.
+        with _capped_zscore_check():
+            infer.append_simulations(thetas, data, proposal=proposal, data_device="cpu")
         density_estimator = infer.train(
             training_batch_size=batch_size, learning_rate=learning_rate,
             stop_after_epochs=stop_after_epochs, max_num_epochs=max_num_epochs,

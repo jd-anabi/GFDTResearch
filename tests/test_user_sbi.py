@@ -1239,6 +1239,197 @@ def test_the_memory_budget_learns_from_an_oom_and_recovers():
         pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs = saved_cap, saved_clean
 
 
+def _oom_at(width, seen):
+    """A fake `fn(lo, hi)` for _rows_with_oom_retry: OOMs at or above `width`, else returns its rows.
+
+    Raises the realistic shape -- a torch.AcceleratorError (the RAW DRIVER form, which is what both
+    the 2026-08-10 and 2026-08-11 retrains actually produced) wrapped in SimulationError -- so the
+    chain walk in _is_oom is exercised rather than a convenient stub.
+    """
+    from core.Simulator.simulator import SimulationError
+
+    def fn(lo, hi):
+        seen.append((lo, hi))
+        if hi - lo >= width:
+            try:
+                raise torch.AcceleratorError("CUDA error: out of memory")
+            except RuntimeError as e:
+                raise SimulationError("chi batch failed: AcceleratorError: CUDA error: out of "
+                                      "memory") from e
+        return torch.arange(lo, hi, dtype=torch.float32).unsqueeze(1).repeat(1, 3)
+    return fn
+
+
+def test_batch_level_retry_halves_the_rows_and_reconstructs_the_batch():
+    """The OUTER retry, for OOMs that never reach the simulator-level one.
+
+    This is the gap that killed the 2026-08-11 retrain: a bare "CUDA error: out of memory" right
+    after gen_chi_block's mask warning -- inside the batch, outside _gen_obs_one. Everything in a chi
+    batch that is NOT the solver is unguarded and linear in rows (the zero-drive tensor, the per-probe
+    force rebuilt K times, the (rows, N_points) int64 gather index, x_spont_dim, gen_stats), so
+    halving the ROWS is what sheds them.
+
+    Reconstruction is the load-bearing assertion, not the ladder: a retried batch must be the batch
+    that would have been produced, in the same order, or the training set silently acquires a
+    duplicated or reordered stratum.
+    """
+    seen = []
+    saved = pipeline_mod._MIN_SIM_CHUNK
+    try:
+        pipeline_mod._MIN_SIM_CHUNK = 1
+        out = pipeline_mod._rows_with_oom_retry(
+            _oom_at(4, seen), 0, 8, per_row_elements=10, device=torch.device("cpu"))
+    finally:
+        pipeline_mod._MIN_SIM_CHUNK = saved
+    assert seen == [(0, 8), (0, 4), (0, 2), (2, 4), (4, 8), (4, 6), (6, 8)], seen
+    assert torch.equal(out, torch.arange(0, 8, dtype=torch.float32).unsqueeze(1).repeat(1, 3)), \
+        "a retried batch must reconstruct the unsplit batch exactly, in order"
+
+
+def test_batch_level_retry_stops_at_the_floor_and_lets_a_cancel_through():
+    """Bounded, and narrow. Two failure modes in one test because they share a harness.
+
+    FLOOR: at _MIN_SIM_CHUNK it must re-raise the real error with __cause__ intact rather than grind
+    a multi-thousand-batch round out a handful of rows at a time.
+
+    CANCEL: WorkerCancelled derives from BaseException precisely so it slips past `except
+    RuntimeError`. If the outer retry swallowed it, a GUI cancel would become a retry storm that
+    re-runs the batch at ever-smaller widths instead of stopping.
+    """
+    from core.Simulator.simulator import SimulationError
+    from core.gui.streams import WorkerCancelled
+
+    seen, saved = [], pipeline_mod._MIN_SIM_CHUNK
+    try:
+        pipeline_mod._MIN_SIM_CHUNK = 2
+        try:
+            pipeline_mod._rows_with_oom_retry(_oom_at(0, seen), 0, 8, per_row_elements=10,
+                                              device=torch.device("cpu"))
+            raise AssertionError("an unrecoverable OOM must still raise")
+        except SimulationError as e:
+            assert isinstance(e.__cause__, torch.AcceleratorError), repr(e.__cause__)
+    finally:
+        pipeline_mod._MIN_SIM_CHUNK = saved
+    assert seen == [(0, 8), (0, 4), (0, 2)], f"halving must stop at the floor, got {seen}"
+
+    calls = []
+
+    def cancelling(lo, hi):
+        calls.append((lo, hi))
+        raise WorkerCancelled()
+    try:
+        pipeline_mod._rows_with_oom_retry(cancelling, 0, 8, per_row_elements=10,
+                                          device=torch.device("cpu"))
+        raise AssertionError("WorkerCancelled was swallowed; the GUI cancel path is broken")
+    except WorkerCancelled:
+        pass
+    assert calls == [(0, 8)], f"a cancel must not be retried, but the batch was re-run: {calls}"
+
+
+def test_gen_training_data_recovers_from_an_oom_outside_the_simulator():
+    """The WIRING of the batch-level retry, end to end through a real gen_training_data call.
+
+    The driver is tested separately with a fake fn; this is the half where a bug would actually live,
+    because the closure has to slice ~30 batch-level names down to its row range and any one of them
+    left at full width breaks the batch. That is not hypothetical: `inits` is passed POSITIONALLY to
+    gen_chi_block, so it survived the keyword-based slicing sweep and surfaced here as "Batch size: 2
+    cannot differ from dim 0 of parameters tensor" -- loudly, but only because the simulator happens
+    to cross-validate those two. A name that broadcast instead would have produced plausible, wrong
+    training rows.
+
+    gen_stats is the thing patched to fail because it sits INSIDE the closure and OUTSIDE
+    _gen_obs_one, which is precisely the gap the 2026-08-11 retrain died in.
+    """
+    from core.Simulator.simulator import SimulationError
+    model = "NADROWSKI"
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
+                              registry.state_dep_drift(model),
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+
+    class _FixedPrior:
+        def __init__(self, theta): self.theta = theta
+        def sample(self, shape): return self.theta.expand(shape[0], -1).clone()
+
+    n_grid, steady_idx, run_size = 12_000, 500, 4
+    t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
+    real_stats, saved_floor = pipeline_mod.gen_stats, pipeline_mod._MIN_SIM_CHUNK
+
+    def flaky(x_spont, *a, **k):
+        if x_spont.shape[0] > run_size // 2:
+            try:
+                raise torch.AcceleratorError("CUDA error: out of memory")
+            except RuntimeError as e:
+                raise SimulationError("gen_stats: AcceleratorError: CUDA error: out of memory") from e
+        return real_stats(x_spont, *a, **k)
+
+    try:
+        pipeline_mod.gen_stats, pipeline_mod._MIN_SIM_CHUNK = flaky, 1
+        data, thetas = pipeline_mod.gen_training_data(
+            model, _FixedPrior(cfg.ground_truth_tensor.reshape(1, -1)), None, t,
+            run_size=run_size, n_runs=2, steady_idx=steady_idx, dt_nd_min=cfg.dt_nd_min,
+            nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
+            dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
+            t_scale_bounds=cfg.t_scale_bounds, state_dep_drift=cfg.state_dep_drift,
+            chi_mode=True, chi_f0=config.CHI_F0, chi_freq_bounds=config.CHI_FREQ_BOUNDS,
+            chi_k_pad=4, chi_max_cycles=config.CHI_MAX_CYCLES,
+            n_vars=cfg.inits_tensor.shape[-1], dtype=cfg.hw.dtype, device=cfg.hw.device)
+    finally:
+        pipeline_mod.gen_stats, pipeline_mod._MIN_SIM_CHUNK = real_stats, saved_floor
+
+    assert data.shape[0] == 2 * run_size, f"the retry lost or duplicated rows: {tuple(data.shape)}"
+    assert thetas.shape[0] == 2 * run_size, tuple(thetas.shape)
+    assert torch.isfinite(data).all(), "a retried batch produced non-finite conditioning"
+
+
+def test_zscore_check_is_capped_and_reaches_sbis_own_binding():
+    """sbi calls warn_if_zscoring_changes_data UNCONDITIONALLY on the full training tensor.
+
+    At the retrain's size (10.24M x 114 float32) that is torch.unique(x, dim=0), then a full z-score,
+    then torch.unique AGAIN -- >= 13 GiB, on the GPU, at the END of a multi-day generation run that is
+    not checkpointed. Capping it to a strided subsample keeps the diagnostic (it is a PROPORTION test
+    with a 10% tolerance) at a fraction of the cost.
+
+    The patch has to reach npe_base's OWN binding: it does `from sbi.utils import
+    warn_if_zscoring_changes_data`, so its call resolves against npe_base's globals and patching
+    sbi.utils.sbiutils alone would change nothing. That is the half of this most likely to rot -- sbi
+    has already moved the module once -- so it is asserted directly.
+    """
+    import sbi.utils.sbiutils as sbiutils
+    from sbi.inference.trainers.npe import npe_base
+
+    original = sbiutils.warn_if_zscoring_changes_data
+    assert npe_base.warn_if_zscoring_changes_data is original, \
+        "npe_base no longer holds its own binding; re-check how the patch must reach it"
+
+    # Stand a recorder in for the real function in BOTH modules before entering the block. Both,
+    # because the contextmanager finds its targets by object IDENTITY against sbiutils' current
+    # binding -- so a recorder installed in only one place would make the scan miss the other and the
+    # test would fail for its own reasons rather than the code's.
+    seen = []
+    recorder = lambda x, *a, **k: seen.append(x.shape[0])            # noqa: E731
+    sbiutils.warn_if_zscoring_changes_data = recorder
+    npe_base.warn_if_zscoring_changes_data = recorder
+    try:
+        with pipeline_mod._capped_zscore_check(max_rows=1000):
+            assert npe_base.warn_if_zscoring_changes_data is not original, \
+                "the patch did not reach npe_base's binding -- it would be a no-op in the real call"
+            npe_base.warn_if_zscoring_changes_data(torch.zeros(10_000, 4))
+        assert seen == [1000], f"expected a 1000-row subsample, got {seen}"
+        # Restored even when the block raises -- otherwise one failed run leaves sbi monkeypatched
+        # for every later panel and script in the process.
+        try:
+            with pipeline_mod._capped_zscore_check(max_rows=1000):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert npe_base.warn_if_zscoring_changes_data is sbiutils.warn_if_zscoring_changes_data
+    finally:
+        sbiutils.warn_if_zscoring_changes_data = original
+        npe_base.warn_if_zscoring_changes_data = original
+
+
 def test_split_gen_obs_concatenates_correctly():
     """When the guard does split, gen_obs must stitch the chunks back into one batch -- including a
     ragged final chunk. Forced on CPU (where the guard never fires on its own) by patching the
