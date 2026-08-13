@@ -1,10 +1,62 @@
 import os
 import re
+import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import torch
+
+
+def atomic_torch_save(obj, path, *, retries: int = 3, backoff_s: float = 0.1) -> Path:
+    """``torch.save`` that a crash cannot leave half-written.
+
+    Writes a sibling ``<name>.tmp``, fsyncs it, then ``os.replace``s it over the destination -- which
+    is atomic on POSIX and on Windows (MoveFileEx with REPLACE_EXISTING). A reader therefore sees
+    either the whole old file or the whole new one, never a truncated mixture. The temp file is a
+    SIBLING, not a file in the system temp dir, because os.replace is only atomic within one volume.
+
+    fsync before the rename, not after, is the load-bearing order: the rename can be durable while the
+    bytes it points at are still in the page cache, which is exactly how a power cut produces a file
+    that exists, has the right size, and is full of zeros.
+
+    :param retries: os.replace attempts on PermissionError. Windows-specific: a virus scanner or an
+                    Explorer preview holding the destination open makes the rename fail transiently,
+                    and a multi-day run must not die on that.
+
+    Added for the training checkpoint (C-11), which rewrites its state file every N batches and so
+    turns "non-atomic torch.save against a cancel" from a catalogued low-priority risk into a real
+    one. Deliberately not retrofitted onto save_posterior_artifacts / save_prior_artifacts in the same
+    change -- those are one-shot end-of-run writes and are their own (already catalogued) item.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(tmp, "wb") as fh:
+            torch.save(obj, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        # Clean up the partial temp file. It is harmless (nothing ever reads a .tmp) but a checkpoint
+        # writes every N batches, so a recurring failure would otherwise leave one per attempt beside
+        # the file it failed to replace -- noise exactly where someone is trying to diagnose a
+        # failing run. The original exception is re-raised untouched.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    for attempt in range(retries):
+        try:
+            os.replace(tmp, path)
+            return path
+        except PermissionError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(backoff_s * (attempt + 1))
+    return path                                          # unreachable; keeps the return type honest
 
 # --- Regex Definitions ---
 # Float Value (Scientific Notation)

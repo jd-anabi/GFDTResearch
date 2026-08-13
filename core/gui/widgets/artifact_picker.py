@@ -14,7 +14,13 @@ from core.gui import icons
 
 
 class ArtifactPicker(QWidget):
-    NEW_LABEL = "➕  (from scratch)"
+    # Plain ASCII, deliberately. This is a combo ITEM label, not a button, so icons.apply_icon cannot
+    # reach it -- that helper sets a widget's font family, and a QComboBox item is not a widget. The
+    # alternative, a QIcon rendered from the icon font, would be the one place in the app carrying a
+    # baked-in colour that does NOT follow a theme flip (icons.py's opening note is that rendering
+    # icons as TEXT is what makes them recolour for free). It used to be "➕", a heavy-plus emoji whose
+    # coverage and colour vary per font -- exactly the quirk the icon font was introduced to sidestep.
+    NEW_LABEL = "+  (from scratch)"
 
     def __init__(self, base_path, keep=None, allow_new: bool = False, parent=None):
         super().__init__(parent)

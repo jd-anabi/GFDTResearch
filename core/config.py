@@ -102,6 +102,11 @@ UNITS_PATH   = _ROOT / "Units"
 PRIOR_PATH   = _ROOT / "Priors"
 POSTERIOR_PATH = _ROOT / "Posteriors"
 PLOT_PATH    = _ROOT / "Plots"
+# Training-data checkpoints (C-11). Its OWN directory, not a subfolder of Priors/ or Posteriors/:
+# file_manager.list_dir walks recursively and the GUI's posterior picker keeps any *.pt that is not
+# *.rot.pt, so a checkpoint shard under Posteriors/ would appear in the dropdown as a loadable
+# posterior and fail an isinstance assert on selection.
+CHECKPOINT_PATH = _ROOT / "Checkpoints"
 MODELS_PATH  = _ROOT / "Models"      # user-defined model definitions (see core/registry.py)
 
 # === PARAMETER LABELS (for plotting) ===
@@ -167,6 +172,22 @@ SBC_N_CAL = 2000       # calibration datasets for SBC in validate(). n_cal=1000 
                        # the K=10 repeat study (scripts/sbc_characterize.py) showed mild marginal
                        # miscalibration only surfaces reliably at n_cal>=2000 (KS power grows with n_cal).
 TRAINING_NUM_RUNS = 5000  # number of (t_scale_k, T_k) batches per training round (data budget)
+
+# --- Training-data checkpointing (C-11) -----------------------------------------------------------
+# Write a resumable checkpoint every N training batches; 0 disables it entirely.
+#
+# Deliberately NOT sharing pipeline._MEM_LOG_EVERY (250). That one is a DISPLAY volume, tuned to give
+# ~21 [mem] lines over a 5000-batch run; tying durability to it means a later decision to log less
+# often silently multiplies the crash-loss window. Two meanings, two knobs.
+#
+# The cost model at 5000 x 2048 rows, chi width 114 (+13 latent targets), i.e. the retrain's shape:
+#     per checkpoint   50 x 2048 x 127 x 4 B          ~=  52 MB written, well under 1 s on NVMe
+#     overhead         against 50 batches x ~20 s     ~=  under 0.1 % of wall-clock
+#     expected loss    half an interval on a crash    ~=  8 minutes of simulation
+#     whole run        100 checkpoints                ~=  4.9 GiB on disk
+# Anything from 25 to 100 is defensible; 50 sits in the flat part of both curves. Checkpointing every
+# batch is 100x the write volume to buy back 8 minutes on a multi-day run, which is not a trade.
+TRAINING_CHECKPOINT_EVERY = 50
 
 TRAINING_RUN_SIZE = 0   # CEILING on simulations per training batch; 0 = follow DeviceConfig.batch_size.
                         #

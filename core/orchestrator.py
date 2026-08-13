@@ -22,7 +22,7 @@ from tqdm import tqdm
 from .config import (
     SimConfig, PRIOR_PATH, POSTERIOR_PATH, PLOT_PATH, T_MIN_EXP_S, T_MAX_EXP_S,
     CHUNK_LEN, N_ND_MAX, PPC_BIN_SIZE, SBC_N_CAL, STABILITY_SWEEP_ND_UNITS, TRAINING_NUM_RUNS,
-    PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH, TRAINING_RUN_SIZE,
+    PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH, TRAINING_RUN_SIZE, TRAINING_CHECKPOINT_EVERY,
     DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS, NSF_NUM_BINS,
     TRAINING_NUM_ROUNDS, TRAINING_BATCH_SIZE, TRAINING_LEARNING_RATE,
     TRAINING_STOP_AFTER_EPOCHS, TRAINING_MAX_NUM_EPOCHS, TRAINING_SHOW_SUMMARY, FORCING_SI_UNITS,
@@ -30,7 +30,7 @@ from .config import (
 )
 from . import cli, config, forcing
 from .Helpers import helpers, visualizers, file_manager, labels
-from .SBI import embedded_network, pipeline, analysis, decorrelate, chi, overlay
+from .SBI import embedded_network, pipeline, analysis, decorrelate, chi, overlay, training_checkpoint
 from .SBI.Priors import sbi_prior_wrapper
 from .SBI.reparam import (
     build_inferred_bijection, TransformedPosterior, build_rescale_bijection,
@@ -375,6 +375,80 @@ def _assert_prior_matches(cfg: SimConfig, path: str, choice: str) -> None:
             f"verified. Re-save it to make it fully self-describing.", stacklevel=2)
 
 
+def _log_params_for(cfg: SimConfig):
+    """Which ND parameter names go in a LOG box, for this config's model.
+
+    A user model carries its own choice per parameter (model_store's ``"box"`` field, surfaced as
+    ``registry.ModelSpec.log_params``); a built-in has no per-model source and follows the global
+    ``config.REPARAM_LOG_PARAMS``. Returning None for the built-in case is deliberate -- it is the
+    "no override" sentinel every reparam entry point already understands (``_resolve_log_params``),
+    so the built-in path is byte-identical to what it did before user models could express this.
+
+    ONE resolver, called at every site that decides a box coordinate: build_prior's gen_prior mask,
+    build_posterior's loaded-prior mask GUARD, the training bijection, and the sidecar. If two of
+    those disagreed, the mismatch would surface as build_posterior's "REBUILD the ND prior" error
+    against a prior that is in fact correct -- or, worse, not surface at all and train the flow in a
+    different coordinate than the GMM was fitted in.
+    """
+    from core import registry                       # lazy: registry imports config, config imports us
+    spec = registry.get(cfg.model)
+    if spec is None or not spec.is_user_model:
+        return None                                 # built-in -> config.REPARAM_LOG_PARAMS
+    return list(spec.log_params)
+
+
+def _training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dict:
+    """The config fields a training-data checkpoint must agree with before it can be resumed (C-11).
+
+    Deliberately the SAME key names save_posterior_artifacts writes into the .rot.pt sidecar, plus the
+    training geometry the sidecar has no reason to carry. One vocabulary for "which run is this",
+    checked in two places, so a checkpoint and the posterior it eventually produces cannot describe
+    different things.
+
+    Everything here is known BEFORE the Fisher rotation runs, which it has to be: the digest names the
+    directory the rotation's own V is stored in, so including V would make the naming circular.
+
+    ``prior_fingerprint`` is the one entry that is NOT derivable from the config, and it is the one
+    that matters most: the box bounds do not identify a prior. ``_gmm_fingerprint``'s own docstring
+    says it -- *"two runs over the same box produce different fits"* -- and the training rows are
+    drawn FROM the prior, so resuming under a rebuilt one would mix rows from two different
+    distributions while every declared field still matched. It is also what makes "save your prior and
+    reuse it" a guard rather than merely advice.
+    """
+    return {
+        "format": "training-rows",
+        "model": cfg.model,
+        "prior_fingerprint": _gmm_fingerprint(prior),
+        "mode": cfg.observation_mode,
+        "param_keys": list(cfg.params_dict) + list(cfg.rescale_params),
+        "nd_lows": [b[0] for _, b in cfg.params_dict.values()],
+        "nd_highs": [b[1] for _, b in cfg.params_dict.values()],
+        "rescale_lows": [b[0] for _, b in cfg.rescale_params.values()],
+        "rescale_highs": [b[1] for _, b in cfg.rescale_params.values()],
+        "log_params": resolved_log_params(cfg, log_params=_log_params_for(cfg)),
+        "reparam_rotate": bool(cfg.reparam_rotate),
+        "run_size": int(run_size),
+        "n_runs": int(n_runs),
+        "steady_idx": int(cfg.steady_idx),
+        "dt_nd_min": float(cfg.dt_nd_min),
+        "dt_exp": float(cfg.dt_exp),
+        "t_min_exp": float(cfg.t_min_exp),
+        "t_max_exp": float(cfg.t_max_exp),
+        "t_scale_bounds": list(cfg.t_scale_bounds),
+        "n_grid": int(cfg.t.shape[0]),
+        "spontaneous_only": not cfg.has_forcing,
+        "chi_mode": bool(cfg.chi_mode),
+        "chi_layout": config.CHI_LAYOUT if cfg.chi_mode else None,
+        "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
+        "chi_elem_w": config.CHI_ELEM_W if cfg.chi_mode else None,
+        "chi_f0": cfg.chi_f0 if cfg.chi_mode else None,
+        "chi_freq_bounds": list(cfg.chi_freq_bounds) if cfg.chi_mode else None,
+        "chi_max_cycles": float(cfg.chi_max_cycles) if cfg.chi_mode else None,
+        "device": cfg.hw.device.type,
+        "dtype": str(cfg.hw.dtype),
+    }
+
+
 def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
                 *, save: bool = True, save_name: str | None = None, fig_sink=None) -> tuple[Distribution, Distribution]:
     """
@@ -446,7 +520,9 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
         prior_bounds=cfg.nd_params_bounds,
         state_dep_drift=cfg.state_dep_drift,
         num_iterations=PRIOR_SWEEP_ITERATIONS,
-        log_mask=nd_log_mask(cfg),   # geometric/log box on the configured ND scale params (REPARAM_LOG_PARAMS)
+        # geometric/log box on the ND params that asked for one: a user model's own per-parameter
+        # choice, else config.REPARAM_LOG_PARAMS. See _log_params_for.
+        log_mask=nd_log_mask(cfg, log_params=_log_params_for(cfg)),
         dtype=cfg.hw.dtype, device=cfg.hw.device,
     )
 
@@ -526,7 +602,9 @@ def build_posterior(
     :param fig_sink: Optional (title, fig) -> None display callback for the training-loss curve
                      (a GUI embeds it); None keeps the CLI behavior (loss saved to PNG, not shown).
     """
-    T = build_inferred_bijection(cfg)
+    # The TRAINING bijection. Its log box must be the one gen_prior fitted the latent GMM in, hence
+    # the same resolver the guard below and the sidecar use (_log_params_for).
+    T = build_inferred_bijection(cfg, log_params=_log_params_for(cfg))
 
     if not train_new and choice is not None:
         # map_location rehomes every stored tensor onto this machine's device, so a posterior trained
@@ -566,10 +644,12 @@ def build_posterior(
                     for inner in (tr.parts if isinstance(tr, _Compose) else [tr])
                     if isinstance(inner, _Box)), None)
     if _nd_box is not None:
-        _want = nd_log_mask(cfg).to(_nd_box.log_mask.device)
+        _want = nd_log_mask(cfg, log_params=_log_params_for(cfg)).to(_nd_box.log_mask.device)
         if not torch.equal(_nd_box.log_mask, _want):
+            _src = ("this user model's per-parameter box settings"
+                    if _log_params_for(cfg) is not None else "config.REPARAM_LOG_PARAMS")
             raise ValueError(
-                "Loaded ND prior's log-box mask does not match config.REPARAM_LOG_PARAMS "
+                f"Loaded ND prior's log-box mask does not match {_src} "
                 f"(prior log dims={_nd_box.log_mask.tolist()}, config wants={_want.tolist()}). "
                 "The latent GMM was fit in a different coordinate — REBUILD the ND prior "
                 "(construct a new prior) before training a new posterior."
@@ -600,8 +680,60 @@ def build_posterior(
     # alias, so chi gets one too. Cost note: the Fisher pays (1 + K) simulations per evaluation in chi
     # mode instead of 2, so a rotation costs ~(K+1)/2 x what it does in forced mode -- REPARAM_FISHER_M
     # and REPARAM_FISHER_POINTS are the knobs if that is too slow.
+    # The training batch's OWN ceiling -- not hw.batch_size, and deliberately not PRIOR_SWEEP_BATCH's
+    # twin. A CEILING rather than a replacement, because smoke_train.py and three pipeline tests shrink
+    # runs by writing cfg.hw.batch_size directly and a replacing knob would silently override them.
+    # Announced when it binds: a cap that changes the shape of a multi-day run is not allowed to be
+    # silent, and the printed row count is also the check that TRAINING_NUM_RUNS was moved to match.
+    # Resolved HERE, above the rotation, because the checkpoint's identity includes it.
+    run_size = cfg.hw.batch_size
+    if TRAINING_RUN_SIZE and TRAINING_RUN_SIZE < run_size:
+        print(f"Training batch capped at {TRAINING_RUN_SIZE} (hardware default {run_size}) — "
+              f"{TRAINING_NUM_RUNS} batches x {TRAINING_RUN_SIZE} = "
+              f"{TRAINING_NUM_RUNS * TRAINING_RUN_SIZE:,} training rows.")
+        run_size = TRAINING_RUN_SIZE
+
+    # --- training-data checkpoint (C-11): resolved BEFORE the rotation, because a resume REUSES V ---
+    # This ordering is the whole reason the resume works with rotation ON, which is how the retrain is
+    # specified to run. `build_latent_fisher_rotation` seeds its noise under fork_rng but draws its
+    # OPERATING POINTS from the caller's global RNG (decorrelate's z_med/z_samp), which nothing seeds
+    # -- so a restarted process computes a DIFFERENT V, hence a different T_train, hence different
+    # LATENT targets for every batch after the seam, silently mixed with the pre-crash rows. Trap X10.
+    # Reusing the stored V also skips the Fisher entirely on a resume, which is the single largest
+    # pre-training cost.
+    ckpt_dir = ckpt_resumed = None
+    if TRAINING_CHECKPOINT_EVERY and train_new:
+        ident = _training_identity(cfg, prior, run_size, TRAINING_NUM_RUNS)
+        ckpt_dir = training_checkpoint.resolve_dir(ident)
+        _st = training_checkpoint.peek(ckpt_dir)
+        # A COMPLETE checkpoint counts too, and deliberately so. Its rows are already expressed in the
+        # V they were generated under, so recomputing V here would make gen_training_data's probe
+        # check refuse the very rows it is about to reuse -- turning the "died during NN training,
+        # don't re-simulate for days" path into a hard failure. Any committed batch pins V.
+        if _st and _st.get("batches_done"):
+            ckpt_resumed = training_checkpoint.read_header(ckpt_dir)
+
     rotate = cfg.reparam_rotate
-    if rotate:
+    if ckpt_resumed is not None and rotate:
+        # Rehomed onto this run's device/dtype. The checkpoint stores V on the CPU so it is portable,
+        # but build_latent_fisher_rotation returns it on cfg.hw.device -- and OrthogonalTransform does
+        # `x @ M`, which is a hard device error, not a silent promotion. Without this the FIRST GPU
+        # resume with rotation ON would crash, i.e. exactly the run this feature exists to rescue.
+        # Same defect the bijection probe had; found by looking for its siblings after the smoke train
+        # surfaced the first one.
+        V = ckpt_resumed.get("V")
+        if V is not None:
+            V = V.to(device=cfg.hw.device, dtype=cfg.hw.dtype)
+        _done = _st["batches_done"]
+        print(f"Reusing the Fisher rotation stored with the training checkpoint "
+              f"({_done}/{TRAINING_NUM_RUNS} batches"
+              f"{' — COMPLETE, so generation will be skipped' if _st.get('complete') else ''}) — NOT "
+              f"recomputing it: the rotation's operating points are not reproducible across "
+              f"processes, so a fresh V would put the reused rows in a different coordinate than the "
+              f"targets stored beside them.")
+        T_train = build_rotated_bijection(T, V) if V is not None else T
+        train_prior = RotatedLatentPrior(latent_inferred_prior, V) if V is not None else latent_inferred_prior
+    elif rotate:
         print("Computing decorrelating Fisher rotation (REPARAM_ROTATE=True)...")
         # Average the Fisher over the prior (not just GT) so the linear rotation is valid prior-wide.
         # GT-free: the rotation anchors on the prior median with a representative drive (force_prior).
@@ -611,18 +743,6 @@ def build_posterior(
         train_prior = RotatedLatentPrior(latent_inferred_prior, V)
     else:
         V, T_train, train_prior = None, T, latent_inferred_prior
-
-    # The training batch's OWN ceiling -- not hw.batch_size, and deliberately not PRIOR_SWEEP_BATCH's
-    # twin. A CEILING rather than a replacement, because smoke_train.py and three pipeline tests shrink
-    # runs by writing cfg.hw.batch_size directly and a replacing knob would silently override them.
-    # Announced when it binds: a cap that changes the shape of a multi-day run is not allowed to be
-    # silent, and the printed row count is also the check that TRAINING_NUM_RUNS was moved to match.
-    run_size = cfg.hw.batch_size
-    if TRAINING_RUN_SIZE and TRAINING_RUN_SIZE < run_size:
-        print(f"Training batch capped at {TRAINING_RUN_SIZE} (hardware default {run_size}) — "
-              f"{TRAINING_NUM_RUNS} batches x {TRAINING_RUN_SIZE} = "
-              f"{TRAINING_NUM_RUNS * TRAINING_RUN_SIZE:,} training rows.")
-        run_size = TRAINING_RUN_SIZE
 
     training_params = {
         "model": cfg.model,
@@ -654,6 +774,17 @@ def build_posterior(
         "dtype": cfg.hw.dtype,
         "device": cfg.hw.device,
     }
+    if ckpt_dir is not None:
+        # V and the probe go in AFTER the rotation, so a fresh run stores the V it just computed and
+        # a resumed one stores nothing new (create() is not called on a resume).
+        training_params["checkpoint"] = {
+            "dir": ckpt_dir, "identity": ident,
+            # device= is load-bearing: T_train holds the rotation V on cfg.hw.device, and a CPU grid
+            # into a CUDA matmul is a hard RuntimeError inside build_posterior.
+            "probe": training_checkpoint.bijection_probe(
+                T_train, len(cfg.params_dict) + len(cfg.rescale_params), device=cfg.hw.device),
+            "V": V, "every": TRAINING_CHECKPOINT_EVERY, "resume": "auto",
+        }
 
     # Conditioning layout is [S(x) | log(T) | forcing]. log(T) rides with the summary
     # pathway, so input_dim (the leading summary block) includes it; only the forcing
@@ -859,7 +990,10 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     # posteriors sitting beside it, with nothing on the load path checking width or mode. A missing
     # sidecar still means "pre-reparam, linear box" for the old artifacts; from here on, absence is
     # only ever a legacy signal, never an ambiguous new one.
-    log_params_used = resolved_log_params(cfg)
+    # Same resolver as build_prior/build_posterior, so what the sidecar records is what the flow was
+    # trained in. load_eval_bijection rebuilds the box from THIS list, not from the live config, so a
+    # divergence here would be invisible until the posterior evaluated in the wrong coordinate.
+    log_params_used = resolved_log_params(cfg, log_params=_log_params_for(cfg))
     from .SBI.statistics import FEATURE_LABELS
     torch.save({
         "V": V,
@@ -1033,7 +1167,8 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
     device = cfg.hw.device
     dtype = cfg.hw.dtype
     # Posterior's actual transform (rotated if REPARAM_ROTATE) so the cal prior + theta_transform match.
-    T = posterior.T if isinstance(posterior, TransformedPosterior) else build_inferred_bijection(cfg)
+    T = (posterior.T if isinstance(posterior, TransformedPosterior)
+         else build_inferred_bijection(cfg, log_params=_log_params_for(cfg)))
 
     # Critical: draw theta_star from the PRIOR (not the posterior) for valid SBC.
     val_latent_prior = _build_latent_prior_for_validation(cfg, inferred_prior)

@@ -1,0 +1,42 @@
+<!--
+  PRISM application mark. Original work for PRISM, MIT (see ../icons/LICENSE.txt).
+
+  This SVG is the EDITABLE SOURCE. It is not loaded at runtime: Qt's `svg` image-format plugin is not
+  present in this environment (QImageReader.supportedImageFormats() has no "svg"), so QIcon("x.svg")
+  would silently produce a NULL icon and the app would show the default Qt mark with no error anywhere.
+  build_app_icon.py renders this to the committed PNG set through QSvgRenderer, which does work because
+  it is the QtSvg module rather than the image-format plugin. Edit here, re-run that, commit the PNGs.
+
+  A filled tile rather than a transparent glyph: a taskbar can be light or dark, and a mark that reads
+  on one disappears on the other.
+
+  Everything is sized for the 16 to 32 px end, not for this 256 px one. A first pass drew a slimmer
+  prism with four thin beams; it was handsome at 256 and the spectrum collapsed into an unreadable
+  smudge at 32. Strokes are therefore heavy, the beams long and well separated, and the whole mark
+  pushed out toward the tile's edges. Check prism-32.png after ANY edit here: that is the size that
+  fails first, and it is the one the taskbar actually shows.
+
+  NOTE for editing: XML forbids a double hyphen inside a comment, and QSvgRenderer rejects the whole
+  file when it finds one (this build script reports "could not parse" and writes nothing). Use a colon
+  or a semicolon where prose wants a dash.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="#12243A"/>
+
+  <!-- Incoming beam, stopping on the left face (apex(108,52) -> (46,190); at y=132 that is x = 72).
+       Drawn before the prism so its end is capped by the white stroke. -->
+  <rect x="8" y="122" width="66" height="20" fill="#F5F7FA"/>
+
+  <!-- Dispersed beams. They start INSIDE the triangle so the prism's stroke covers their common
+       origin and they read as emerging from the right face rather than radiating from a dot. -->
+  <g stroke-width="16" stroke-linecap="round" fill="none">
+    <line x1="138" y1="132" x2="234.1" y2="104.4" stroke="#FF5A5A"/>
+    <line x1="138" y1="132" x2="237.6" y2="123.3" stroke="#FFB020"/>
+    <line x1="138" y1="132" x2="237.5" y2="142.5" stroke="#3CD68A"/>
+    <line x1="138" y1="132" x2="233.6" y2="161.2" stroke="#5AA9FF"/>
+  </g>
+
+  <!-- The prism, last so it sits over both beam sets. -->
+  <polygon points="108,52 170,190 46,190" fill="none" stroke="#F5F7FA"
+           stroke-width="15" stroke-linejoin="round"/>
+</svg>

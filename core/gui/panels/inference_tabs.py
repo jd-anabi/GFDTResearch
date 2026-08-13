@@ -23,7 +23,7 @@ from core.config import (VALID_MODELS, VALID_LABELS, BOUNDS_PATH, CELL_PATH, PRI
                          POSTERIOR_PATH, T_MIN_EXP_S, CHI_K_MAX)
 
 from .base_panel import BasePanel
-from .. import settings
+from .. import icons, settings
 from ..session import ConfigDraft
 from ..widgets.artifact_picker import ArtifactPicker
 from ..widgets.help_badge import add_help_row, with_badge
@@ -154,7 +154,9 @@ class _ChiProbeRow(QWidget):
         self.path = PathField()
         self.freq = FloatField(freq_hz)
         self.freq.setMaximumWidth(96)
-        self.btn_remove = QPushButton("✕")
+        self.btn_remove = QPushButton()
+        self.btn_remove.setObjectName("iconButton")     # the QSS that owns icon-button size/colour
+        icons.apply_icon(self.btn_remove, "close")      # bundled icon font; falls back to "✕"
         self.btn_remove.setMaximumWidth(32)
         self.btn_remove.setToolTip("Remove this probe")
         self.btn_remove.clicked.connect(lambda: on_remove(self))

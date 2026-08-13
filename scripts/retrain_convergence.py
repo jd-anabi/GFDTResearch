@@ -53,7 +53,7 @@ from core.config import (
 )
 from core.SBI import pipeline, embedded_network, statistics
 from core.SBI.Priors import sbi_prior_wrapper
-from core.SBI.reparam import build_inferred_bijection
+from core.SBI.reparam import build_inferred_bijection, read_sidecar, sidecar_path
 from core.Helpers import visualizers
 
 # ---- knobs ----
@@ -78,17 +78,24 @@ dtype, device = cfg.hw.dtype, cfg.hw.device
 nd_dim = len(cfg.params_dict)
 
 # ---- inherit the EXACT training (latent) prior from the base posterior ----
-# This script retrains via the PLAIN latent path (theta_transform=T). A rotated base — one with
-# a <name>.rot.pt sidecar — lives in rotated coords w = z @ V; retraining it here would feed a
-# w-space prior through a plain box transform and produce an inconsistent posterior. Rotated-base
+# This script retrains via the PLAIN latent path (theta_transform=T). A rotated base — one whose
+# sidecar carries a V — lives in rotated coords w = z @ V; retraining it here would feed a w-space
+# prior through a plain box transform and produce an inconsistent posterior. Rotated-base
 # convergence checks need the rotated training path (RotatedLatentPrior + rotated theta_transform,
 # cf. orchestrator.build_posterior), which is not yet wired here — fail loudly instead.
-_rot = POSTERIOR_PATH / ((BASE_POST[:-3] if BASE_POST.endswith(".pt") else BASE_POST) + ".rot.pt")
-if _rot.exists():
+#
+# Keyed on the sidecar's V, NOT on whether the sidecar FILE exists. save_posterior_artifacts writes
+# <name>.rot.pt unconditionally (orchestrator.save_posterior_artifacts) — deliberately, so a chi
+# posterior is not byte-indistinguishable from a legacy forced one — and chi is the mode where V is
+# None. Testing the file therefore refused every posterior the current build produces, INCLUDING the
+# unrotated ones this script exists to serve, while naming the wrong reason.
+_side = read_sidecar(BASE_POST, POSTERIOR_PATH, map_location="cpu")
+if _side is not None and _side.get("V") is not None:
     raise SystemExit(
-        f"BASE_POST={BASE_POST} was trained with the decorrelating rotation ({_rot.name}); "
-        "retrain_convergence only supports a plain (non-rotated) base. Use a non-rotated base, or "
-        "extend this script to mirror orchestrator's rotated training path."
+        f"BASE_POST={BASE_POST} was trained with the decorrelating rotation "
+        f"({sidecar_path(BASE_POST, POSTERIOR_PATH).name} carries a rotation V); retrain_convergence "
+        "only supports a plain (non-rotated) base. Use a non-rotated base, or extend this script to "
+        "mirror orchestrator's rotated training path."
     )
 
 base = torch.load(str(POSTERIOR_PATH / BASE_POST), weights_only=False)

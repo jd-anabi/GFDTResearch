@@ -23,6 +23,19 @@ class FloatField(QLineEdit):
         except ValueError:
             return 0.0
 
+    def value_or_none(self) -> "float | None":
+        """The field's value, or None when it does not parse.
+
+        Use this ANYWHERE 0.0 is a legal value the user could also have meant, because ``value()``
+        cannot tell "0" from "" or from "-" mid-typing -- a blank "min" box silently becomes a real
+        bound of 0. That is not hypothetical: it is why widgets/param_grid validates explicitly (see
+        its module docstring), and the model builder's own parameter rows had the bug it warns about.
+        """
+        try:
+            return float(self.text().strip())
+        except (TypeError, ValueError):
+            return None
+
 
 class IntField(QLineEdit):
     def __init__(self, default: int = 0, parent=None):

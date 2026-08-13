@@ -21,6 +21,7 @@ NAMES = {
     "settings": (chr(0xE001), "⚙"),   # gear
     "refresh":  (chr(0xE002), "⟳"),   # circular arrow
     "help":     (chr(0xE003), "?"),
+    "close":    (chr(0xE004), "✕"),   # remove-a-row (the chi probe table)
 }
 
 _family = None            # resolved icon-font family name, or None if the .ttf was unavailable

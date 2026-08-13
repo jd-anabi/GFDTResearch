@@ -22,11 +22,12 @@ _MAX_VISIBLE_HEIGHT = 320          # keep a 13-parameter grid from swallowing th
 
 
 def _num(field) -> "float | None":
-    """The field's value, or None when it does not parse (FloatField.value() would return 0.0)."""
-    try:
-        return float(field.text().strip())
-    except (TypeError, ValueError):
-        return None
+    """The field's value, or None when it does not parse (FloatField.value() would return 0.0).
+
+    Thin alias for ``FloatField.value_or_none``, which is where the rule now lives so the model
+    builder's parameter rows share it instead of re-deriving (or, as they did, omitting) it.
+    """
+    return field.value_or_none()
 
 
 class _PassThroughScrollArea(QScrollArea):

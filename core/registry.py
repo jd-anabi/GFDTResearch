@@ -27,6 +27,11 @@ class ModelSpec:
     variables: list = field(default_factory=list)   # user models: [{name, drift, D, init, forcing}]
     compiled: object = None            # user models: user_model.CompiledUserModel
     spec_path: Path | None = None      # user models: the Resources/Models/<name>.json source
+    # ND parameter NAMES this model asks to be boxed in log space -- the per-model counterpart of
+    # config.REPARAM_LOG_PARAMS, read by orchestrator.build_prior. Carried on the spec because the
+    # saved doc is otherwise read and discarded at load time, leaving nothing downstream to ask.
+    # Empty for every built-in: theirs is a global setting, not a per-model one.
+    log_params: list = field(default_factory=list)
 
 
 _BUILTINS = ("BP", "NADROWSKI", "HOPF")
@@ -163,6 +168,7 @@ def load_user_models() -> None:
                 variables=doc["variables"],
                 compiled=compiled,
                 spec_path=Path(path),
+                log_params=model_store.nd_log_params(doc),
             ))
         except Exception as e:                                  # noqa: BLE001 -- one bad file must not
             load_errors.append((Path(path), str(e)))            # brick startup (CrossValPanel precedent)

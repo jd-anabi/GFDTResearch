@@ -22,6 +22,7 @@ from core.Helpers import model_store
 from core.Models.user_model import ModelParseError, UserModel, parse_user_model
 from core.Solvers import sdeint
 
+from ..design import SPACE
 from ..panels.base_panel import BasePanel
 from ..widgets.help_badge import add_help_row
 from ..widgets.labeled_inputs import FloatField
@@ -131,52 +132,72 @@ class _VarRow(QGroupBox):
 
 
 class _ParamRow(QWidget):
-    """One parameter's ground-truth value plus its SBI inference box: value | auto | min | max.
+    """One parameter's ground-truth value, its SBI inference box, and that box's coordinate.
 
-    'auto' reproduces the placeholder box ``model_store._nd_bounds`` used to auto-generate (v - pad,
-    v + pad); unchecking it exposes an editable (min, max) for a tighter, physical prior. ``spec()``
-    returns (value, lo, hi) and is the single reuse of the placeholder rule when auto is on.
+    TWO lines, deliberately: ``value | auto | min | max`` then ``box``. The first line already packs
+    3 fields + 4 labels + a checkbox and is called out in PRISM_HANDOFF 10.2 (L4) as the worst
+    offender in the app for splitting an already-narrow controls column N ways; a fifth control on it
+    would leave each field a few characters wide again. Both lines are ``LabeledFieldRow``, so the
+    minimum widths and growth policy stay in the one place that owns them.
+
+    'auto' reproduces the placeholder box ``model_store.nd_bounds`` (v - pad, v + pad); unchecking it
+    exposes an editable (min, max) for a tighter, physical prior. ``spec()`` returns
+    (value, lo, hi, box) and is the single reuse of the placeholder rule when auto is on.
     """
 
-    def __init__(self, value=1.0, lo=None, hi=None, parent=None):
+    def __init__(self, value=1.0, lo=None, hi=None, box=None, parent=None):
         super().__init__(parent)
         self.value = FloatField(value)
         self.auto = QCheckBox("auto")
         self.lo = FloatField(0.0)
         self.hi = FloatField(0.0)
+        self.box = QComboBox()
+        self.box.addItems(list(model_store.BOX_KINDS))
+        self.box.setToolTip(
+            "The coordinate this parameter's box bijection works in.\n"
+            "'log' linearizes a multiplicative parameter before the Fisher rotation and needs min > 0.\n"
+            "It changes the coordinate the flow trains in — NOT where the prior puts its mass.")
         # A falsy caption omits the label, so the unlabelled "auto" checkbox sits in the same row
         # machinery as the labelled fields.
-        row = LabeledFieldRow((("value", self.value), ("", self.auto),
+        top = LabeledFieldRow((("value", self.value), ("", self.auto),
                                ("min", self.lo), ("max", self.hi)))
-        layout = QHBoxLayout(self)
+        bottom = LabeledFieldRow((("box", self.box),))
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(row)
+        layout.setSpacing(SPACE[0])
+        layout.addWidget(top)
+        layout.addWidget(bottom)
         self.auto.toggled.connect(self._on_auto)
-        self.set_spec(value, lo, hi)
+        self.set_spec(value, lo, hi, box)
 
     def _on_auto(self, checked: bool) -> None:
         # Disable the fields under auto, and (re)seed them with the placeholder box so unchecking leaves
         # a sensible editable starting point rather than a blank/zero range.
         self.lo.setEnabled(not checked)
         self.hi.setEnabled(not checked)
-        lo, hi = model_store._nd_bounds(self.value.value())
+        lo, hi = model_store.nd_bounds(self.value.value())
         self.lo.setText(repr(lo))
         self.hi.setText(repr(hi))
 
     def spec(self) -> tuple:
+        """(value, lo, hi, box). lo/hi are None when the box is on but a field does not parse -- a
+        blank "min" used to come back as a real bound of 0.0 (FloatField.value()'s documented hazard,
+        which widgets/param_grid guards against and this row did not). _validate turns the None into
+        a message; it must never reach model_store as a number the user did not type."""
         v = self.value.value()
+        box = self.box.currentText()
         if self.auto.isChecked():
-            lo, hi = model_store._nd_bounds(v)
-            return v, lo, hi
-        return v, self.lo.value(), self.hi.value()
+            lo, hi = model_store.nd_bounds(v)
+            return v, lo, hi, box
+        return v, self.lo.value_or_none(), self.hi.value_or_none(), box
 
-    def set_spec(self, value, lo=None, hi=None) -> None:
+    def set_spec(self, value, lo=None, hi=None, box=None) -> None:
         value = float(value)
-        auto = lo is None or hi is None or (float(lo), float(hi)) == model_store._nd_bounds(value)
+        auto = lo is None or hi is None or (float(lo), float(hi)) == model_store.nd_bounds(value)
         self.value.setText(repr(value))
         self.auto.setChecked(auto)                 # fires _on_auto (seeds the placeholder box) if it flips
         if auto:
-            alo, ahi = model_store._nd_bounds(value)
+            alo, ahi = model_store.nd_bounds(value)
             self.lo.setText(repr(alo))
             self.hi.setText(repr(ahi))
         else:
@@ -184,6 +205,8 @@ class _ParamRow(QWidget):
             self.hi.setText(repr(float(hi)))
         self.lo.setEnabled(not auto)
         self.hi.setEnabled(not auto)
+        idx = self.box.findText(str(box or "linear"))
+        self.box.setCurrentIndex(idx if idx >= 0 else 0)
 
 
 class ModelBuilderScreen(QWidget):
@@ -313,7 +336,9 @@ class ModelBuilderScreen(QWidget):
             self._params_form.removeRow(0)
         self._param_fields = {}
         for name in compiled.param_names:
-            row = _ParamRow(*old[name]) if name in old else _ParamRow(1.0)   # keep typed (value, lo, hi)
+            # keep typed (value, lo, hi, box) -- spec() and __init__ are positionally matched, so a
+            # field added to one has to be added to the other or a re-detect silently drops it.
+            row = _ParamRow(*old[name]) if name in old else _ParamRow(1.0)
             self._param_fields[name] = row
             self._params_form.addRow(name, row)
         self._set_status(f"Found {len(compiled.param_names)} parameter(s): "
@@ -326,7 +351,7 @@ class ModelBuilderScreen(QWidget):
             "schema_version": model_store.SCHEMA_VERSION,
             "name": self.name_edit.text().strip(),
             "variables": [row.values() for row in self._var_rows],
-            "params": {name: dict(zip(("value", "lo", "hi"), row.spec()))
+            "params": {name: dict(zip(("value", "lo", "hi", "box"), row.spec()))
                        for name, row in self._param_fields.items()},
             "rescale": {"x_scale": self.x_scale.value(), "t_scale": self.t_scale.value()},
         }
@@ -364,12 +389,25 @@ class ModelBuilderScreen(QWidget):
             self._set_status("x_scale and t_scale must be > 0.", error=True)
             return None
         for p, e in doc["params"].items():         # UX pre-check; model_store._check_schema re-enforces
+            # None means the field did not parse -- a blank box, or "-" mid-typing. Caught here so it
+            # is a message about THAT box rather than model_store rejecting a 0.0 the user never typed.
+            if e["lo"] is None or e["hi"] is None:
+                which = "min" if e["lo"] is None else "max"
+                self._set_status(f"Parameter '{p}': {which} is blank or not a number.", error=True)
+                return None
             if not e["lo"] < e["hi"]:
                 self._set_status(f"Parameter '{p}': min must be < max.", error=True)
                 return None
             if not e["lo"] <= e["value"] <= e["hi"]:
                 self._set_status(f"Parameter '{p}': value {e['value']} is outside its bounds "
                                  f"[{e['lo']}, {e['hi']}].", error=True)
+                return None
+            # A log box needs a positive lower bound. reparam._log_mask would otherwise downgrade it
+            # to linear with a warnings.warn that never reaches the GUI, so the model would train in a
+            # coordinate the user did not pick, silently. model_store._check_schema re-enforces this.
+            if e["box"] == "log" and e["lo"] <= 0:
+                self._set_status(f"Parameter '{p}': a log box needs min > 0 (got {e['lo']}). "
+                                 f"Raise min, or set its box to 'linear'.", error=True)
                 return None
 
         # Smoke integration at the stream's fine ND step (dt_exp over the t_scale upper bound).
@@ -435,8 +473,9 @@ class ModelBuilderScreen(QWidget):
         self._detect_params()
         for pname, row in self._param_fields.items():
             if pname in doc["params"]:
-                e = doc["params"][pname]           # load_user_model migrates v1 -> {value, lo, hi}
-                row.set_spec(float(e["value"]), float(e["lo"]), float(e["hi"]))
+                # load_user_model has already migrated v1/v2 -> {value, lo, hi, box}
+                e = doc["params"][pname]
+                row.set_spec(float(e["value"]), float(e["lo"]), float(e["hi"]), e["box"])
         self._set_status(f"Editing '{doc['name']}'. Renaming saves a copy under the new name.")
 
     def reset(self) -> None:

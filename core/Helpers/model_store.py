@@ -6,9 +6,9 @@ decoupled ``Bounds/<name_lower>/default.txt`` + ``Cells/<name_lower>/default.txt
 ``cli._parse_cell``, ``simulate_runner.build_stream_config``) consumes a user model exactly like a
 built-in -- they resolve those files purely by folder name.
 
-JSON schema (schema_version 2):
+JSON schema (schema_version 3):
     {
-      "schema_version": 2,
+      "schema_version": 3,
       "name": "MYMODEL",                       # uppercase; also the JSON filename stem
       "variables": [                            # declared order; variable 0 is the observable
         {"name": "x", "drift": "mu*x - x^3", "D": "d0", "init": 0.1,
@@ -18,16 +18,35 @@ JSON schema (schema_version 2):
                             "sign": 1 | -1}},              # exponential grow/decay only
         ...
       ],
-      "params": {"mu": {"value": 1.0, "lo": 0.0, "hi": 2.0},   # value + its SBI inference box (lo < value < hi)
-                 "d0": {"value": 0.05, "lo": 0.01, "hi": 0.1}},
+      # value + its SBI inference box (lo < value < hi) + the box COORDINATE (see below).
+      "params": {"mu": {"value": 1.0,  "lo": 0.0,  "hi": 2.0, "box": "linear"},
+                 "d0": {"value": 0.05, "lo": 0.01, "hi": 0.1, "box": "log"}},
       "rescale": {"x_scale": 10.0, "t_scale": 0.01}
     }
 
-schema_version 1 stored each param as a bare scalar value and let ``_nd_bounds`` auto-generate a
-placeholder box; v2 lets the builder set per-parameter (lo, hi) for a tighter SBI prior. ``_normalize_to_v2``
-migrates a v1 doc IN MEMORY (bare scalars -> the same placeholder box) on every load and save, so existing
-``Resources/Models/*.json`` keep working after the bump. The emitted ND Bounds now carry the user's (lo, hi);
-the x_scale/t_scale bounds stay the auto multiplicative range and must be strictly positive --
+Schema history, and both migrations run IN MEMORY on every load and save (``_normalize``) so existing
+``Resources/Models/*.json`` keep working across both bumps:
+
+  v1  each param a bare scalar; ``nd_bounds`` auto-generated a placeholder box.
+  v2  per-parameter ``(lo, hi)``, so the builder can set a tighter SBI box than the placeholder.
+      The emitted ND Bounds carry the user's box verbatim.
+  v3  per-parameter ``"box"``, one of ``BOX_KINDS``.
+
+**What ``"box"`` does, and the thing it deliberately does NOT do.** ``"log"`` places that parameter's
+box bijection in log space -- it is the per-model source for ``reparam.nd_log_mask``'s ``log_params``,
+the same switch ``config.REPARAM_LOG_PARAMS`` provides globally for the built-ins, and it is persisted
+into the posterior's ``.rot.pt`` sidecar so evaluation reconstructs the exact training box. It changes
+the COORDINATE the latent GMM is fitted in (and therefore the coordinate the flow trains in), which is
+what linearizes a multiplicative degeneracy before rotating.
+
+It does **not** change where prior mass sits: ``UserPrior._global_map``'s stability sweep samples
+uniformly in the LINEAR box regardless (``SBI/Priors/user_prior.py``). So ``"log"`` is not the same
+thing as the rescale/forcing blocks' ``"log-uni"`` marginal (``SBI/Priors/*_prior.py``), which really
+does sample log-uniformly -- and the field is named ``box`` rather than ``prior`` precisely so the two
+cannot be read as the same knob. Making the sweep geometric is a separate science decision that would
+have to move the built-ins too.
+
+The x_scale/t_scale bounds stay the auto multiplicative range and must be strictly positive --
 ``SimConfig.t_nd_max`` divides by the t_scale LOWER bound.
 """
 import json
@@ -40,7 +59,11 @@ from core import config
 from core.forcing import FORCE_KINDS, FORCING_PARAM_NAMES
 from core.Models.user_model import parse_user_model
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Per-parameter box COORDINATE. "linear" is the historical (and still default) behaviour; "log" makes
+# that dimension's box bijection geometric. See the module docstring for what this does and does not
+# mean -- in particular it is NOT the rescale/forcing blocks' "log-uni" marginal.
+BOX_KINDS = ("linear", "log")
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,23}$")
 _BUILTIN_NAMES = frozenset({"BP", "NADROWSKI", "HOPF"})
 # Windows reserved device names: creating Bounds/<name>/... would half-fail (mkdir 'nul' silently
@@ -91,38 +114,93 @@ def _fmt(v: float) -> str:
     return repr(float(v))
 
 
-def _nd_bounds(v: float) -> tuple:
+def nd_bounds(v: float) -> tuple:
+    """The placeholder inference box for a parameter whose bounds the user has not set: (v-pad, v+pad)
+    with pad = max(|v|, 1). PUBLIC because the model builder's 'auto' checkbox has to reproduce it
+    exactly (one rule, two callers) -- it used to be reached through the underscore, which is the
+    private-name-across-boundaries item in PRISM_HANDOFF 9.6."""
     pad = max(abs(v), 1.0)
     return (v - pad, v + pad)
 
 
-def _param_entry(value, lo=None, hi=None) -> dict:
-    """One ND parameter's persisted form: its ground-truth value + the SBI inference box (lo, hi).
-    lo/hi None -> the historical placeholder box ``_nd_bounds(value)``, so an auto-bounds parameter is
-    byte-identical to the old scalar-schema emit."""
+# Forcing parameters that must stay strictly positive. `freq` is a drive rate and `tau` an exponential
+# time constant: at 0 the first is not a drive and the second divides by zero, and `freq` additionally
+# gets a LOG-UNIFORM marginal in orchestrator._build_forcing_prior, which is undefined at lo <= 0.
+# `amp` is a magnitude whose sign is absorbed by `phase` (sin/triangular) or by `sign` (exponential),
+# so its box is clamped at 0 rather than required positive -- amp = 0 is a legitimate "no drive".
+_POSITIVE_FORCING = frozenset({"freq", "tau"})
+_NONNEGATIVE_FORCING = _POSITIVE_FORCING | {"amp"}
+
+
+def _forcing_bounds(pname: str, v: float) -> tuple:
+    """The emitted box for one forcing parameter.
+
+    NOT ``nd_bounds``, which is symmetric about the value and therefore hands every small positive
+    quantity a box that is mostly negative -- a drive amplitude of 0.05 got (-0.95, 1.05). That is the
+    defect PRISM_HANDOFF S-1 names for ND parameters, and it survived here after the ND half was fixed.
+    Three shapes, by what the parameter physically is:
+
+      phase        a KNOWN box, (0, 2*pi). An angle's range is not a guess.
+      freq / tau   geometric about the value and strictly positive (see _POSITIVE_FORCING).
+      amp          the placeholder box, floored at 0.
+      offset, t0   the placeholder box unchanged; both are legitimately negative.
+    """
+    if pname == "phase":
+        return (0.0, 2.0 * math.pi)
+    if pname in _POSITIVE_FORCING:
+        return (v / 10.0, v * 10.0)          # _check_schema guarantees v > 0 here
+    lo, hi = nd_bounds(v)
+    if pname in _NONNEGATIVE_FORCING:
+        lo = max(lo, 0.0)
+    return (lo, hi)
+
+
+def _param_entry(value, lo=None, hi=None, box=None) -> dict:
+    """One ND parameter's persisted form: its ground-truth value, its SBI inference box (lo, hi), and
+    the box COORDINATE. lo/hi None -> the placeholder box ``nd_bounds(value)``, so an auto-bounds
+    parameter is byte-identical to the old scalar-schema emit; box None -> "linear", the historical
+    behaviour and the only coordinate that existed before schema v3."""
     value = float(value)
     if lo is None or hi is None:
-        lo, hi = _nd_bounds(value)
-    return {"value": value, "lo": float(lo), "hi": float(hi)}
+        lo, hi = nd_bounds(value)
+    return {"value": value, "lo": float(lo), "hi": float(hi), "box": str(box or "linear")}
 
 
-def _migrate_params_v1(params: dict) -> dict:
-    """schema_version 1 stored params as name -> scalar; v2 stores name -> {value, lo, hi}. Old scalars
-    get the placeholder box ``_nd_bounds`` used to auto-generate, so a migrated model keeps its exact
-    previous behaviour."""
-    return {name: _param_entry(v) for name, v in params.items()}
+def _normalize(doc: dict) -> dict:
+    """Return ``doc`` at the CURRENT schema version WITHOUT mutating the input, migrating through every
+    intervening version. Anything malformed is passed through untouched for ``_check_schema`` to reject
+    with a user-facing message rather than an AttributeError here. Called before ``_check_schema`` on
+    every load and save, which is what lets old Resources/Models/*.json survive both schema bumps.
 
-
-def _normalize_to_v2(doc: dict) -> dict:
-    """Return ``doc`` as schema_version 2 WITHOUT mutating the input. A v1 doc's scalar params are
-    migrated to the {value, lo, hi} form; anything else is returned unchanged (a malformed params block
-    is left for ``_check_schema`` to reject). Called before ``_check_schema`` on every load and save so
-    old Resources/Models/*.json survive the schema bump."""
-    if doc.get("schema_version") != 1:
-        return doc
+      v1 -> v2   scalar params become {value, lo, hi}, taking the placeholder box ``nd_bounds``
+                 auto-generated at the time, so a migrated model keeps its exact previous behaviour.
+      v2 -> v3   every param gains ``"box": "linear"``, likewise its previous behaviour.
+    """
+    version = doc.get("schema_version")
+    if version not in (1, 2):
+        return doc                                   # already current, or unreadable -> _check_schema
     params = doc.get("params")
-    migrated = _migrate_params_v1(params) if isinstance(params, dict) else params
-    return {**doc, "schema_version": 2, "params": migrated}
+    if not isinstance(params, dict):
+        return {**doc, "schema_version": SCHEMA_VERSION}
+    if version == 1:
+        migrated = {name: _param_entry(v) for name, v in params.items()}
+    else:
+        migrated = {name: (_param_entry(e.get("value"), e.get("lo"), e.get("hi"), e.get("box"))
+                           if isinstance(e, dict) else e)
+                    for name, e in params.items()}
+    return {**doc, "schema_version": SCHEMA_VERSION, "params": migrated}
+
+
+def nd_log_params(doc: dict) -> list:
+    """The ND parameter NAMES this model asks to be boxed in log space -- the per-model counterpart of
+    ``config.REPARAM_LOG_PARAMS``, consumed by ``orchestrator.build_prior`` via ``reparam.nd_log_mask``.
+    Order follows the doc's params order, which ``save_user_model`` has already put in
+    ``compiled.param_names`` order; ``nd_log_mask`` keys by NAME, so order is informational here."""
+    params = doc.get("params")
+    if not isinstance(params, dict):
+        return []
+    return [name for name, e in params.items()
+            if isinstance(e, dict) and e.get("box") == "log"]
 
 
 def _check_schema(doc: dict) -> None:
@@ -150,15 +228,24 @@ def _check_schema(doc: dict) -> None:
                 raise ValueError(
                     f"Variable '{v['name']}': {forcing['kind']} forcing needs exactly {sorted(needed)}.")
             for pname, pv in params.items():
-                _finite(pv, f"Variable '{v['name']}': forcing {pname}")
+                pval = _finite(pv, f"Variable '{v['name']}': forcing {pname}")
+                # Checked here rather than clamped in _forcing_bounds, so that function stays total
+                # and has no arbitrary fallback branch. A drive at freq = 0 is not a drive -- that is
+                # what "forcing": null expresses -- and tau = 0 divides by zero inside the exponential.
+                if pname in _POSITIVE_FORCING and pval <= 0:
+                    why = ("A drive frequency of 0 is no drive at all -- set this variable's forcing "
+                           "to None instead." if pname == "freq" else
+                           "A time constant of 0 divides by zero inside the exponential drive.")
+                    raise ValueError(
+                        f"Variable '{v['name']}': forcing {pname} must be > 0 (got {pval:g}). {why}")
             if forcing["kind"] == "exponential" and forcing.get("sign") not in (1, -1):
                 raise ValueError(f"Variable '{v['name']}': exponential forcing needs sign 1 or -1.")
     params = doc.get("params")
     if not isinstance(params, dict):
         raise ValueError("'params' must be an object of name -> {value, lo, hi}.")
     for pname, entry in params.items():
-        if not isinstance(entry, dict) or set(entry) != {"value", "lo", "hi"}:
-            raise ValueError(f"Parameter '{pname}' must be an object with value, lo and hi.")
+        if not isinstance(entry, dict) or set(entry) != {"value", "lo", "hi", "box"}:
+            raise ValueError(f"Parameter '{pname}' must be an object with value, lo, hi and box.")
         value = _finite(entry["value"], f"Parameter '{pname}'")     # _finite first: keeps the NaN message
         lo = _finite(entry["lo"], f"Parameter '{pname}' lo")
         hi = _finite(entry["hi"], f"Parameter '{pname}' hi")
@@ -166,6 +253,17 @@ def _check_schema(doc: dict) -> None:
             raise ValueError(f"Parameter '{pname}': lo must be < hi (got [{lo}, {hi}]).")
         if not lo <= value <= hi:
             raise ValueError(f"Parameter '{pname}': value {value} is outside its bounds [{lo}, {hi}].")
+        box = entry["box"]
+        if box not in BOX_KINDS:
+            raise ValueError(f"Parameter '{pname}': box must be one of {list(BOX_KINDS)} (got {box!r}).")
+        # Refused, not silently downgraded. reparam._log_mask drops a log request whose lower bound is
+        # non-positive back to linear with a warnings.warn -- correct there (it must not blow up a
+        # multi-day run), but invisible in the GUI, so the model would train in a coordinate the user
+        # did not choose and nothing on screen would say so.
+        if box == "log" and lo <= 0:
+            raise ValueError(
+                f"Parameter '{pname}': a log box needs lo > 0 (got lo={lo}). Raise the lower bound, "
+                f"or set its box to 'linear'.")
     rescale = doc.get("rescale")
     if not isinstance(rescale, dict) or set(rescale) != {"x_scale", "t_scale"}:
         raise ValueError("'rescale' must contain exactly x_scale and t_scale.")
@@ -184,7 +282,7 @@ def load_user_model(path) -> dict:
     path = Path(path)
     with open(path, "r", encoding="utf-8") as fh:
         doc = json.load(fh)
-    doc = _normalize_to_v2(doc)                                 # migrate v1 scalar params -> v2 objects
+    doc = _normalize(doc)                                       # migrate v1 scalars / v2 boxless params
     _check_schema(doc)
     if path.stem.upper() != doc["name"].upper():
         raise ValueError(f"File name '{path.stem}' does not match model name '{doc['name']}'.")
@@ -199,7 +297,7 @@ def save_user_model(doc: dict) -> Path:
     order ``UserModel`` consumes constructor columns in (the load-bearing invariant). Every discovered
     parameter must have a value in ``doc['params']``.
     """
-    doc = _normalize_to_v2(doc)                                 # accept v1 scalar-param docs unchanged
+    doc = _normalize(doc)                                       # accept v1/v2 param docs unchanged
     _check_schema(doc)
     name = validate_name(doc["name"])
     doc = {**doc, "name": name}
@@ -225,7 +323,7 @@ def save_user_model(doc: dict) -> Path:
         forcing = v.get("forcing")
         if forcing:
             for pname in FORCING_PARAM_NAMES[forcing["kind"]]:
-                lo, hi = _nd_bounds(float(forcing["params"][pname]))
+                lo, hi = _forcing_bounds(pname, float(forcing["params"][pname]))
                 lines.append(f"{pname}_{v['name']} in ({_fmt(lo)}, {_fmt(hi)})")
     bounds_text = "\n".join(lines) + "\n"
 

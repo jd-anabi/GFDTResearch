@@ -330,9 +330,11 @@ def test_model_store_round_trip_emits_a_parseable_triple():
         assert set(file_manager.parse_units_file(str(config.UNITS_PATH / folder / "units.txt"))) == {"nm", "s"}
 
         doc = model_store.load_user_model(config.MODELS_PATH / f"{name}.json")
-        assert doc["name"] == name and doc["schema_version"] == 2      # v1 _doc migrated on save/load
+        # v1 _doc migrated all the way to the current schema on save/load
+        assert doc["name"] == name and doc["schema_version"] == model_store.SCHEMA_VERSION
         assert doc["params"]["k1"] == model_store._param_entry(1.0)    # scalar -> placeholder box
         assert doc["params"]["d0"] == model_store._param_entry(0.05)
+        assert doc["params"]["k1"]["box"] == "linear"                  # v3 default, the old behaviour
         try:
             model_store.validate_name("NADROWSKI")
         except ValueError:
@@ -390,26 +392,146 @@ def test_param_bounds_validation_rejects_bad_boxes():
 
 
 def test_v1_params_migrate_to_placeholder_boxes():
-    """schema_version-1 scalar params migrate IN MEMORY to {value, lo, hi} placeholder boxes (non-mutating);
-    a v2 doc is returned unchanged. This is what keeps old Resources/Models/*.json working after the bump."""
+    """schema_version-1 scalar params migrate IN MEMORY to placeholder boxes (non-mutating), and a
+    current-version doc is returned unchanged. This is what keeps old Resources/Models/*.json working
+    across the schema bumps."""
     v1 = {"schema_version": 1, "name": "X", "variables": [], "params": {"k": 2.0, "d0": 0.05},
           "rescale": {"x_scale": 10.0, "t_scale": 0.01}}
-    out = model_store._normalize_to_v2(v1)
-    assert out["schema_version"] == 2
+    out = model_store._normalize(v1)
+    assert out["schema_version"] == model_store.SCHEMA_VERSION
     assert out["params"] == {"k": model_store._param_entry(2.0), "d0": model_store._param_entry(0.05)}
     assert v1["params"] == {"k": 2.0, "d0": 0.05}                  # input not mutated
-    assert model_store._normalize_to_v2(out) is out               # already v2 -> unchanged
+    assert model_store._normalize(out) is out                      # already current -> unchanged
+
+
+def test_v2_params_migrate_to_a_linear_box():
+    """schema_version-2 params ({value, lo, hi}, no coordinate) gain box="linear" -- their previous
+    behaviour -- keeping the USER'S bounds rather than resetting them to the placeholder. Migrating a
+    v2 box back to nd_bounds would silently widen every tightened prior on the next save."""
+    v2 = {"schema_version": 2, "name": "X", "variables": [],
+          "params": {"k": {"value": 1.0, "lo": 0.5, "hi": 1.5}},
+          "rescale": {"x_scale": 10.0, "t_scale": 0.01}}
+    out = model_store._normalize(v2)
+    assert out["schema_version"] == model_store.SCHEMA_VERSION
+    assert out["params"]["k"] == {"value": 1.0, "lo": 0.5, "hi": 1.5, "box": "linear"}
+    assert v2["params"]["k"] == {"value": 1.0, "lo": 0.5, "hi": 1.5}    # input not mutated
+    assert model_store._normalize(out) is out                           # idempotent
+    # and a doc that already declares a box keeps it
+    v3 = {**v2, "schema_version": 2,
+          "params": {"k": {"value": 1.0, "lo": 0.5, "hi": 1.5, "box": "log"}}}
+    assert model_store._normalize(v3)["params"]["k"]["box"] == "log"
+
+
+def test_box_kind_is_validated_and_a_log_box_needs_a_positive_lower_bound():
+    """The box coordinate is checked at save time. A log box with lo <= 0 is REFUSED rather than
+    silently downgraded: reparam._log_mask drops it back to linear with a warnings.warn that never
+    reaches the GUI, so the model would train in a coordinate the user did not choose."""
+    name = "UMTESTBOX"
+    for params, needle in (
+        ({"k1": {"value": 1.0, "lo": 0.5, "hi": 1.5, "box": "geometric"}}, "box must be one of"),
+        ({"k1": {"value": 1.0, "lo": -1.0, "hi": 1.5, "box": "log"}}, "log box needs lo > 0"),
+        ({"k1": {"value": 1.0, "lo": 0.0, "hi": 1.5, "box": "log"}}, "log box needs lo > 0"),
+    ):
+        doc = _doc_v2(name, params)
+        doc["schema_version"] = model_store.SCHEMA_VERSION      # already current: no migration to hide it
+        doc["variables"] = [{"name": "x", "drift": "-k1*x", "D": "0", "init": 0.1, "forcing": None}]
+        try:
+            model_store.save_user_model(doc)
+        except ValueError as e:
+            assert needle in str(e), e
+        else:
+            raise AssertionError(f"bad box not refused: {params}")
+    assert not (config.MODELS_PATH / f"{name}.json").exists()
+
+
+def test_a_log_box_reaches_the_registry_and_the_prior_mask():
+    """The per-parameter box is not just persisted -- it has to arrive where build_prior reads it.
+    nd_log_params -> ModelSpec.log_params -> orchestrator._log_params_for, and a BUILT-IN must keep
+    returning None (the "no override" sentinel) so its path is unchanged by any of this."""
+    from core import orchestrator, registry
+    name = "UMTESTLOG"
+    params = {"k1": {"value": 1.0, "lo": 0.5, "hi": 1.5, "box": "log"},
+              "d0": {"value": 0.05, "lo": 0.01, "hi": 0.1, "box": "linear"}}
+    doc = _doc_v2(name, params)
+    doc["variables"] = [{"name": "x", "drift": "-k1*x", "D": "d0", "init": 0.1, "forcing": None}]
+    assert model_store.nd_log_params(doc) == ["k1"]
+    try:
+        model_store.save_user_model(doc)
+        registry.load_user_models()
+        assert registry.get(name).log_params == ["k1"]
+
+        class _Cfg:                                  # only .model is read by _log_params_for
+            model = name
+        assert orchestrator._log_params_for(_Cfg()) == ["k1"]
+
+        class _Builtin:
+            model = "NADROWSKI"
+        assert orchestrator._log_params_for(_Builtin()) is None       # falls back to REPARAM_LOG_PARAMS
+
+        # ...and the MASK it produces is right. Everything above is plumbing; this is the thing the
+        # plumbing exists for, and it is what build_prior hands to gen_prior as `log_mask`.
+        from core import cli as _cli
+        from core.SBI.reparam import nd_log_mask
+        cfg = _cli.make_sim_config(name, list(registry.get(name).labels), False,
+                                   str(config.BOUNDS_PATH / name.lower() / "default.txt"))
+        order = list(cfg.params_dict)                       # discovery order == compiled.param_names
+        mask = nd_log_mask(cfg, log_params=orchestrator._log_params_for(cfg)).tolist()
+        assert mask == [n == "k1" for n in order], (order, mask)
+        # and the default (no override) must NOT pick it up -- that is config.REPARAM_LOG_PARAMS's
+        # business, and conflating the two would apply one model's choice to every model.
+        assert nd_log_mask(cfg).tolist() == [False] * len(order)
+    finally:
+        _remove_user_model(name)
+        registry.load_user_models()
+
+
+def test_forcing_bounds_are_physical_not_the_symmetric_placeholder():
+    """Forcing parameters used to take nd_bounds, so a drive amplitude of 0.05 got (-0.95, 1.05) --
+    the S-1 defect, still live in the forcing block after the ND half was fixed. phase is a KNOWN
+    box, freq is geometric and strictly positive (forcing_prior gives it a log-uniform marginal,
+    undefined at lo <= 0), amp is floored at 0, offset stays symmetric."""
+    import math as _math
+    sin = {"kind": "sin", "params": {"amp": 0.05, "freq": 10.0, "phase": 1.0, "offset": -2.0}}
+    name, folder = "UMTESTFRC", "umtestfrc"
+    try:
+        model_store.save_user_model(_doc(name, sin))
+        _, _, b_forcing, _ = file_manager.parse_bounds_file(
+            str(config.BOUNDS_PATH / folder / "default.txt"))
+        assert b_forcing["amp_x"][1] == (0.0, 1.05)                 # floored, was (-0.95, 1.05)
+        assert b_forcing["freq_x"][1] == (1.0, 100.0)               # geometric, strictly positive
+        lo, hi = b_forcing["phase_x"][1]
+        assert lo == 0.0 and abs(hi - 2 * _math.pi) < 1e-9          # an angle's range is not a guess
+        assert b_forcing["offset_x"][1] == (-4.0, 0.0)              # legitimately negative: unchanged
+    finally:
+        _remove_user_model(name)
+
+
+def test_a_zero_drive_frequency_is_refused():
+    """freq = 0 is not a slow drive, it is no drive -- which "forcing": null already expresses -- and
+    it is what would make _forcing_bounds' geometric range degenerate. Checked at save time so the
+    bounds helper stays total instead of carrying an arbitrary fallback branch."""
+    name = "UMTESTF0"
+    bad = {"kind": "sin", "params": {"amp": 0.5, "freq": 0.0, "phase": 0.0, "offset": 0.0}}
+    try:
+        model_store.save_user_model(_doc(name, bad))
+    except ValueError as e:
+        assert "freq must be > 0" in str(e), e
+    else:
+        raise AssertionError("freq = 0 not refused")
+    assert not (config.MODELS_PATH / f"{name}.json").exists()
 
 
 def test_builder_param_row_preserves_and_defaults():
-    """The builder's per-parameter row: 'auto' reproduces _nd_bounds, a custom (min,max) survives a
-    re-detect, and _validate refuses a value outside its bounds."""
+    """The builder's per-parameter row: 'auto' reproduces nd_bounds, a custom (min,max) AND the box
+    coordinate survive a re-detect, and _validate refuses a value outside its bounds."""
     from core.gui.screens.model_builder_screen import ModelBuilderScreen, _ParamRow
     _app()
     r = _ParamRow(0.05)                                            # auto -> placeholder box
-    assert r.auto.isChecked() and r.spec() == (0.05, *model_store._nd_bounds(0.05))
+    assert r.auto.isChecked() and r.spec() == (0.05, *model_store.nd_bounds(0.05), "linear")
     r.set_spec(0.05, 0.01, 0.1)                                    # a custom box turns auto off
-    assert not r.auto.isChecked() and r.spec() == (0.05, 0.01, 0.1)
+    assert not r.auto.isChecked() and r.spec() == (0.05, 0.01, 0.1, "linear")
+    r.set_spec(0.05, 0.01, 0.1, "log")
+    assert r.spec() == (0.05, 0.01, 0.1, "log")
 
     mb = ModelBuilderScreen()
     mb.vars_edit.setText("x")
@@ -419,11 +541,54 @@ def test_builder_param_row_preserves_and_defaults():
     mb.name_edit.setText("UMTESTROW")
     mb._detect_params()
     assert set(mb._param_fields) == {"k", "d0"}
-    mb._param_fields["d0"].set_spec(0.05, 0.01, 0.1)
-    mb._detect_params()                                            # re-detect preserves the custom box
-    assert mb._param_fields["d0"].spec() == (0.05, 0.01, 0.1)
+    mb._param_fields["d0"].set_spec(0.05, 0.01, 0.1, "log")
+    mb._detect_params()                                            # re-detect preserves box AND coordinate
+    assert mb._param_fields["d0"].spec() == (0.05, 0.01, 0.1, "log")
     mb._param_fields["k"].set_spec(5.0, 0.0, 1.0)                  # value outside its box
     assert mb._validate() is None and "outside its bounds" in mb.status.text()
+
+
+def test_builder_refuses_a_blank_bound_instead_of_reading_it_as_zero():
+    """A blank min/max box must be a MESSAGE, not a silent bound of 0.0.
+
+    FloatField.value() cannot tell "0" from "" (it returns 0.0 for both), which widgets/param_grid
+    guards against and _ParamRow did not -- so clearing 'min' on a parameter whose real lower bound
+    is positive used to save a box starting at 0, and for a log parameter that is the difference
+    between a valid box and one reparam._log_mask silently downgrades to linear.
+    """
+    from core.gui.screens.model_builder_screen import ModelBuilderScreen
+    _app()
+    mb = ModelBuilderScreen()
+    mb.vars_edit.setText("x")
+    mb._set_variables()
+    mb._var_rows[0].drift.setText("-k*x")
+    mb._var_rows[0].noise.setText("d0")
+    mb.name_edit.setText("UMTESTBLANK")
+    mb._detect_params()
+    row = mb._param_fields["k"]
+    row.set_spec(1.0, 0.5, 1.5)                                    # a custom box, so the fields are live
+    row.lo.setText("")                                             # ...then clear the minimum
+    assert row.spec()[1] is None, row.spec()                       # not 0.0
+    assert mb._validate() is None
+    assert "min is blank" in mb.status.text(), mb.status.text()
+
+
+def test_builder_refuses_a_log_box_with_a_non_positive_minimum():
+    """The GUI must refuse it, not lean on reparam._log_mask's silent downgrade -- that warning goes
+    to warnings.warn, which the GUI never surfaces, so the run would train in a linear coordinate
+    while the form still said 'log'."""
+    from core.gui.screens.model_builder_screen import ModelBuilderScreen
+    _app()
+    mb = ModelBuilderScreen()
+    mb.vars_edit.setText("x")
+    mb._set_variables()
+    mb._var_rows[0].drift.setText("-k*x")
+    mb._var_rows[0].noise.setText("d0")
+    mb.name_edit.setText("UMTESTLOGBAD")
+    mb._detect_params()
+    mb._param_fields["k"].set_spec(1.0, -1.0, 2.0, "log")
+    assert mb._validate() is None
+    assert "log box needs min > 0" in mb.status.text(), mb.status.text()
 
 
 def test_model_store_rejects_unusable_values_and_names():
@@ -664,10 +829,12 @@ def test_apply_icon_never_blank():
 
 
 def test_migrated_glyph_buttons_render():
-    """The four migrated buttons (nav back/settings, picker refresh, help badge) never render blank."""
+    """The migrated buttons (nav back/settings, picker refresh, help badge, chi probe remove) never
+    render blank."""
     import tempfile
     from PySide6.QtWidgets import QPushButton
     from core.gui.screens.nav_shell import NavShell
+    from core.gui.panels.inference_tabs import _ChiProbeRow
     from core.gui.widgets.artifact_picker import ArtifactPicker
     from core.gui.widgets.help_badge import HelpBadge
     _app()
@@ -677,6 +844,70 @@ def test_migrated_glyph_buttons_render():
     refresh = ap.findChild(QPushButton, "iconButton")
     assert refresh is not None and refresh.text()
     assert HelpBadge("some help text").text()
+    assert _ChiProbeRow(lambda _row: None).btn_remove.text()        # the last unmigrated glyph button
+
+
+def test_every_icon_name_has_a_real_glyph_in_the_bundled_font():
+    """NAMES and the font's cmap must agree.
+
+    apply_icon sets a codepoint as TEXT, so a name whose codepoint is missing from the .ttf renders
+    .notdef -- an empty box -- and every other icon test still passes, because they only assert the
+    text is non-empty. This is the check that catches "added to icons.NAMES, forgot to re-run
+    build_prism_icons.py". Skipped (not failed) when the font could not be registered at all, which
+    is the degraded path apply_icon's fallback already covers.
+    """
+    from fontTools.ttLib import TTFont
+    from core.gui import icons
+    _app()
+    if not icons.available():
+        return
+    ttfs = sorted(icons._ICON_DIR.glob("*.ttf"))
+    assert ttfs, "the icon font is registered but no .ttf is on disk"
+    cmap = TTFont(str(ttfs[0])).getBestCmap()
+    for name, (glyph_cp, _fallback) in icons.NAMES.items():
+        cp = ord(glyph_cp)
+        assert cp in cmap, (
+            f"icons.NAMES['{name}'] maps to U+{cp:04X}, which the bundled font does not define -- "
+            f"add it to build_prism_icons.CODEPOINTS and regenerate the .ttf")
+
+
+def test_the_app_icon_loads_at_several_sizes():
+    """setWindowIcon needs a real multi-resolution QIcon. The SVG source cannot be loaded directly
+    (Qt's svg image-format plugin is absent here, so QIcon('x.svg') is silently NULL) -- this asserts
+    the rendered PNG set is what actually reaches Qt, and that more than one size is present so a
+    16 px taskbar entry is not a downscale of the 256."""
+    from core.gui import app_icon
+    _app()
+    icon = app_icon.app_icon()
+    assert not icon.isNull(), "no app icon: re-run core/gui/assets/app/build_app_icon.py"
+    sizes = sorted({s.width() for s in icon.availableSizes()})
+    assert len(sizes) >= 4, sizes
+    assert 16 in sizes and 256 in sizes, sizes
+    app_icon.set_windows_app_user_model_id()                       # must never raise, on any platform
+
+
+def test_build_app_starts_and_sets_the_window_icon():
+    """`core.gui.app.build_app` had NO test at all -- the suite builds MainWindow directly and skips
+    the whole application-level setup (style, font, appearance, matplotlib theme, icon). So an
+    exception in any of that would have shipped with every panel test still green and the app simply
+    refusing to start.
+
+    Asserting the icon specifically because it is the piece with a silent failure mode: a null QIcon
+    is not an error, the window just shows Qt's default mark.
+    """
+    from core import config as core_config
+    from core.gui import app as gui_app
+    _app()
+    saved_quiet = core_config.QUIET_SEGMENT_BAR
+    try:
+        app, window = gui_app.build_app([])
+        icon = app.windowIcon()
+        assert not icon.isNull(), "build_app left the application with no window icon"
+        assert {16, 32, 256} <= {s.width() for s in icon.availableSizes()}
+        assert window.windowTitle() == "PRISM", window.windowTitle()
+        window.close()
+    finally:
+        core_config.QUIET_SEGMENT_BAR = saved_quiet
 
 
 if __name__ == "__main__":

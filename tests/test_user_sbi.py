@@ -35,6 +35,24 @@ from core.config import VALID_MODELS, VALID_LABELS               # noqa: E402
 _N_GROUP_G = 11
 _N_SPONT = len(FEATURE_LABELS) - _N_GROUP_G   # 30
 
+# Training-data checkpointing OFF for the whole suite (C-11). Rebound on ORCHESTRATOR, not config,
+# because orchestrator does `from .config import ...` at import and would otherwise keep its snapshot.
+#
+# This is a TEST-INTEGRITY guard, not housekeeping. Left on, the full-pipeline tests write real
+# checkpoints into Resources/Checkpoints/ keyed on a digest of their config -- and a COMPLETE
+# checkpoint short-circuits generation and returns its stored rows. So the FIRST run would create
+# them and every run after that would silently skip gen_training_data entirely, and the suite would
+# stay green while testing nothing. Tests that want checkpointing pass an explicit `checkpoint=` dict
+# with a tmpdir, which is unaffected by this.
+orchestrator.TRAINING_CHECKPOINT_EVERY = 0
+
+# Snapshot of the checkpoint directories that existed BEFORE this suite ran, so the guard below can
+# tell "the suite created one" from "the user has a real retrain checkpoint on disk". Checking for
+# their mere existence would fail on any machine that has actually run a retrain -- which is every
+# machine this matters on.
+_CKPT_DIRS_AT_IMPORT = frozenset(
+    p.name for p in config.CHECKPOINT_PATH.glob("train_*")) if config.CHECKPOINT_PATH.exists() else frozenset()
+
 
 def _tiny_gen_prior(model, t, global_batch_size, local_batch_size, segs, prior_bounds,
                     state_dep_drift=False, num_iterations=25, log_mask=None,
@@ -1690,6 +1708,648 @@ def test_overlay_figures_warn_instead_of_vanishing_on_a_width_mismatch():
         "the width mismatch was swallowed silently -- that is the bug this pins"
     assert any("99" in str(c.message) and "100" in str(c.message) for c in caught), \
         "the warning must report the ACTUAL shapes, else it cannot be diagnosed"
+
+
+# ── C-11: reproducibility harness + the resume seam ──────────────────────────────────────────────
+_TD_MODES = ("chi", "forced", "spontaneous")
+
+
+def _td_cfg():
+    """A tiny CPU Nadrowski config for gen_training_data. Same shape the OOM wiring test uses."""
+    model = "NADROWSKI"
+    cfg = cli.make_sim_config(model, VALID_LABELS[VALID_MODELS.index(model)],
+                              registry.state_dep_drift(model),
+                              str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
+    cfg.hw = config.cpu_device()
+    return cfg
+
+
+class _FixedTdPrior:
+    def __init__(self, theta): self.theta = theta
+    def sample(self, shape): return self.theta.expand(shape[0], -1).clone()
+
+
+def _gen_td(mode, *, seed=0, n_runs=3, run_size=4, **over):
+    """``gen_training_data`` under a FULLY pinned RNG.
+
+    Seeds numpy as well as torch, and that is not belt-and-braces: ``inits`` comes from
+    ``np.random.randint`` (trap X8), which ``torch.manual_seed`` does not touch, so without the numpy
+    seed two runs of identical code differ and every bit-identity claim below would be vacuous.
+    """
+    import numpy as np
+    cfg = _td_cfg()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    n_grid, steady_idx = 12_000, 500
+    t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
+    force_prior = orchestrator._build_forcing_prior(cfg) if mode == "forced" else None
+    kw = dict(
+        run_size=run_size, n_runs=n_runs, steady_idx=steady_idx, dt_nd_min=cfg.dt_nd_min,
+        nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
+        dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
+        t_scale_bounds=cfg.t_scale_bounds, state_dep_drift=cfg.state_dep_drift,
+        spontaneous_only=(mode == "spontaneous"), chi_mode=(mode == "chi"),
+        n_vars=cfg.inits_tensor.shape[-1], dtype=cfg.hw.dtype, device=cfg.hw.device)
+    if mode == "chi":
+        kw.update(chi_f0=config.CHI_F0, chi_freq_bounds=config.CHI_FREQ_BOUNDS,
+                  chi_k_pad=4, chi_max_cycles=config.CHI_MAX_CYCLES)
+    kw.update(over)
+    return pipeline_mod.gen_training_data(
+        cfg.model, _FixedTdPrior(cfg.ground_truth_tensor.reshape(1, -1)), force_prior, t, **kw)
+
+
+def test_the_suite_does_not_write_checkpoints_into_the_real_resources_tree():
+    """A guard on the guard, because the failure mode is silent and severe.
+
+    The full-pipeline tests call orchestrator.build_posterior for real. With checkpointing at its
+    production default they write into Resources/Checkpoints/ keyed on a digest of their config --
+    and a COMPLETE checkpoint short-circuits generation and returns its stored rows. So the first
+    suite run would create them and EVERY RUN AFTER would skip gen_training_data entirely while
+    reporting a pass: the suite would be green and testing nothing. Observed, not theorised -- three
+    such directories (spontaneous / forced / chi, run_size=8, n_runs=2) appeared in the tree the
+    first time this suite ran with C-11 enabled.
+    """
+    from core import orchestrator as _orch
+    assert _orch.TRAINING_CHECKPOINT_EVERY == 0, (
+        "this suite must disable training-data checkpointing at import (see the module header); "
+        f"it is {_orch.TRAINING_CHECKPOINT_EVERY}")
+    ck = config.CHECKPOINT_PATH
+    now = frozenset(p.name for p in ck.glob("train_*")) if ck.exists() else frozenset()
+    # NEW ones only. A user who has run a retrain has a train_* directory sitting there legitimately,
+    # and failing on its existence would make this suite un-runnable on exactly the machines that
+    # matter. What must never happen is the suite ADDING one.
+    created = sorted(now - _CKPT_DIRS_AT_IMPORT)
+    assert not created, (
+        f"the suite created training checkpoints in {ck}: {created}. Later runs would reuse those "
+        f"rows instead of generating them, and the suite would go green without testing anything.")
+
+
+def test_gen_training_data_is_reproducible_from_a_seed_in_every_mode():
+    """THE GATE for any change to gen_training_data's loop, and the reason C-11 could be built at all.
+
+    Two runs of identical code, identical seeds, must be bit-identical in all three branches. This is
+    the same harness the 2026-08-11 batch-retry refactor was held to; it is what makes "the resume is
+    bit-identical to an uninterrupted run" a meaningful claim rather than a hopeful one.
+
+    If this ever fails, do NOT chase the resume tests -- the function stopped being reproducible and
+    every downstream bit-identity assertion below is measuring nothing.
+    """
+    for mode in _TD_MODES:
+        a_x, a_th = _gen_td(mode, seed=7)
+        b_x, b_th = _gen_td(mode, seed=7)
+        assert torch.equal(a_x, b_x), f"{mode}: conditioning differs between two identical runs"
+        assert torch.equal(a_th, b_th), f"{mode}: targets differ between two identical runs"
+        c_x, _ = _gen_td(mode, seed=8)
+        assert not torch.equal(a_x, c_x), f"{mode}: the seed does not affect the output at all"
+
+
+class _KillRun(BaseException):
+    """Stands in for WorkerCancelled: a BaseException, so it passes through the OOM retries'
+    deliberately narrow `except RuntimeError` exactly as a real GUI cancel does."""
+
+
+def _kill_at(batch_index):
+    """Patch gen_stats to abort partway through batch `batch_index`. gen_stats is the right seam: it
+    sits INSIDE the batch closure and OUTSIDE _gen_obs_one, which is where the 2026-08-11 retrain
+    actually died."""
+    real = pipeline_mod.gen_stats
+    seen = {"n": -1, "last": None}
+
+    def _spy(x_spont, *a, **k):
+        if seen["last"] is not pipeline_mod._BATCH_TAG:
+            seen["last"] = pipeline_mod._BATCH_TAG
+            seen["n"] += 1
+        if seen["n"] >= batch_index:
+            raise _KillRun(f"killed during batch {seen['n']}")
+        return real(x_spont, *a, **k)
+    return real, _spy
+
+
+def _ck(tmp, **over):
+    d = dict(dir=tmp, identity={"model": "NADROWSKI", "run_size": 4, "n_runs": 6, "mode": "chi"},
+             probe=torch.linspace(0, 1, 21, dtype=torch.float64).reshape(7, 3), V=None, every=2)
+    d.update(over)
+    return d
+
+
+def test_a_resumed_training_run_is_bit_identical_to_an_uninterrupted_one():
+    """THE test C-11 exists to pass.
+
+    Three runs at the same seeds: one straight through, one killed partway, and a resume of that
+    second one. The resume's output must equal the uninterrupted output BIT FOR BIT -- not merely
+    'the right shape' and not 'statistically similar'. Anything less means the second half of a
+    resumed multi-day run was drawn from a different distribution than the first, which is the exact
+    failure C-11's own backlog entry calls worse than crashing.
+
+    Exercises both write paths: the cadence write (every=2) and the on-the-way-out write in the
+    BaseException handler, which is what a GUI cancel takes.
+    """
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    tmp = Path(tempfile.mkdtemp())
+    n_runs, run_size, kill = 6, 4, 3
+
+    ref_x, ref_th = _gen_td("chi", seed=11, n_runs=n_runs, run_size=run_size)
+
+    real, spy = _kill_at(kill)
+    try:
+        pipeline_mod.gen_stats = spy
+        try:
+            _gen_td("chi", seed=11, n_runs=n_runs, run_size=run_size,
+                    checkpoint=_ck(tmp / "a", resume="never"))
+        except _KillRun:
+            pass
+        else:
+            raise AssertionError("the injected kill did not propagate -- it was swallowed")
+    finally:
+        pipeline_mod.gen_stats = real
+
+    st = tc.peek(tmp / "a")
+    assert st and 0 < st["batches_done"] < n_runs, st
+    assert st["batches_done"] == kill, (
+        f"committed {st['batches_done']} batches, expected {kill}: the cadence write covered "
+        f"[0,2) and the cancel handler should have added batch 2")
+
+    got_x, got_th = _gen_td("chi", seed=11, n_runs=n_runs, run_size=run_size,
+                            checkpoint=_ck(tmp / "a", resume="require"))
+    assert got_x.shape == ref_x.shape, (tuple(got_x.shape), tuple(ref_x.shape))
+    assert torch.equal(got_x, ref_x), (
+        "a resumed run is NOT bit-identical to an uninterrupted one; "
+        f"max|diff| = {float((got_x - ref_x).abs().max())}")
+    assert torch.equal(got_th, ref_th), "the latent TARGETS diverged across the resume"
+    assert tc.peek(tmp / "a")["complete"] is True
+
+
+def test_a_resume_keeps_the_stratification_schedule_identical():
+    """The (t_scale, T) schedule must come from the header, not a redraw.
+
+    SobolEngine(scramble=True) consumes the torch global RNG AT CONSTRUCTION and _draw_and_filter's
+    accept count is geometry-dependent, so a rebuilt schedule is a DIFFERENT stratification -- and
+    because every row's t_scale is overridden to its batch's value, that silently changes the
+    training distribution rather than crashing. This is the assertion that would catch someone
+    'simplifying' the resume by re-deriving the schedule from the seed.
+    """
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    tmp = Path(tempfile.mkdtemp())
+    n_runs, run_size = 6, 4
+    _gen_td("chi", seed=5, n_runs=n_runs, run_size=run_size, checkpoint=_ck(tmp / "s"))
+    h = tc.read_header(tmp / "s")
+    before_ts, before_T = h["batch_t_scales"].clone(), h["batch_Ts"].clone()
+
+    real, spy = _kill_at(2)
+    try:
+        pipeline_mod.gen_stats = spy
+        try:
+            _gen_td("chi", seed=5, n_runs=n_runs, run_size=run_size,
+                    checkpoint=_ck(tmp / "k", resume="never"))
+        except _KillRun:
+            pass
+    finally:
+        pipeline_mod.gen_stats = real
+    _gen_td("chi", seed=5, n_runs=n_runs, run_size=run_size,
+            checkpoint=_ck(tmp / "k", resume="require"))
+
+    h2 = tc.read_header(tmp / "k")
+    assert torch.equal(h2["batch_t_scales"], before_ts), "the schedule changed across the seam"
+    assert torch.equal(h2["batch_Ts"], before_T)
+    # write-once: a resume must not rewrite the header at all
+    assert torch.equal(tc.read_header(tmp / "k")["inits"], h["inits"])
+
+
+def test_resume_modes_never_and_require_refuse_the_wrong_situation():
+    """'never' must not clobber a live checkpoint -- days of simulation behind a typo -- and
+    'require' must not silently start from zero when the thing it was told to resume is absent."""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        _gen_td("chi", seed=3, n_runs=2, run_size=4, checkpoint=_ck(tmp / "none", resume="require"))
+    except ValueError as e:
+        assert "no resumable checkpoint" in str(e), e
+    else:
+        raise AssertionError("resume='require' accepted a missing checkpoint")
+
+    _gen_td("chi", seed=3, n_runs=2, run_size=4,
+            checkpoint=_ck(tmp / "live", identity={"model": "NADROWSKI", "run_size": 4,
+                                                   "n_runs": 2, "mode": "chi"}, every=1))
+    try:
+        _gen_td("chi", seed=3, n_runs=2, run_size=4,
+                checkpoint=_ck(tmp / "live", identity={"model": "NADROWSKI", "run_size": 4,
+                                                       "n_runs": 2, "mode": "chi"},
+                               every=1, resume="never"))
+    except ValueError as e:
+        assert "already exists" in str(e), e
+    else:
+        raise AssertionError("resume='never' silently overwrote a completed checkpoint")
+
+
+def test_a_complete_checkpoint_short_circuits_generation_entirely():
+    """The 'died during NN TRAINING' path, which is the expensive one to get wrong.
+
+    Data generation is the multi-day part; the flow fit that follows is hours. If training dies after
+    generation completed -- an OOM in append_simulations, a bad hyperparameter, a reboot -- re-running
+    must reuse the finished rows rather than re-simulate for days. A complete checkpoint therefore
+    runs ZERO batches and returns exactly what it stored.
+    """
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    ref_x, ref_th = _gen_td("chi", seed=31, n_runs=3, run_size=4, checkpoint=_ck(tmp / "c", every=1))
+
+    real = pipeline_mod.gen_stats
+    calls = []
+
+    def _count(x_spont, *a, **k):
+        calls.append(1)
+        return real(x_spont, *a, **k)
+    try:
+        pipeline_mod.gen_stats = _count
+        got_x, got_th = _gen_td("chi", seed=31, n_runs=3, run_size=4,
+                                checkpoint=_ck(tmp / "c", every=1))
+    finally:
+        pipeline_mod.gen_stats = real
+
+    assert not calls, f"a completed checkpoint re-simulated {len(calls)} time(s) instead of loading"
+    assert torch.equal(got_x, ref_x) and torch.equal(got_th, ref_th)
+
+
+def test_checkpointing_off_writes_nothing_and_changes_nothing():
+    """checkpoint=None is the whole backward-compatibility story: analysis.gen_cal_data,
+    scripts/chi_mask_audit and every pre-C-11 call site pass nothing and must be untouched -- same
+    bytes out, and no disk written."""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    from core import config as _cfg
+    saved, _cfg.CHECKPOINT_PATH = _cfg.CHECKPOINT_PATH, tmp
+    try:
+        a_x, a_th = _gen_td("chi", seed=21, n_runs=2, run_size=4)
+        b_x, b_th = _gen_td("chi", seed=21, n_runs=2, run_size=4)
+        assert torch.equal(a_x, b_x) and torch.equal(a_th, b_th)
+        assert not any(tmp.iterdir()), f"checkpointing was off but something was written: "\
+                                       f"{[p.name for p in tmp.iterdir()]}"
+    finally:
+        _cfg.CHECKPOINT_PATH = saved
+
+
+# ── C-11: the atomic write and the checkpoint store (pure, no simulation) ────────────────────────
+def _ckpt_ident(**over):
+    base = {"model": "NADROWSKI", "run_size": 4, "n_runs": 6, "chi_mode": True, "chi_k_pad": 12,
+            "t_scale_bounds": (1.0, 40.0), "nd_dim": 10}
+    base.update(over)
+    return base
+
+
+def test_atomic_torch_save_never_leaves_a_partial_file():
+    """The destination is either the whole old file or the whole new one.
+
+    A failure mid-write must leave the PREVIOUS content readable, because the checkpoint's commit
+    point is a single small file that is rewritten every interval -- if that write can be torn, the
+    thing meant to survive a crash is itself the thing a crash corrupts.
+    """
+    import tempfile
+    from core.Helpers import file_manager
+    d = Path(tempfile.mkdtemp())
+    p = d / "state.pt"
+    file_manager.atomic_torch_save({"batches_done": 1}, p)
+    assert torch.load(str(p), weights_only=False)["batches_done"] == 1
+
+    real_save = torch.save
+
+    def _boom(obj, f, *a, **k):
+        real_save(obj, f, *a, **k)          # the tmp file really is written...
+        raise OSError("disk full")          # ...and then the write fails before the rename
+    torch.save = _boom
+    try:
+        try:
+            file_manager.atomic_torch_save({"batches_done": 2}, p)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("the injected failure did not propagate")
+    finally:
+        torch.save = real_save
+    assert torch.load(str(p), weights_only=False)["batches_done"] == 1, \
+        "a failed write clobbered the previous checkpoint -- the one thing it must never do"
+    file_manager.atomic_torch_save({"batches_done": 3}, p)
+    assert torch.load(str(p), weights_only=False)["batches_done"] == 3
+    # The partial temp is cleaned up. Harmless if left (nothing reads a .tmp), but a checkpoint
+    # writes every N batches, so a recurring failure would litter one per attempt beside the file it
+    # failed to replace -- precisely where someone is trying to read a failing run.
+    assert not (d / "state.pt.tmp").exists(), "a failed write left its temp file behind"
+
+
+def test_checkpoint_identity_digest_is_stable_and_field_sensitive():
+    """The digest routes a config to its directory, so it must not depend on dict order or on
+    tuple-vs-list, and must change when any identity field changes -- otherwise two different runs
+    share a directory and their rows interleave."""
+    from core.SBI import training_checkpoint as tc
+    a = _ckpt_ident()
+    assert tc.identity_digest(a) == tc.identity_digest(dict(reversed(list(a.items()))))
+    assert tc.identity_digest(a) == tc.identity_digest(_ckpt_ident(t_scale_bounds=[1.0, 40.0]))
+    for key, val in (("run_size", 8), ("chi_k_pad", 6), ("model", "HOPF"), ("chi_mode", False)):
+        assert tc.identity_digest(a) != tc.identity_digest(_ckpt_ident(**{key: val})), key
+    assert len(tc.identity_digest(a)) == 12
+
+
+def test_a_rebuilt_prior_routes_to_a_different_checkpoint():
+    """The box does not identify a PRIOR, and the training rows are drawn from the prior.
+
+    `_gmm_fingerprint`'s own docstring says two runs over the same box produce different fits. So
+    without the fingerprint in the identity, rebuilding the prior and restarting would resume into
+    the SAME directory and splice rows drawn from two different distributions -- with every declared
+    field still matching, so nothing would complain. This is also what makes handoff 4.1's "save your
+    prior and reuse it" a guard rather than advice: without it that instruction would be untrue.
+    """
+    from core import cli as _cli, registry as _reg
+    from core.SBI import training_checkpoint as tc
+    m = "NADROWSKI"
+    cfg = _cli.make_sim_config(m, VALID_LABELS[VALID_MODELS.index(m)], _reg.state_dep_drift(m),
+                               str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+
+    def _gmm(seed):                       # same box, different fit -- exactly the rebuild case
+        torch.manual_seed(seed)
+        mix = torch.distributions.Categorical(probs=torch.rand(3))
+        comp = torch.distributions.MultivariateNormal(torch.randn(3, 13),
+                                                      torch.eye(13).expand(3, 13, 13))
+        return torch.distributions.MixtureSameFamily(mix, comp)
+
+    a, b = _gmm(1), _gmm(2)
+    ia = orchestrator._training_identity(cfg, a, 2048, 5000)
+    ib = orchestrator._training_identity(cfg, b, 2048, 5000)
+    assert ia["prior_fingerprint"] and ia["prior_fingerprint"] != ib["prior_fingerprint"]
+    assert tc.resolve_dir(ia) != tc.resolve_dir(ib), \
+        "a rebuilt prior resolved to the SAME checkpoint directory; a resume would mix two priors"
+    assert tc.resolve_dir(ia) == tc.resolve_dir(orchestrator._training_identity(cfg, a, 2048, 5000)), \
+        "the same prior must resolve to the same directory, or a resume can never find its rows"
+
+
+def test_a_mismatched_sibling_checkpoint_is_reported_by_name():
+    """The message that stands between the user and a silent restart from zero.
+
+    The digest routes a changed config to a NEW directory, so a rebuilt prior does not corrupt
+    anything -- it just quietly starts over, days of simulation sitting unused one directory away
+    with nothing on screen saying so. This is the line that names the reason, and `prior_fingerprint`
+    is the field it will almost always be. It runs on the fresh-start path of every checkpointed run,
+    so it must also degrade to silence rather than raise when there is nothing to report.
+    """
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    root = Path(tempfile.mkdtemp())
+    base = {"model": "NADROWSKI", "run_size": 2048, "prior_fingerprint": "aaaa", "chi_k_pad": 12}
+    sib = {**base, "prior_fingerprint": "bbbb"}          # same everything, prior rebuilt
+    d = tc.resolve_dir(sib, root)
+    tc.create(d, sib, schedule_t_scales=torch.zeros(2), schedule_Ts=torch.zeros(2),
+              inits=torch.zeros(2, 3), V=None, probe=torch.zeros(0, dtype=torch.float64),
+              run_size=2, n_runs=2)
+    tc.save(d, from_batch=0, batch_k=2, rng={"cpu": torch.get_rng_state(), "cuda": None,
+                                             "chi_gen": None},
+            x_buf=torch.zeros(4, 5), th_buf=torch.zeros(4, 2), run_size=2)
+
+    msg = tc.describe_siblings(base, root)
+    assert "prior_fingerprint" in msg, msg          # names the FIELD, not just "a mismatch"
+    assert d.name in msg and "2 batches" in msg, msg
+    # silence when there is nothing to say -- this runs on every fresh checkpointed start
+    assert tc.describe_siblings(base, Path(tempfile.mkdtemp())) == ""
+    assert tc.describe_siblings(base, root / "does-not-exist") == ""
+    assert tc.describe_siblings(sib, root) == "", "a run must not report ITSELF as a mismatch"
+
+
+def test_checkpoint_shards_do_not_serialize_the_whole_accumulator():
+    """A shard must cost its own rows, not the whole preallocated buffer.
+
+    torch.save of a slice VIEW serialises the entire underlying storage -- measured 8,001,492 bytes
+    for a 100-row view of a 200k-row buffer against 5,566 for the same rows cloned, and
+    .contiguous() does NOT help because a row-slice of a contiguous 2-D tensor is already contiguous
+    and stays a view. At the production shape that is the difference between ~47 MB and ~4.35 GiB per
+    checkpoint, i.e. hundreds of GiB over a run, and it presents as "checkpointing is slow" rather
+    than as a correctness failure, so nothing else would catch it.
+    """
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    # A buffer big enough that "rows" and "whole buffer" cannot be confused by torch.save's ~1.5 KB
+    # of fixed zip/pickle overhead: 8.2 MB of buffer against 8 KB of rows.
+    run_size, n_runs, width = 4, 2000, 256
+    d = Path(tempfile.mkdtemp()) / "ck"
+    ident = _ckpt_ident(run_size=run_size, n_runs=n_runs)
+    tc.create(d, ident, schedule_t_scales=torch.zeros(n_runs), schedule_Ts=torch.zeros(n_runs),
+              inits=torch.zeros(run_size, 3), V=None, probe=torch.zeros(0, dtype=torch.float64),
+              run_size=run_size, n_runs=n_runs)
+    x = torch.zeros(n_runs * run_size, width)
+    th = torch.zeros(n_runs * run_size, 3)
+    tc.save(d, from_batch=0, batch_k=2, rng={"cpu": torch.get_rng_state(), "cuda": None,
+                                             "chi_gen": None}, x_buf=x, th_buf=th, run_size=run_size)
+    shard = next((d / "shards").glob("x_000000_000002.pt"))
+    size = shard.stat().st_size
+    rows_bytes = 2 * run_size * width * 4                        # 8,192
+    whole_bytes = x.numel() * 4                                  # 8,192,000
+    assert size < rows_bytes + 16_384, (
+        f"shard is {size} bytes for {rows_bytes} bytes of rows -- it serialised the whole "
+        f"{whole_bytes}-byte buffer (missing .clone() in training_checkpoint.save)")
+    assert size < whole_bytes // 100, (size, whole_bytes)        # the failure mode, stated directly
+
+
+def test_a_checkpoint_round_trips_its_rows_and_ignores_orphan_shards():
+    """load_rows walks the COMMITTED ranges, not the directory, so shards written just before a crash
+    (step 1 of the commit order, with the state commit in step 3 never reached) are ignored rather
+    than silently appended as extra training rows."""
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    run_size, n_runs, width = 4, 6, 5
+    d = Path(tempfile.mkdtemp()) / "ck"
+    ident = _ckpt_ident(run_size=run_size, n_runs=n_runs)
+    tc.create(d, ident, schedule_t_scales=torch.arange(float(n_runs)),
+              schedule_Ts=torch.arange(float(n_runs)) * 2, inits=torch.zeros(run_size, 3), V=None,
+              probe=torch.zeros(0, dtype=torch.float64), run_size=run_size, n_runs=n_runs)
+    x = torch.arange(n_runs * run_size * width, dtype=torch.float32).reshape(n_runs * run_size, width)
+    th = torch.arange(n_runs * run_size * 2, dtype=torch.float32).reshape(n_runs * run_size, 2)
+    rng = {"cpu": torch.get_rng_state(), "cuda": None, "chi_gen": None}
+    tc.save(d, from_batch=0, batch_k=2, rng=rng, x_buf=x, th_buf=th, run_size=run_size)
+    tc.save(d, from_batch=2, batch_k=4, rng=rng, x_buf=x, th_buf=th, run_size=run_size)
+    assert tc.peek(d)["batches_done"] == 4
+
+    # An ORPHAN: rows on disk for batches [4,6) whose state commit never landed.
+    from core.Helpers.file_manager import atomic_torch_save
+    atomic_torch_save(x[16:24].clone(), d / "shards" / "x_000004_000006.pt")
+    atomic_torch_save(th[16:24].clone(), d / "shards" / "th_000004_000006.pt")
+
+    xr, thr = tc.load_rows(d, tc.peek(d)["batches_done"], run_size)
+    assert xr.shape[0] == 16, f"orphan shard was picked up: {xr.shape}"
+    assert torch.equal(xr, x[:16]) and torch.equal(thr, th[:16])
+
+    tc.mark_complete(d, n_runs)
+    assert tc.peek(d)["complete"] is True and tc.peek(d)["batches_done"] == n_runs
+
+
+def test_a_checkpoint_refuses_a_config_it_was_not_written_for():
+    """Every identity field, named individually, plus the parameter-transform probe. The digest
+    already routes a changed config elsewhere; this is what catches a hand-moved directory, and its
+    message has to say WHICH field so the fix is obvious."""
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    run_size, n_runs = 4, 6
+    d = Path(tempfile.mkdtemp()) / "ck"
+    ident = _ckpt_ident(run_size=run_size, n_runs=n_runs)
+    probe = torch.linspace(0, 1, 21, dtype=torch.float64).reshape(7, 3)
+    tc.create(d, ident, schedule_t_scales=torch.zeros(n_runs), schedule_Ts=torch.zeros(n_runs),
+              inits=torch.zeros(run_size, 3), V=None, probe=probe,
+              run_size=run_size, n_runs=n_runs)
+    tc.verify(d, ident, probe)                                   # the matching case must NOT raise
+
+    for key, val in (("run_size", 8), ("chi_k_pad", 6), ("t_scale_bounds", (1.0, 20.0)),
+                     ("n_runs", 12), ("nd_dim", 11)):
+        try:
+            tc.verify(d, {**ident, key: val}, probe)
+        except ValueError as e:
+            assert key in str(e), f"the message must name the field that differs: {e}"
+        else:
+            raise AssertionError(f"a changed '{key}' was accepted")
+
+    try:
+        tc.verify(d, ident, probe + 1.0)                          # same box? no.
+    except ValueError as e:
+        assert "transform" in str(e) and "max|diff|" in str(e), e
+    else:
+        raise AssertionError("a changed parameter transform was accepted")
+
+
+def test_checkpoint_peek_survives_a_torn_state_file():
+    """peek falls back to state.prev.pt rather than raising, so a crash DURING the commit costs one
+    interval instead of the run. It must never raise: the caller's next move is 'start fresh', and an
+    exception there would turn a recoverable checkpoint into a dead one."""
+    import tempfile
+    from core.SBI import training_checkpoint as tc
+    run_size, n_runs = 4, 6
+    d = Path(tempfile.mkdtemp()) / "ck"
+    ident = _ckpt_ident(run_size=run_size, n_runs=n_runs)
+    tc.create(d, ident, schedule_t_scales=torch.zeros(n_runs), schedule_Ts=torch.zeros(n_runs),
+              inits=torch.zeros(run_size, 3), V=None, probe=torch.zeros(0, dtype=torch.float64),
+              run_size=run_size, n_runs=n_runs)
+    x = torch.zeros(n_runs * run_size, 5)
+    rng = {"cpu": torch.get_rng_state(), "cuda": None, "chi_gen": None}
+    tc.save(d, from_batch=0, batch_k=2, rng=rng, x_buf=x, th_buf=x, run_size=run_size)
+    tc.save(d, from_batch=2, batch_k=4, rng=rng, x_buf=x, th_buf=x, run_size=run_size)
+
+    (d / "state.pt").write_bytes(b"\x00\x01\x02 not a torch file")
+    st = tc.peek(d)
+    assert st is not None and st["_state_file"] == "state.prev.pt", st
+    assert st["batches_done"] == 2, "fell back to the wrong generation"
+
+    (d / "state.pt").unlink()
+    (d / "state.prev.pt").unlink()
+    assert tc.peek(d) is None, "no usable state must read as None, not raise"
+
+
+def test_the_bijection_probe_detects_a_changed_rotation():
+    """The probe is what stops a resume under a different coordinate, so it must actually SEE the
+    rotation. If it were insensitive to V the guard would pass vacuously -- and V is precisely the
+    thing that is not reproducible across processes (trap X10), so that is the case it exists for.
+
+    This is also why build_posterior reuses a COMPLETE checkpoint's V rather than recomputing it: a
+    fresh V would fail this very check against the rows it is about to reuse.
+    """
+    from core.SBI import training_checkpoint as tc
+    from core.SBI.reparam import build_rotated_bijection
+    from torch.distributions.transforms import AffineTransform, ComposeTransform
+    dim = 4
+    base = ComposeTransform([AffineTransform(loc=torch.zeros(dim), scale=torch.ones(dim) * 2.0)])
+    p0 = tc.bijection_probe(base, dim)
+    assert p0.shape == (7, dim) and torch.isfinite(p0).all()
+    assert torch.allclose(tc.bijection_probe(base, dim), p0), "the probe must be deterministic"
+
+    torch.manual_seed(0)
+    q1, _ = torch.linalg.qr(torch.randn(dim, dim))
+    torch.manual_seed(1)
+    q2, _ = torch.linalg.qr(torch.randn(dim, dim))
+    pa = tc.bijection_probe(build_rotated_bijection(base, q1), dim)
+    pb = tc.bijection_probe(build_rotated_bijection(base, q2), dim)
+    assert not torch.allclose(pa, pb, rtol=1e-6, atol=1e-6), \
+        "the probe cannot tell two different rotations apart -- the resume guard would be vacuous"
+    assert not torch.allclose(pa, p0, rtol=1e-6, atol=1e-6), \
+        "the probe cannot tell a rotated box from an unrotated one"
+
+
+def test_the_bijection_probe_works_when_the_rotation_lives_on_the_gpu():
+    """The probe grid must be built on the TRANSFORM's device.
+
+    A rotated transform holds V in OrthogonalTransform.M. With V on CUDA and the grid on the CPU,
+    `x @ M` raises "Expected all tensors to be on the same device" -- a hard error inside
+    build_posterior, not a silent promotion. That is the retrain's exact configuration (rotation ON,
+    CUDA), it is unreachable from any CPU-only test, and it is what the chi smoke train caught after
+    the Fisher rotation had already run for over an hour. Hence a GPU test.
+
+    Skipped with a note off-GPU: the suite's runner has no skip mechanism, and a CPU box still gets
+    the device-agnostic coverage from test_the_bijection_probe_detects_a_changed_rotation.
+    """
+    if not torch.cuda.is_available():
+        print("      (no CUDA -- skipping the cross-device probe check)")
+        return
+    from core.SBI import training_checkpoint as tc
+    from core.SBI.reparam import build_rotated_bijection
+    from torch.distributions.transforms import AffineTransform, ComposeTransform
+    dev, dim = torch.device("cuda"), 4
+    base = ComposeTransform([AffineTransform(loc=torch.zeros(dim, device=dev),
+                                             scale=torch.ones(dim, device=dev) * 2.0)])
+    torch.manual_seed(0)
+    V = torch.linalg.qr(torch.randn(dim, dim, device=dev))[0]
+    rotated = build_rotated_bijection(base, V)          # V lives on cuda, like build_posterior's
+
+    p = tc.bijection_probe(rotated, dim, device=dev)    # must not raise
+    assert p.device.type == "cpu", "the probe must come back on the CPU so it is storable/comparable"
+    assert p.shape == (7, dim) and torch.isfinite(p).all()
+    # and it must equal the same computation done wholly on the CPU, so a checkpoint written on one
+    # machine still verifies on another
+    base_cpu = ComposeTransform([AffineTransform(loc=torch.zeros(dim), scale=torch.ones(dim) * 2.0)])
+    p_cpu = tc.bijection_probe(build_rotated_bijection(base_cpu, V.cpu()), dim)
+    assert torch.allclose(p, p_cpu, rtol=1e-5, atol=1e-5), (p - p_cpu).abs().max()
+
+    # The RESUME half of the same defect. A checkpoint stores V on the CPU (portable, by design), so
+    # build_posterior has to rehome it before rebuilding the rotated bijection -- otherwise the first
+    # GPU resume with rotation ON crashes in the same matmul, which is the run this feature exists to
+    # rescue. This asserts the round trip a resume actually performs.
+    import tempfile
+    d = Path(tempfile.mkdtemp()) / "ck"
+    ident = {"model": "X", "run_size": 4, "n_runs": 2}
+    tc.create(d, ident, schedule_t_scales=torch.zeros(2), schedule_Ts=torch.zeros(2),
+              inits=torch.zeros(4, 3), V=V, probe=p, run_size=4, n_runs=2)
+    V_back = tc.read_header(d)["V"]
+    assert V_back.device.type == "cpu", "V must be stored on the CPU so a checkpoint is portable"
+    V_home = V_back.to(device=dev, dtype=torch.float32)          # what build_posterior now does
+    p_resumed = tc.bijection_probe(build_rotated_bijection(base, V_home), dim, device=dev)
+    assert torch.allclose(p_resumed, p, rtol=1e-5, atol=1e-5), \
+        "the rehomed rotation does not reproduce the probe it was stored with"
+
+
+def test_checkpoint_rng_snapshot_round_trips_the_streams_it_owns():
+    """The CPU stream and the dedicated chi generator come back bit-identical, and a CUDA state is
+    refused rather than half-applied on a CPU run -- silently skipping it would leave the SDE noise
+    coming from a different stream for every batch after the resume."""
+    from core.SBI import training_checkpoint as tc
+    cpu = torch.device("cpu")
+    chi_gen = torch.Generator(device="cpu")
+    chi_gen.manual_seed(20260805)
+    torch.manual_seed(1234)
+
+    snap = tc.rng_snapshot(cpu, chi_gen)
+    a_global = torch.rand(5)
+    a_chi = torch.rand(5, generator=chi_gen)
+
+    torch.manual_seed(999)                       # move both streams somewhere else
+    _ = torch.rand(3)
+    chi_gen.manual_seed(7)
+    _ = torch.rand(3, generator=chi_gen)
+
+    tc.rng_restore(snap, cpu, chi_gen)
+    assert torch.equal(torch.rand(5), a_global), "global CPU stream not restored"
+    assert torch.equal(torch.rand(5, generator=chi_gen), a_chi), "chi_gen not restored"
+
+    fake_cuda = {"cpu": torch.get_rng_state(), "cuda": [torch.zeros(16, dtype=torch.uint8)],
+                 "chi_gen": None}
+    try:
+        tc.rng_restore(fake_cuda, cpu, None)
+    except ValueError as e:
+        assert "same device type" in str(e), e
+    else:
+        raise AssertionError("a CUDA RNG state was accepted onto a CPU run")
 
 
 if __name__ == "__main__":

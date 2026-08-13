@@ -1,7 +1,9 @@
 import contextlib
 import math
+import shutil
 import sys
 import warnings
+from pathlib import Path
 
 import torch
 import numpy as np
@@ -1056,7 +1058,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                       chi_f0: float | None = None,
                       chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
                       chi_k_fixed: int | None = None, chi_max_cycles: float | None = None,
-                      n_vars: int | None = None,
+                      n_vars: int | None = None, checkpoint: dict | None = None,
                       dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> tuple:
     """
     Generate synthetic training data for the SBI posterior using batch-by-scale strategy.
@@ -1101,6 +1103,18 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     :param fixed_dict: Optional dict mapping ND parameter indices to fixed values for
                        conditional posterior estimation.
     :param state_dep_drift: Whether the model uses state-dependent drift.
+    :param checkpoint: None (the default) disables checkpointing entirely -- no disk access, and the
+                       function behaves exactly as it did before C-11, which is what keeps
+                       analysis.gen_cal_data and every existing test call site unchanged. Otherwise a
+                       dict:
+                         dir       directory to write to (the caller owns naming; see
+                                   SBI.training_checkpoint.resolve_dir)
+                         identity  the config fields a resume must match, checked field by field
+                         probe     bijection_probe(theta_transform, P) -- catches a changed box
+                         V         the rotation to store, so a resume can reuse it rather than
+                                   recompute it (trap X10: V is NOT reproducible across processes)
+                         every     batches between writes; None/absent => config.TRAINING_CHECKPOINT_EVERY
+                         resume    "auto" (default) | "never" | "require"
     :param chi_k_fixed: hold the probe COUNT at this value instead of drawing it per batch, and skip
                         the per-row subsetting. **For a STRATIFIED CALIBRATION, not for training** --
                         training's whole point is that K varies, and fixing it would train a network
@@ -1165,8 +1179,20 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     # is 7.4 GB where 2.5 GB is needed. forcing.n_force_channels is the shared per-model rule.
     n_force_ch = _forcing.n_force_channels(model, forcing_idx, inits.shape[-1])
 
-    training_data = []
-    thetas = []
+    # PREALLOCATED accumulators, not lists. Both are sized on the first batch, because the
+    # conditioning width W is a function of the observation mode and is not known here.
+    #
+    # The lists they replace held ~4.35 GiB of finished rows at the production shape (5000 x 2048 x
+    # 114) and then `torch.cat` allocated another 4.35 GiB for the result while the list was still
+    # referenced -- an 8.7 GiB host peak at the very END of a multi-day run, which is the worst
+    # possible moment to discover it. Filling a buffer in place also makes a checkpoint shard a
+    # contiguous slice copy and a resume a slice fill rather than a list rebuild, which is what C-11
+    # needs; the checkpoint's whole memory story rests on this.
+    #
+    # torch.empty, not zeros: every row is written before it is read, and only [0, batches_done) is
+    # ever serialised or returned, so zeroing 4.35 GiB would be pure cost.
+    x_buf = None
+    th_buf = None
 
     sampling_dist = prior if proposal is None else proposal
 
@@ -1191,6 +1217,55 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
         # from the global stream would be re-randomised -- or worse, frozen -- by them.
         chi_gen = torch.Generator(device="cpu")
         chi_gen.manual_seed(20260805)
+
+    # --- Checkpointing (C-11): decide RESUME before anything expensive ---------------------------
+    # Resolved here, above the Sobol schedule, because a resume must take that schedule from the
+    # checkpoint rather than rebuild it: SobolEngine(scramble=True) consumes the torch global RNG at
+    # CONSTRUCTION and _draw_and_filter's accept count depends on the geometry, so it cannot be
+    # re-derived from a seed. Rebuilding it would silently re-stratify the second half of the run.
+    _ck_dir = _ck_every = _ck_resumed = None
+    _start_k = 0
+    if checkpoint is not None:
+        from core.SBI import training_checkpoint as _tc
+        _ck_dir = Path(checkpoint["dir"])
+        _ck_every = checkpoint.get("every")
+        _ck_every = config.TRAINING_CHECKPOINT_EVERY if _ck_every is None else int(_ck_every)
+        _ck_mode = checkpoint.get("resume", "auto")
+        _state = _tc.peek(_ck_dir)
+        _have = bool(_state and _state.get("batches_done"))
+        if _ck_mode == "never" and _have:
+            raise ValueError(
+                f"A training checkpoint with {_state['batches_done']} completed batches already "
+                f"exists at {_ck_dir} and resume='never' would overwrite it. Resume instead, or "
+                f"delete that directory deliberately.")
+        if _ck_mode == "require" and not _have:
+            raise ValueError(f"resume='require' but there is no resumable checkpoint at {_ck_dir}.")
+        if _have and _ck_mode != "never":
+            _ck_resumed = _tc.verify(_ck_dir, checkpoint["identity"], checkpoint.get("probe"))
+            _start_k = int(_state["batches_done"])
+            # The schedule and the initial conditions come from the header, never from a redraw.
+            # inits especially: it is drawn from NUMPY's RNG (trap X8), which nothing else here
+            # restores, so a redraw would quietly change the initial conditions mid-run.
+            batch_t_scales = _ck_resumed["batch_t_scales"]
+            batch_Ts = _ck_resumed["batch_Ts"]
+            inits = _ck_resumed["inits"].to(dtype=dtype, device=device)
+            _x_prev, _th_prev = _tc.load_rows(_ck_dir, _start_k, run_size)
+            if _x_prev is not None:
+                x_buf = torch.empty((n_runs * run_size, _x_prev.shape[-1]), dtype=_x_prev.dtype)
+                th_buf = torch.empty((n_runs * run_size, _th_prev.shape[-1]), dtype=_th_prev.dtype)
+                x_buf[:_x_prev.shape[0]] = _x_prev
+                th_buf[:_th_prev.shape[0]] = _th_prev
+                del _x_prev, _th_prev
+            # LAST, so nothing above (Sobol is skipped, but prior construction elsewhere may have
+            # drawn) leaves the streams anywhere other than where batch _start_k found them.
+            _tc.rng_restore(_state.get("rng") or {}, device, chi_gen)
+            print(f"[checkpoint] resuming at batch {_start_k}/{n_runs} from {_ck_dir} "
+                  f"({'reusing the stored rotation V' if _ck_resumed.get('V') is not None else 'no rotation'})",
+                  flush=True)
+        else:
+            note = _tc.describe_siblings(checkpoint["identity"], _ck_dir.parent)
+            if note:
+                print(note, flush=True)
 
     # --- Stratified sampling of batch-level (t_scale, T) pairs with pre-filter ---
     t_scale_lo, t_scale_hi = t_scale_bounds
@@ -1222,30 +1297,74 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
         valid = n_fine_cand <= n_fine_max
         return cand_t_scales[valid], cand_Ts[valid]
 
-    sobol = torch.quasirandom.SobolEngine(dimension=2, scramble=True)
-    oversample = 3
-    valid_t_scales, valid_Ts = _draw_and_filter(n_runs * oversample)
-    # Fallback: keep drawing more candidates until we have enough valid ones. A whole draw coming
-    # back empty means NO (t_scale, T) in the declared bounds fits the grid, so redrawing would spin
-    # forever -- say what is wrong instead of hanging.
-    while valid_t_scales.shape[0] < n_runs:
-        more_t_scales, more_Ts = _draw_and_filter(n_runs * oversample)
-        if more_t_scales.numel() == 0:
-            raise ValueError(
-                f"No (t_scale, T) pair in the declared bounds fits the fine-grid ceiling of "
-                f"{n_fine_max} steps (steady_idx={steady_idx}, dt_exp={dt_exp}, "
-                f"dt_nd_min={dt_nd_min}, t_scale in {t_scale_bounds}, T in "
-                f"[{t_min_exp}, {t_max_exp}]). Shorten the recording range, widen t_scale, or raise "
-                f"N_ND_MAX / the model's t_nd_max.")
-        valid_t_scales = torch.cat([valid_t_scales, more_t_scales])
-        valid_Ts = torch.cat([valid_Ts, more_Ts])
-    batch_t_scales = valid_t_scales[:n_runs]
-    batch_Ts = valid_Ts[:n_runs]
+    # SKIPPED ENTIRELY on a resume: batch_t_scales/batch_Ts already came from the checkpoint header.
+    # Not merely redundant -- rebuilding the engine would consume the torch global RNG (scramble=True
+    # draws at construction) between here and the RNG restore, and re-deriving a schedule that the
+    # accept/reject filter makes geometry-dependent is precisely the "silently non-uniform
+    # stratification" C-11 warns is worse than crashing.
+    if _ck_resumed is None:
+        sobol = torch.quasirandom.SobolEngine(dimension=2, scramble=True)
+        oversample = 3
+        valid_t_scales, valid_Ts = _draw_and_filter(n_runs * oversample)
+        # Fallback: keep drawing more candidates until we have enough valid ones. A whole draw coming
+        # back empty means NO (t_scale, T) in the declared bounds fits the grid, so redrawing would
+        # spin forever -- say what is wrong instead of hanging.
+        while valid_t_scales.shape[0] < n_runs:
+            more_t_scales, more_Ts = _draw_and_filter(n_runs * oversample)
+            if more_t_scales.numel() == 0:
+                raise ValueError(
+                    f"No (t_scale, T) pair in the declared bounds fits the fine-grid ceiling of "
+                    f"{n_fine_max} steps (steady_idx={steady_idx}, dt_exp={dt_exp}, "
+                    f"dt_nd_min={dt_nd_min}, t_scale in {t_scale_bounds}, T in "
+                    f"[{t_min_exp}, {t_max_exp}]). Shorten the recording range, widen t_scale, or "
+                    f"raise N_ND_MAX / the model's t_nd_max.")
+            valid_t_scales = torch.cat([valid_t_scales, more_t_scales])
+            valid_Ts = torch.cat([valid_Ts, more_Ts])
+        batch_t_scales = valid_t_scales[:n_runs]
+        batch_Ts = valid_Ts[:n_runs]
+
+        if _ck_dir is not None:
+            # The PREFLIGHT write, before the first simulation. A read-only Resources/, a permissions
+            # problem or a full disk then surfaces in the first seconds instead of at the first
+            # cadence write, twenty minutes in -- and this is also where the schedule becomes durable.
+            _tc.create(_ck_dir, checkpoint["identity"],
+                       schedule_t_scales=batch_t_scales, schedule_Ts=batch_Ts, inits=inits,
+                       V=checkpoint.get("V"), probe=checkpoint.get("probe"),
+                       run_size=run_size, n_runs=n_runs)
+            _free = shutil.disk_usage(_ck_dir).free
+            # Conditioning width is [S(41) | log T | forcing-or-chi]; the exact forcing width is not
+            # resolved until the first batch returns, so bound it here -- this is a disk-space sanity
+            # check, not an accounting figure. +8 covers the latent targets.
+            _w = len(statistics.FEATURE_LABELS) + 1 + (
+                config.CHI_ELEM_W * chi_k_pad if chi_mode else 8)
+            _need = n_runs * run_size * (_w + 8) * 4
+            print(f"[checkpoint] writing to {_ck_dir} every {_ck_every} batches "
+                  f"(~{_need / 2 ** 30:.1f} GiB total, {_free / 2 ** 30:.1f} GiB free)", flush=True)
+            if _free < _need:
+                warnings.warn(
+                    f"Only {_free / 2 ** 30:.1f} GiB free where the training checkpoint needs about "
+                    f"{_need / 2 ** 30:.1f} GiB. The run will fail partway through a checkpoint "
+                    f"write; free space now.", stacklevel=2)
 
     global _BATCH_TAG
-    try:
+    _pending_rng = None          # RNG as of the TOP of batch_k -- see the checkpoint write below
+    _ck_from = _start_k          # first batch not yet committed to disk
+    batch_k = _start_k           # bound up front: the except handler reads it, and an exception
+    try:                         # before the first iteration would otherwise raise NameError there
       with torch.no_grad():
-        for batch_k in tqdm(range(n_runs), desc="Generating training data", leave=False):
+        for batch_k in tqdm(range(_start_k, n_runs), desc="Generating training data", leave=False,
+                            initial=_start_k, total=n_runs):
+            # The RNG snapshot for THIS batch, taken before the first draw below (sampling_dist.sample)
+            # and therefore describing the state batch_k started from. A checkpoint committing batches
+            # [0, k) stores the snapshot taken at the top of k, so restoring it puts every stream
+            # exactly where the interrupted run's batch k began.
+            #
+            # Taken EVERY iteration rather than only on a cadence boundary, because a cancel can
+            # arrive at any batch and must be able to commit the same way. A few KB of memcpy against
+            # a ~20 s batch. Snapshot-and-restore, never replay: the OOM retries redraw SDE noise, so
+            # per-batch RNG consumption is a function of what the desktop was doing.
+            if _ck_dir is not None:
+                _pending_rng = _tc.rng_snapshot(device, chi_gen)
             # --- Batch-level scale and duration (unchanged) ---
             t_scale_k = batch_t_scales[batch_k].item()
             T_k = batch_Ts[batch_k].item()
@@ -1392,7 +1511,6 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
                     training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
                     return training_stats
-                    del x_spont_dim
                 elif spontaneous_only:
                     # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
                     force = torch.zeros((n, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
@@ -1475,14 +1593,21 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             _n_keep = max(0, n_fine_total - steady_idx)              # var_idx=0 on every path here
             _per_row = (inits.shape[-1] * n_fine_total + n_force_ch * n_fine_total
                         + max(inits.shape[-1] * _seg, _n_keep))
-            training_data.append(_rows_with_oom_retry(
-                _rows, 0, run_size, per_row_elements=_per_row, device=device))
+            _rows_out = _rows_with_oom_retry(
+                _rows, 0, run_size, per_row_elements=_per_row, device=device)
 
             # 6. Collect LATENT targets (not physical). OUTSIDE the retry on purpose: the targets are
             # computed before any simulation and are already at full width, so a retry neither
             # recomputes nor re-draws them -- the halves REPARTITION the batch's rows, they do not
             # resample it.
-            thetas.append(curr_thetas_latent.cpu())
+            _th_out = curr_thetas_latent.cpu()
+            if x_buf is None:
+                x_buf = torch.empty((n_runs * run_size, _rows_out.shape[-1]), dtype=_rows_out.dtype)
+                th_buf = torch.empty((n_runs * run_size, _th_out.shape[-1]), dtype=_th_out.dtype)
+            _lo, _hi = batch_k * run_size, (batch_k + 1) * run_size
+            x_buf[_lo:_hi] = _rows_out
+            th_buf[_lo:_hi] = _th_out
+            del _rows_out, _th_out
             if device.type == "cuda":
                 torch.cuda.empty_cache()
                 # cuFFT caches a plan per distinct transform SHAPE, outside PyTorch's caching
@@ -1500,15 +1625,57 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             if batch_k == 0 or (batch_k + 1) % _MEM_LOG_EVERY == 0:
                 _log_memory(device, _BATCH_TAG)
 
+            # --- checkpoint the completed batches [_ck_from, batch_k + 1) ---
+            # _pending_rng is this batch's OPENING state, so the write records batches [0, k+1) with
+            # the state batch k+1 will start from -- which is the snapshot the NEXT iteration takes.
+            # Hence the write below uses the snapshot taken at the top of the following iteration; we
+            # take a fresh one here for exactly that reason.
+            if _ck_dir is not None and _ck_every and (batch_k + 1) % _ck_every == 0:
+                _tc.save(_ck_dir, from_batch=_ck_from, batch_k=batch_k + 1,
+                         rng=_tc.rng_snapshot(device, chi_gen),
+                         x_buf=x_buf, th_buf=th_buf, run_size=run_size)
+                _ck_from = batch_k + 1
+
+    except BaseException:
+        # WorkerCancelled (a BaseException by design, so `except Exception` would miss it) and
+        # KeyboardInterrupt both land here, and a GUI cancel is the MOST likely way a multi-day run
+        # ends -- MainWindow.closeEvent reaches request_cancel_all(), so closing the window stops it.
+        # Before this, that discarded every completed batch.
+        if _ck_dir is not None and _pending_rng is not None and batch_k > _ck_from:
+            try:
+                # Announced BEFORE the write, so a multi-second flush is not an unexplained hang after
+                # Cancel. Safe to print here even under a cancel: CancelToken.fired is a one-shot
+                # latch, so the raise has already happened and later writes pass through. Nothing is
+                # printed BETWEEN the shard fsync and the state replace -- see training_checkpoint.
+                print(f"[checkpoint] stopping: saving {batch_k - _ck_from} completed batches "
+                      f"({_ck_from} -> {batch_k}) before unwinding…", flush=True)
+                _tc.save(_ck_dir, from_batch=_ck_from, batch_k=batch_k,
+                         rng=_pending_rng, x_buf=x_buf, th_buf=th_buf, run_size=run_size)
+            except Exception as _e:              # noqa: BLE001
+                # A failed rescue write must never REPLACE the cancel/crash with an I/O error.
+                print(f"[checkpoint] could not save on the way out: {_e}", file=sys.stderr, flush=True)
+        raise                                    # UNCONDITIONAL: never swallow a cancel
     finally:
         # Cleared however we leave -- return, OOM, or a cooperative cancel. A stale tag would make the
         # NEXT failure anywhere in the process claim a batch that finished hours ago, which is worse
         # than no tag at all.
         _BATCH_TAG = ""
 
-    training_data_tensor = torch.cat(training_data, dim=0)
-    thetas_tensor = torch.cat(thetas, dim=0)
-    return training_data_tensor, thetas_tensor
+    if x_buf is None:                       # n_runs == 0: nothing was generated, and nothing to size from
+        return torch.empty((0, 0)), torch.empty((0, 0))
+    if _ck_dir is not None:
+        # Commit whatever the last cadence boundary left, then mark it done. A COMPLETE checkpoint is
+        # deliberately not deleted: it is a several-GiB cache of a multi-day simulation, and it is what
+        # lets the flow be retrained (different capacity, learning rate, epochs) without re-simulating.
+        if n_runs > _ck_from:
+            _tc.save(_ck_dir, from_batch=_ck_from, batch_k=n_runs,
+                     rng=_tc.rng_snapshot(device, chi_gen),
+                     x_buf=x_buf, th_buf=th_buf, run_size=run_size)
+        _tc.mark_complete(_ck_dir, n_runs)
+        print(f"[checkpoint] complete: {n_runs} batches in {_ck_dir}. Safe to delete once the "
+              f"posterior is saved; keeping it lets you retrain the flow without re-simulating.",
+              flush=True)
+    return x_buf, th_buf
 
 def train_nn(training_params: dict, model: str, prior: torch.distributions.Distribution, embedding_net: torch.nn.Module,
              forcing_prior: torch.distributions.Distribution, nd_dim: int, forcing_idx: dict, rescale_idx: dict,
@@ -1551,6 +1718,15 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
     """
     if num_rounds > 1 and x_obs is None:
         raise ValueError("x_obs must be specified for SNPE algorithm")
+    if num_rounds > 1 and training_params.get("checkpoint") is not None:
+        # Refused loudly rather than half-supported. Rounds >= 2 sample from a PROPOSAL -- a trained
+        # DirectPosterior -- whose identity a checkpoint would have to capture and re-validate, which
+        # is a separate problem from the one C-11 solves. TRAINING_NUM_ROUNDS is 1 (amortized NPE), so
+        # this costs nothing today and closes the hole rather than leaving it to be discovered.
+        raise ValueError(
+            f"Training-data checkpointing is not supported for SNPE (num_rounds={num_rounds}); the "
+            f"per-round proposal is not part of the checkpoint's identity. Use num_rounds=1, or "
+            f"drop training_params['checkpoint'].")
 
     # sbi's default z_score_x="independent" fits a PER-COLUMN affine over the conditioning vector.
     # Under the chi SET layout that is permutation-BREAKING (two orderings of one probe set would be
@@ -1596,6 +1772,7 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             chi_k_fixed=training_params.get("chi_k_fixed", None),
             chi_max_cycles=training_params.get("chi_max_cycles", None),
             n_vars=training_params.get("n_vars", None),
+            checkpoint=training_params.get("checkpoint", None),
             dtype=training_params["dtype"], device=training_params["device"],
         )
 
@@ -1619,8 +1796,15 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
                 f"impossible -- treat it as a bug in the transform stack, not as expected attrition.",
                 stacklevel=2,
             )
-        thetas = thetas[valid_idx]
-        data = data[valid_idx]
+        # Only pay for the gather when it actually drops something. `data[valid_idx]` is a boolean
+        # gather: it allocates a SECOND full-size tensor while the first is still live, which at the
+        # production shape is another 4.35 GiB and reinstates exactly the 8.7 GiB host peak
+        # gen_training_data's preallocated accumulators were introduced to remove. The mask is
+        # all-true in practice (the box round-trip cannot produce a non-finite latent on torch 2.9 --
+        # trap X4), so this is behaviour-identical and is what makes that preallocation pay.
+        if not bool(valid_idx.all()):
+            thetas = thetas[valid_idx]
+            data = data[valid_idx]
 
         # Fit OUR standardizers, once, on the post-filter data. posterior_nn was already called (it is
         # constructed before any data exists), so this has to happen here -- before append_simulations,

@@ -19,3 +19,5 @@ __pycache__/
 /Resources/Posteriors/
 /Resources/CrossValidation/
 /Resources/ReductionMap/
+# Training-data checkpoints (C-11): several GiB per run, and a cache of a run rather than a result.
+/Resources/Checkpoints/

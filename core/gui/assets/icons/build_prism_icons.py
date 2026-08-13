@@ -1,10 +1,14 @@
-"""Generate ``prism-icons.ttf`` -- a tiny icon font of 4 original glyphs (back, settings, refresh, help)
-used by core/gui/icons.py. Run:  python core/gui/assets/icons/build_prism_icons.py
+"""Generate ``prism-icons.ttf`` -- a tiny icon font of 5 original glyphs (back, settings, refresh, help,
+close) used by core/gui/icons.py. Run:  python core/gui/assets/icons/build_prism_icons.py
 
 The glyphs are authored procedurally in font units (em=1000, y-up, centred on (500, 500)) and compiled
 with fontTools, so the font is fully reproducible offline (no third-party font needed). Icons are mapped
-to the private-use codepoints U+E000..U+E003. They are original work for PRISM, released under MIT
+to the private-use codepoints U+E000..U+E004. They are original work for PRISM, released under MIT
 (see LICENSE.txt). Regenerate after editing a glyph; commit the resulting .ttf.
+
+CODEPOINTS here and ``icons.NAMES`` must stay in step -- the codepoint is the only thing that ties a
+semantic name to a glyph, and a name present in one but not the other renders as .notdef (an empty box)
+rather than failing. ``tests/test_user_models.py`` asserts every NAMES entry resolves.
 """
 import math
 from pathlib import Path
@@ -14,7 +18,8 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 EM = 1000
 CX = CY = 500
-CODEPOINTS = {"back": 0xE000, "settings": 0xE001, "refresh": 0xE002, "help": 0xE003}
+CODEPOINTS = {"back": 0xE000, "settings": 0xE001, "refresh": 0xE002, "help": 0xE003,
+              "close": 0xE004}
 
 
 def _polar(a_deg, r, cx=CX, cy=CY):
@@ -86,10 +91,29 @@ def _help():
     return _draw(TTGlyphPen(None), hook, stem, dot)
 
 
+def _bar(cx, cy, half_len, half_w, angle_deg):
+    """One rotated rectangle, as a single contour. Point order is fixed so every bar winds the same
+    way -- two bars in OPPOSITE directions would knock their overlap out under the non-zero fill rule
+    and leave a hole where the strokes cross."""
+    a = math.radians(angle_deg)
+    ux, uy = math.cos(a), math.sin(a)                   # along the bar
+    vx, vy = -uy, ux                                    # across it
+    return [(cx + ux * half_len + vx * half_w, cy + uy * half_len + vy * half_w),
+            (cx + ux * half_len - vx * half_w, cy + uy * half_len - vy * half_w),
+            (cx - ux * half_len - vx * half_w, cy - uy * half_len - vy * half_w),
+            (cx - ux * half_len + vx * half_w, cy - uy * half_len + vy * half_w)]
+
+
+def _close():
+    # An X: two crossed bars at +-45 deg. Deliberately a touch shorter and thicker than a text "x" --
+    # it sits on a 32 px-wide button next to a file path, where a thin glyph reads as dirt.
+    return _draw(TTGlyphPen(None), _bar(CX, CY, 300, 58, 45), _bar(CX, CY, 300, 58, -45))
+
+
 def build(out_path: Path) -> Path:
     glyphs = {".notdef": TTGlyphPen(None).glyph(), "back": _back(), "settings": _settings(),
-              "refresh": _refresh(), "help": _help()}
-    order = [".notdef", "back", "settings", "refresh", "help"]
+              "refresh": _refresh(), "help": _help(), "close": _close()}
+    order = [".notdef", "back", "settings", "refresh", "help", "close"]
 
     fb = FontBuilder(EM, isTTF=True)
     fb.setupGlyphOrder(order)

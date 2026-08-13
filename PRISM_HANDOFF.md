@@ -68,16 +68,25 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 | Suite | Tests | Covers |
 |---|---|---|
 | `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
-| `tests/test_user_models.py` | 29 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry |
-| `tests/test_user_sbi.py` | 39 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, **the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check** |
+| `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
+| `tests/test_user_sbi.py` | 57 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write** |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 10 | the master Bounds/Cells triple, bounds resolution, and the prior/posterior identity guards — **eval box comes from the sidecar, not the config** |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **185** | |
+| **Total** | **213** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
 > trains perfectly happily and produces a posterior nobody can explain.
+
+> ⚠ **A green suite does NOT certify the GPU path.** Every suite runs on the CPU (`config.cpu_device()`
+> or small CPU configs), so nothing in it can catch a tensor built on the wrong device: a CPU tensor
+> into a CUDA matmul is a hard `RuntimeError`, not a silent promotion, and it fires only on the card.
+> C-11 shipped exactly that bug into `build_posterior` with all 55 tests passing, and `smoke_train.py`
+> on the GPU is what found it — **after the Fisher rotation had already run for over an hour**. Two
+> tests now early-return with a printed note when `torch.cuda.is_available()` is False rather than
+> pretending to cover it. **After touching anything that moves tensors, run the smoke train on the
+> card; the suite is necessary and not sufficient.**
 
 > **Runtimes are wildly uneven — budget for it.** Five of the six suites finish in seconds to a few
 > minutes. **`test_user_sbi.py` takes ~1 hour**, nearly all of it inside
@@ -122,7 +131,8 @@ core/
                   chi_encoder (ChiSetEncoder: the permutation-invariant probe-set encoder),
                   embedded_network (the two-pathway conditioning net), reparam (latent box +
                   rotation), decorrelate (Fisher rotation), analysis (SBC data + PPC), overlay
-                  (posterior-overlay diagnostics), Priors/.
+                  (posterior-overlay diagnostics), training_checkpoint (C-11: resumable
+                  training-data checkpoints), Priors/.
   FDT/            campaigns, spectral, fdt_pipeline, cross_validation, sanity.
   Reduction/      NWK->Hopf normal-form map. IRRELEVANT to SBI — do not reason about it here.
   Helpers/        file_manager, helpers, visualizers, labels, model_store.
@@ -131,7 +141,7 @@ scripts/          15 non-interactive diagnostics + _common.py (the shared SimCon
                   Newest: smoke_train (the pre-flight five-stage run), chi_mask_audit (why chi
                   probes get masked), chi_f0_sweep (the band/F0/T_obs/cycle-cap measurement).
 Resources/        Bounds/ Cells/ Units/ Models/ (inputs) + Plots/ Priors/ Posteriors/
-                  CrossValidation/ (generated outputs).
+                  CrossValidation/ Checkpoints/ (generated outputs, all gitignored).
 ```
 
 ### 2.1 SBI data flow
@@ -164,6 +174,11 @@ core/gui/
   streams.py    redirect_streams + CancelToken + WorkerCancelled.    vt.py  tqdm chunk classifier.
   design.py / fonts.py / theming.py    the Fluent token + QSS layer.
   plot_watcher.py  NewPngWatcher: polls a plot dir and emits new PNGs.
+  mpl_theme.py  drives matplotlib rcParams from the design tokens (B-c).
+  icons.py / app_icon.py  the bundled icon FONT (B-e) and the application/window icon.
+  assets/       fonts/ (Inter), icons/ (prism-icons.ttf + its generator), app/ (the PRISM mark:
+                prism.svg is the editable source, the PNGs are what ships -- Qt has no svg
+                image-format plugin here, so QIcon("x.svg") would be silently NULL).
 ```
 
 **Navigation** is two levels deep: Home → one of Reduction Map / FDT Analysis / Parameter Inference /
@@ -488,6 +503,45 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    hypotheses worth testing on the result are `f_scale` (unmeasured → measurable, 213× on `‖g‖`),
    `t_scale` and `lam`.
 
+   > ### The run is now CHECKPOINTED (C-11) — what that changes for you
+   >
+   > A resumable checkpoint is written to `Resources/Checkpoints/train_<digest>/` every
+   > `TRAINING_CHECKPOINT_EVERY = 50` batches, and also on the way out of a cancel. **To resume after
+   > any death, simply start the same run again**: the directory is a digest of the config, so a
+   > matching run finds it and reports `[checkpoint] resuming at batch N/5000`. There is no GUI
+   > control and nothing to remember.
+   >
+   > **New priors are fine. Always.** A new prior simply means a new run, which gets its own
+   > checkpoint directory and proceeds normally. Nothing here restricts what priors you may build.
+   >
+   > The one rule is narrower: **you cannot RESUME an interrupted run under a different prior.** The
+   > prior identifies the distribution the finished rows were drawn from, so splicing new rows drawn
+   > from a different prior onto them would silently corrupt the training set — the checkpoint refuses
+   > by routing elsewhere, which is the correct behaviour, not a limitation. So: if a run dies and you
+   > want to resume it, keep the prior it started with (save it, and load it rather than rebuilding).
+   > If you'd rather start over with a new prior, just do that; nothing is in your way.
+   >
+   > The run prints
+   > `[checkpoint] N other checkpoint(s) exist and do NOT match this run: … differs in <field>`
+   > when a checkpoint exists that it cannot use — read that line before letting a "fresh" run
+   > proceed, in case the mismatch was accidental.
+   >
+   > A resume **reuses the stored Fisher rotation `V`** and skips recomputing it. This is not an
+   > optimisation, it is required for correctness (trap **X10**), and it also removes the largest
+   > pre-training cost from every restart.
+   >
+   > Watch for: the preflight line naming the directory and the free disk (~5 GiB is needed), the
+   > `[checkpoint] resuming at …` line if you expected a resume, and `[checkpoint] complete:` at the
+   > end. A completed checkpoint is **not** deleted — it is a cache of the whole simulation run, so
+   > you can retrain the flow at a different capacity/learning rate without re-simulating. Delete it
+   > once the posterior is saved and you are happy.
+   >
+   > `smoke_train.py` has checkpointing **OFF** by default (a complete checkpoint would short-circuit
+   > the very simulation a smoke run exists to exercise). **Run it once with `CHECKPOINT=1` on the
+   > card before the record run** — that writes into a fresh temp dir, so nothing is ever reused, and
+   > it is the only cheap way to exercise the checkpoint path on a GPU. The C-11 tests are CPU-only
+   > and a CPU test cannot catch a wrong-device tensor; that is exactly the bug this script found.
+   >
    > **VRAM, because the first attempt died on it (2026-08-10 Appendix entry, trap X6).** Check
    > `nvidia-smi --query-gpu=memory.used --format=csv` before starting — **not**
    > `torch.cuda.mem_get_info()`, which overstates free VRAM by the size of your desktop (measured:
@@ -505,8 +559,11 @@ what is left open (C-2, C-3, C-7) does not. What remains:
 7. `scripts/sbc_characterize.py` pooled on the result. The hypothesis to test is now specifically
    whether `k`/`x_scale` **tighten**, since §4.4 shows that is the alias chi does *not* break on its own.
 
-**Still open (not blocking a retrain):** the Infer tab still submits a fixed probe list, so the
-GUI cannot yet enter per-probe frequencies even though the core accepts them — see §6.
+> ~~**Still open (not blocking a retrain):** the Infer tab still submits a fixed probe list, so the
+> GUI cannot yet enter per-probe frequencies even though the core accepts them.~~ **STALE — this was
+> already false when written down.** C-2 and C-3 shipped 2026-08-10: the Infer tab holds an
+> add/remove probe table (`_ChiProbeRow`, one widget per probe carrying its recording AND the
+> frequency it was driven at) and a **Plan probes…** button. See §6.
 
 > ~~**Caveat:** the `scripts/` diagnostics were not updated for chi-mode.~~ **DONE** (2026-07-28,
 > top Appendix A entry). All of them now build their config through `scripts/_common.py`.
@@ -1472,6 +1529,25 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   *assigned* that batch's `t_scale`, so their ranks are not independent. Lowering the pair count to
   buy wall-clock is a different measurement, and it damages precisely the parameter chi(ω) exists to
   separate. Batch SIZE is nearly free; batch COUNT is the cost and the statistics.
+- **X9. `torch.save` of a slice VIEW serialises the whole underlying storage — and `.contiguous()`
+  does not save you.** Measured on torch 2.9.0: a 100-row view of a `(200000, 10)` float32 buffer
+  wrote **8,001,492 bytes**; `view.contiguous()` wrote **8,001,633**; `view.clone()` wrote **5,566**.
+  A row-slice of a contiguous 2-D tensor *is already contiguous*, so `.contiguous()` returns the same
+  view and changes nothing — only `.clone()` detaches the storage. This bites anything that persists
+  a window of a preallocated accumulator: the training checkpoint (C-11) writes a ~47 MB shard per
+  interval with the clone and would have written the whole **4.35 GiB** buffer 100 times without it,
+  ~435 GiB over a run. It presents as *"checkpointing got slow"*, never as a wrong answer, so no
+  correctness test catches it — `test_checkpoint_shards_do_not_serialize_the_whole_accumulator`
+  exists solely to pin the file SIZE.
+- **X10. The Fisher rotation `V` is NOT reproducible across processes.** `build_latent_fisher_rotation`
+  seeds its *noise* under `fork_rng`, but its **operating points** come from
+  `latent_prior.sample(...)` on the caller's global RNG (`decorrelate.py`, the `z_med` and `z_samp`
+  draws), which nothing seeds. Training is ground-truth-free, so both draws run. A restarted process
+  therefore computes a different `V` → a different `T_train` → different **latent** targets for every
+  batch after the restart, silently mixed with the pre-crash rows. This is why C-11's resume reuses
+  the checkpoint's stored `V` and skips the Fisher entirely, and why that reuse lives in
+  `build_posterior` rather than inside `gen_training_data`. Any future "just re-run the rotation"
+  shortcut re-opens it.
 
 ### Core-side contract hooks (Phase 0 refactors — non-breaking, defaults = old CLI behaviour)
 
@@ -1490,12 +1566,29 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 ## 6. Open backlog
 
+> ### ▶ PICK UP HERE (as of 2026-08-12)
+>
+> The retrain is the priority and it is **the user's to run**, through the GUI (§4.1 step 5). It is
+> now checkpointed, so a crash costs one interval rather than the run. Everything below is small and
+> independent of it; nothing here blocks it.
+>
+> | # | What | Why it is worth doing | Size |
+> |---|---|---|---|
+> | 1 | **Migrate the remaining non-atomic writes** to `file_manager.atomic_torch_save`: `save_posterior_artifacts`, `save_prior_artifacts`, `FDT/cross_validation`. | The helper exists and is proven by the checkpoint; these three still write non-atomically, and one of them persists the posterior a multi-day run just produced. **Highest value of the three.** | ~30 min |
+> | 2 | **Two hardcoded plot colours** that do not follow the theme: `Reduction/plots.py:140` `color="white"` (on a viridis surface) and `FDT/plots.py:64` `color='gray'`. | The last residue of B-c. Cosmetic, marginal on both backgrounds. | minutes |
+> | 3 | **Eyeball the new GUI surfaces on a real display**: the application icon (taskbar + window), and the model builder's `_ParamRow`, which became TWO lines when it gained the box selector. | Headless tests cover the wiring, never the pixels — the standing rule in the last row of this table. Both are new since 2026-08-12 and no human has seen either. | minutes |
+> | 4 | **Decide the ND log-SAMPLING question** (S-1's remaining half). | `"box": "log"` changes the coordinate the GMM is fitted in; it does **not** move prior mass, because `UserPrior._global_map` still samples uniformly in the linear box. Making the sweep geometric is a *science* decision and would have to move the built-ins too. **Not a coding task — needs the user's call first.** | — |
+>
+> Do **not** re-open: B-c, B-e, S-1's `(lo, hi)` half, C-1 through C-11, or §9.1/§9.2 — all done, and
+> the rows below say what landed. §9.3's file splits remain deliberately undone for the reason stated
+> there, which the 2026-08-12 change set (a large edit across those same files) only strengthens.
+
 | ID | Item | Status |
 |---|---|---|
-| **B-c** | **Dark-theme matplotlib figures.** The remaining theming gap: figures/PNGs stay WHITE in dark mode. Means driving matplotlib rcParams/facecolors from the design tokens in the plotting layer. (pyqtgraph already follows the theme.) | OPEN |
+| **B-c** | ~~**Dark-theme matplotlib figures.**~~ `core/gui/mpl_theme.py` drives 16 rcParams from the design tokens, installed once by `app.build_app` and re-applied on `Appearance.theme_changed` — the same **apply-now + subscribe** shape `widgets/live_hair_bundle._install_theme` uses for pyqtgraph. The core plot modules (`visualizers.py`, `FDT/plots.py`, `Reduction/plots.py`) read `plt.rcParams` rather than importing GUI tokens, so they stay CLI-safe and get themed for free. One deliberate exception: `panels/simulate_export.py` pins its own white figure, because an exported video must not depend on the app's theme. **Known limitation, by design:** a theme flip does not recolour figures ALREADY displayed — they are rasterised to PNG at build time (`figure_stack.py`) and adopt the new theme on the next run. Pinned by 5 tests in `test_gui_progress.py`, incl. `test_plot_ppc_summary_box_follows_the_dark_theme` and the white-video guard. | ✅ **DONE** (shipped in `20a1a52`; this row was simply never updated) |
 | **L-1..18** | ~~GUI layout/sizing (§10).~~ | ✅ **DONE 2026-07-28** — tier 1 + tier 2, pinned by 4 new geometry tests |
-| **B-e** | **A proper icon set.** Replace the unicode glyph buttons (⟳ ⚙ ← ?) with real icons (bundled SVGs behind a `.qrc`, or a licensed icon font). Sidesteps per-font glyph coverage quirks. | OPEN |
-| **S-1** | **Per-parameter bounds/priors in the model builder.** Today `model_store._nd_bounds` emits placeholder boxes `(v ± max(|v|,1))`, whose negative half is unphysical for SBI (e.g. a noise strength `d0=0.05` gets `(-0.95, 1.05)`). Fine for Simulate (which uses the exact GT value); wasteful for SBI. Let the user set per-parameter `(lo, hi)` + prior type. **Keep the ND-section ORDER == `compiled.param_names`.** | OPEN |
+| **B-e** | ~~**A proper icon set.**~~ Solved with a **bundled icon FONT**, not the `.qrc`/SVG route this row proposed — `core/gui/icons.py` + `assets/icons/prism-icons.ttf`, generated offline by `build_prism_icons.py` (fontTools, original glyphs, MIT). **The reason for the font over `QIcon`s is load-bearing:** buttons render an icon as TEXT, so they recolour for free from the QSS `color:` on every theme flip, with no re-tint machinery. Every glyph keeps its unicode as a fallback, so a missing `.ttf` degrades rather than blanks. Now 5 glyphs — the original `⟳ ⚙ ← ?` plus `close` (U+E004) for the χ probe table's remove button. `artifact_picker`'s `➕` is now plain ASCII: it is a combo ITEM label, which `apply_icon` cannot reach, and a `QIcon` there would be the one baked-in colour that ignores the theme. **Also added, and not in this row: an application/window icon**, which did not exist at all (`setWindowIcon` appeared nowhere, so the taskbar showed the interpreter's mark) — `assets/app/prism.svg` → PNG set via `build_app_icon.py`, plus the Windows `SetCurrentProcessExplicitAppUserModelID` the taskbar needs. ⚠ Qt's `svg` **image-format plugin is absent here**, so `QIcon("x.svg")` is silently NULL; the SVG is source, the PNGs ship. | ✅ **DONE** (the four glyphs in `20a1a52`; the rest since) |
+| **S-1** | ~~**Per-parameter bounds/priors in the model builder.**~~ Both halves now done, in two steps. **`(lo, hi)`** landed with `schema_version 2` (`20a1a52`): each ND param persists as `{value, lo, hi}`, validated (`lo < hi`, `lo <= value <= hi`), with a v1 in-memory migration, and the box reaches the Bounds file verbatim. **Prior type** is `schema_version 3`'s per-param **`"box"`** (`"linear"`/`"log"`) → `nd_log_params` → `ModelSpec.log_params` → `orchestrator._log_params_for` → `reparam.nd_log_mask`, the same seam `config.REPARAM_LOG_PARAMS` gives the built-ins, and already persisted into the `.rot.pt` sidecar. ⚠ **`"box"` is named for what it controls and is NOT the rescale/forcing blocks' `"log-uni"`:** it changes the COORDINATE the latent GMM and the flow work in (which is what linearizes a multiplicative degeneracy before rotating); it does **not** move prior mass, because `UserPrior._global_map` still samples uniformly in the linear box. Making the sweep geometric is a separate science decision that would have to move the built-ins too — deliberately not done. **ORDER invariant untouched:** the ND section is still written by `for p in compiled.param_names`. Two live bugs fixed in passing: `_ParamRow` read a blank min/max as a real `0.0` (`FloatField.value()`'s documented hazard, which `param_grid` guarded against and the builder did not — now `value_or_none`), and **forcing** params still took the placeholder box, so `amp=0.05` got `(-0.95, 1.05)` — now `phase` = `(0, 2π)`, `freq`/`tau` geometric and strictly positive, `amp` floored at 0. `_nd_bounds` promoted to public `nd_bounds` (§9.6's private-name-across-boundaries). | ✅ **DONE** |
 | — | **A trained chi-mode posterior + the calibration payoff.** See §4.1 for the gated order. | OPEN — the priority |
 | **C-1** | ~~Gate the chi band on `T_obs`.~~ | ✅ **DONE 2026-08-06** — §4.3.1. Result: the band's failures are a drive-CYCLE limit, not a frequency one. Superseded by **C-4**. |
 | **C-4** | ~~Cap each chi probe's lock-in DURATION at a cycle count.~~ | ✅ **DONE 2026-08-06** — `config.CHI_MAX_CYCLES = 20`, applied in `gen_chi_raw`, on the `SimConfig`, in the sidecar and checked on load. §4.3.1. |
@@ -1503,14 +1596,14 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 | **C-6** | **~33 % of training rows carry no live chi probe** (was 55 %; §4.3.3–§4.3.6). Both parts done — per-ROW placement (C-6) and per-ROW durations (C-8). The residue is the genuinely unmeasurable tail: a sub-1 Hz bundle cannot complete two drive cycles at 0.03–0.3× its Ω₀ within 60 s at any placement or duration. Closing it further means changing the PRIOR (§4.3.4 option 2), not the estimator — a science decision. **Diagnosis, kept because it explains the shape of the fix:** the `CHI_MIN_CYCLES` floor is the only active predicate, and the driver is the row's own **Ω₀**, not `T` and not the band — live fraction goes 0 % below 3 Hz to 98 % above 30 Hz, while the prior spans ~4 decades of Ω₀. The masked rows are **genuine oscillators** (spectral prominence in the thousands), so the mask is correct physics and screening them out would be wrong. | ✅ **DONE 2026-08-07** — no longer a blocker |
 | **C-9** | ~~The Fisher rotation amplifies ceiling-pinned `logcyc`.~~ **MEASURED on a real rotation 2026-08-10, and it does reproduce — but mildly, and INTERMITTENTLY, which is the part that matters.** `chi5_logcyc` pinned exactly as predicted (std 8.7e-05, ratio 2.9e-05, the same signature as the map) yet reached only `max\|J\|` = **6.0** — the *smallest* chi row, against the map's 2.0e4. The amplification depends on whether the ±dz arms straddle a `floor()` step; at that operating point they did not. A production rotation averages **8** operating points at m=48 over a ~4-decade Ω₀ prior, so this is a landmine that fires sometimes, not a constant — the worst kind to leave in. **Fixed with C-10 by the same one-line change.** | ✅ **DONE 2026-08-10** |
 | **C-10** | ~~`chi.fisher_features` emits K duplicate rows.~~ **Confirmed hard on the same rotation:** `chi0/1/2/3_logcyc` agreed to **6 significant figures** (`max\|diff\|` ~2e-5 against entries of 37.44), because with the ceiling clear `logcyc_j = log(mult_j) + log(f_peak) + log(T_obs)` and both constants vanish under standardization — so the row **is** `A3_log_fpeak`'s, K times over, weighting that direction K-fold in `Jᵀ J`. **Fix: `logcyc` removed from `CHI_FISHER_CHANNELS`** (now `("logmag", "cos", "sin")`, 3K not 4K) and `fisher_features` reduced to **one argument**, which makes trap CHI10's whole class of mis-wiring a `TypeError`. Every `logcyc` row was a duplicate, a degrading duplicate, or quantization — never independent information, so nothing was lost. Pinned by two updated assertions plus `test_fisher_features_takes_one_argument_and_its_channels_are_what_they_claim`. | ✅ **DONE 2026-08-10** |
-| **C-11** | **No checkpointing in `gen_training_data`.** A death at batch 4000 of 5000 loses every simulation — the accumulators are plain Python lists, concatenated only at the end, and nothing touches disk until `save_posterior_artifacts` after training. The 2026-08-10/11 retries remove the failure modes that have actually bitten, but a driver reset, a reboot or a power cut still costs the whole multi-day run. **Deliberately not built yet:** a CORRECT checkpoint must persist the Sobol arrays, torch's global RNG, `chi_gen`, **numpy's** RNG (trap X8) and the proposal — and a subtly wrong one resumes with silently non-uniform stratification, which is worse than crashing. Do it as its own change with its own tests if multi-day runs become routine. A cheap salvage variant (periodic `torch.save` of the rows so far, for a human to inspect — NOT resumable) is a two-liner if the accumulator is preallocated. | OPEN — the main risk left on a long run |
+| **C-11** | ~~**No checkpointing in `gen_training_data`.**~~ Built, resumable, opt-in. `core/SBI/training_checkpoint.py` + `config.TRAINING_CHECKPOINT_EVERY = 50` + `CHECKPOINT_PATH`. **The invariant:** *a checkpoint describes batches `[0,k)`, with the RNG captured at the TOP of iteration k* — snapshot-and-restore, never replay, because the OOM retries redraw SDE noise so per-batch RNG consumption depends on what the desktop was doing. Persists the Sobol SCHEDULE (not a seed: `SobolEngine(scramble=True)` consumes the global RNG at construction and the accept/reject filter is geometry-dependent), torch CPU + CUDA RNG, `chi_gen`, `inits` (the tensor, not numpy's state — trap X8), and **`V`**. ⚠ **`V` is the part that would have been missed:** it is not reproducible across processes (trap **X10**), so `build_posterior` peeks the checkpoint BEFORE the rotation block and reuses the stored `V` rather than recomputing it — which also skips the Fisher, the dominant pre-training cost. Directory is a digest of a declared identity, so auto-detect is exact and two configs can never mix; `verify` then re-checks field by field and names the field. Commit order is shards → fsync → atomic state replace, so orphan shards from a crash are ignored by construction. A GUI **cancel** (incl. closing the window, via `MainWindow.closeEvent`) commits the completed batches on the way out and re-raises unconditionally. `checkpoint=None` is the whole compatibility story — `gen_cal_data` and every pre-C-11 call site are untouched and write nothing. Also removed the **8.7 GiB** host peak: the accumulators are preallocated and `train_nn`'s filter no longer gathers when the mask is all-true. **Deliberately not built:** auto-resume without an explicit mode, SNPE `num_rounds > 1` (refused loudly), cross-device resume, checkpointing sbi's fit loop, a GUI control, compressing shards, auto-deleting a completed checkpoint (it is a cache of a multi-day run — it lets you retrain the flow without re-simulating). | ✅ **DONE** |
 | **C-7** | ~~`build_prior`'s `num_iterations=50` is a hard-coded literal, and its stability sweep shares `cfg.hw.batch_size` with TRAINING.~~ Promoted to **`config.PRIOR_SWEEP_ITERATIONS`** and **`config.PRIOR_SWEEP_BATCH`** (0 = follow `hw.batch_size`, the historical behaviour and still the right default). The trap it removes: the sweep is ITERATION-bounded, so shrinking the shared batch for a quick run made the prior worse *without* making it faster — 527 s at batch 2048 against >70 min and unfinished at 32. Also recorded at the constant: total candidates = batch x iterations, each round pays a full trajectory whatever the batch, and the subclasses' `batch_size % num_iterations` guard is **vacuous** (`construct_prior` passes `batch*iterations` down), so do not rely on it. | ✅ **DONE 2026-08-10** |
 | **C-5** | ~~Settle the chi band's HIGH EDGE under the cap.~~ | ✅ **DONE 2026-08-06** — §4.3.2. `(0.03, 0.3)` **stands**: under the cap CV and SNR discriminate nowhere in 0.03–0.6, entrainment has a measured knee at 0.35–0.4×, and phase scatter is smooth so no threshold on it is evidence. The one residual is a judgement, not a gap: whether a phase-incoherent probe is worth including. Settling *that* needs two trained posteriors and is not worth it before a first working one exists. |
 | **C-2** | ~~The Infer tab's variable-length probe table.~~ The Infer tab now holds an add/remove probe table; each row is **one `_ChiProbeRow` widget** carrying its recording AND the frequency it was actually driven at, and `_infer` submits `(path, freq_Hz)` PAIRS. Both stated constraints are met and pinned by tests: `_rebuild_chi_fields` **preserves** existing rows (they hold hand-typed frequencies and browsed paths a rebuild cannot regenerate; it seeds only when empty, never tops up or trims), and one-widget-per-row makes the middle-deletion mispairing structurally impossible. A blank frequency box is caught before the run — `FloatField.value()` returns 0.0 on bad text, and 0 Hz is a genuine DC probe the lock-in would attempt. | ✅ **DONE 2026-08-10** |
 | **C-3** | ~~A GUI probe planner.~~ A **Plan probes…** button on the Infer tab's χ page measures Ω₀ from the selected passive recording and reports the in-band range in Hz, the minimum seconds to clear the `CHI_MIN_CYCLES` floor at the low edge, the length above which the ceiling truncates, and a per-row verdict at the entered `T_obs`. It also fills BLANK frequency boxes with a nominal in-band grid (blank only — a typed frequency is a record of what the bench did). **The predicates are not reimplemented:** they live in `chi.probe_verdict`, which `orchestrator.build_experiment_obs_chi` was refactored to call, so the planner and the run cannot disagree. | ✅ **DONE 2026-08-10** |
 | — | ~~Make the `scripts/` diagnostics chi-aware.~~ | ✅ **DONE 2026-07-28** — `scripts/_common.py`; see §4.1 |
-| — | Non-atomic `torch.save`/HDF5 writes against a cancel (narrow window; worst case a partial-but-valid sweep file, not corruption). | OPEN, low |
-| — | **Never run for real on a display** — ask before assuming these work: the Parameter-Inference Save buttons, Validate, Infer (simulated and experimental), a full FDT/CrossVal run, a cancel *during* live NN training, the nav click-through, the Simulate trace/heatmap/cancel, the model-builder round-trip, and the accent/Inter checkboxes. Headless tests cover the wiring, not the pixels. | ONGOING |
+| — | Non-atomic `torch.save`/HDF5 writes against a cancel (narrow window; worst case a partial-but-valid sweep file, not corruption). **Narrowed:** `file_manager.atomic_torch_save` (tmp sibling → fsync → `os.replace`, with a short retry for Windows' transient `PermissionError` from AV/Explorer) now exists and is used by the training checkpoint, which rewrites its commit file every 50 batches and so would otherwise have promoted this from low to real. Deliberately **not** retrofitted onto `save_posterior_artifacts` / `save_prior_artifacts` / `cross_validation` in the same change — those are one-shot end-of-run writes and are what remains of this row. | OPEN, low — helper exists, callers not migrated |
+| — | **Never run for real on a display** — ask before assuming these work: the Parameter-Inference Save buttons, Validate, Infer (simulated and experimental), a full FDT/CrossVal run, a cancel *during* live NN training, the nav click-through, the Simulate trace/heatmap/cancel, the model-builder round-trip, and the accent/Inter checkboxes. Headless tests cover the wiring, not the pixels. **Added 2026-08-12 and unseen by anyone: the application icon (taskbar + window) and the model builder's `_ParamRow`, which is now TWO lines because it gained the box selector — `_ParamRow` is §10.2's worst offender for crowding, so the second line is the thing to look at.** | ONGOING |
 
 **Closed since the last handoff** (do not re-open): FEATURE 1 v1/v2/v3 (user models: Simulate → SBI →
 FDT), backlog B-a (OS accent), B-b (Inter font), **B-d — FDT for non-Nadrowski, shipped as
@@ -1766,7 +1859,13 @@ while the spontaneous run allocates its own. At `run_size=2048`, `n_fine≈300k`
 > AST-verified unused imports are gone (9.6); `.gitignore` covers the 6.9 MB root log (9.7).
 
 
-### 9.1 Four already-wrong facts (cheapest possible fixes)
+### 9.1 Four already-wrong facts (cheapest possible fixes) — ✅ ALL FIXED
+
+> **Verified fixed (re-checked in full).** Items 2 and 3 were still listed as open long after they had
+> been repaired, which is how this section came to need its own audit:
+> `vt.py` cites `tests/test_gui_progress.py`; **no `GFDT` string occurs anywhere in `core/gui/`** (the
+> dialog reads "PRISM could not start"); and the banners now read `── 1. Config` / `2. Prior` /
+> `3. Posterior` / `4. Validate` / `5. Infer` — five, contiguous, matching the five tabs.
 
 1. `core/gui/vt.py:4` — "see `tests/test_vt.py`". **That file does not exist.**
 2. `core/gui/app.py:67` — the user-facing startup-failure dialog is titled **"GFDT could not start"**.
@@ -1778,7 +1877,11 @@ while the spontaneous run allocates its own. At `run_size=2048`, `n_fine≈300k`
 4. `core/Simulator/user_simulator.py` and `core/gui/panels/simulate_runner.py` still carried stale
    `exit()`/`SystemExit` prose after the 2026-07-28 fix — corrected in that pass; **check for more.**
 
-### 9.2 A latent crash: a module shadowed by a local
+### 9.2 A latent crash: a module shadowed by a local — ✅ FIXED
+
+> `inference_tabs._build_config` now binds `model_labels`, so nothing shadows the `labels` module.
+> The one surviving `labels = VALID_LABELS[...]` is in `panels/simulate_runner.py`, and that file
+> does **not** import the `labels` module — so there is nothing there to shadow. Checked, not assumed.
 
 `core/gui/panels/inference_tabs.py` imports `from core.Helpers import ... labels ...`, then
 `_build_config` rebinds it: `labels = VALID_LABELS[VALID_MODELS.index(model)]`. This works only
@@ -1845,6 +1948,18 @@ the module raises `AttributeError` on a `list`.** Rename the local to `model_lab
   several files.
 
 ### 9.7 Repo hygiene
+
+> **Status: `.gitignore` covers all of it; the UNTRACKING is still outstanding and is a deliberate,
+> user-owned git step.** 20 files are currently *tracked but ignored* — the 6.9 MB `sbc_run.log` plus
+> 19 generated files under `Resources/` (7 `.h5`, 5 `.png`, 1 `.pt`, 6 `.parquet`). Nothing in the
+> code references any of them (checked: no `.py` mentions `shm.pt`/`shm.png`). The command is
+> self-updating, so it needs no maintained list:
+>
+> ```bash
+> git rm --cached $(git ls-files -i -c --exclude-standard)
+> ```
+>
+> `Resources/Checkpoints/` (C-11) was added to `.gitignore` at birth and was never tracked.
 
 - **`sbc_run.log` — 6.9 MB, tracked at the repo root.** `.gitignore` is three lines
   (`/sbi-logs/`, `/archive/`, `/.claude/`).
@@ -1967,6 +2082,148 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
+
+## 2026-08-12 (later) — the smoke train, re-run after the device fix: clean
+
+`scripts/smoke_train.py`, chi, `TOBS_S=4.5`, master bounds + `master_spont`. **All four stages
+completed, 8218 s** (prior 754, posterior 6499, validate 195, infer 771) — against 8827 s on
+2026-08-11, so no regression in cost.
+
+| signal | result | reading |
+|---|---|---|
+| **training masked** | **38.2 %** (269/704) | against §4.3.6's 36.8 % and the 2026-08-11 run's 36.7 %. Well inside one standard error at this sample size — **the chi path survived the C-11 refactor, the preallocated accumulators and the S-1 threading** |
+| validate masked | 38.3 % (69/180) | §4.3.6 records 47.2 %; that reference is itself 180 probes, and §4.3.6 already attributes the stage to small-sample spread |
+| PPC masked | 64.6 % (3685/5700) | §4.3.6 records 79.9 % and says to expect it to FALL as the posterior improves. It is a readout of the posterior, not of the probe machinery |
+| OOM retries, either level | **0** | nothing needed rescuing |
+| `[mem]` breadcrumb | present, per batch tag | the forensic line works |
+| `[checkpoint]` lines | **0** | correct: smoke runs disable checkpointing by default (see below) |
+
+> The pooled figure across all three stages is 61.1 % and means nothing — the stages have different
+> expected values by design. **Always separate them before reading a smoke train.**
+
+## 2026-08-12 — C-11 built; and three backlog items turned out to be already done
+
+The retrain is being driven by hand through the GUI, so this session did not start it. It closed the
+last item flagged as *"the main risk left on a long run"* and cleared the non-retrain backlog.
+
+### The thing that would have made a naive C-11 useless
+
+**`V` is not reproducible across processes.** `build_latent_fisher_rotation` seeds its *noise* under
+`fork_rng`, but its **operating points** come from `latent_prior.sample(...)` on the caller's global
+RNG, which nothing seeds; training is ground-truth-free, so both the `z_med` and `z_samp` draws run.
+A restarted process therefore computes a different `V` → a different `T_train` → different **latent**
+targets for every batch after the seam, silently mixed with the pre-crash rows. That is exactly the
+corruption C-11's own entry called *worse than crashing*, and a checkpoint that saved only RNG and
+rows would have produced it **under the retrain's own configuration** (rotation ON).
+
+So the resume decision lives in `build_posterior`, above the rotation block: it peeks the checkpoint,
+reuses the stored `V`, and skips the Fisher. Recorded as trap **X10**.
+
+### What was measured rather than assumed
+
+| | measured |
+|---|---|
+| `torch.save` of a slice **view** | **8,001,492 B** for 100 rows of a `(200000, 10)` buffer; `.contiguous()` **8,001,633 B** (a row-slice is already contiguous, so it is a no-op); `.clone()` **5,566 B**. At the production shape that is ~47 MB vs 4.35 GiB per checkpoint — ~435 GiB over a run, presenting as *"checkpointing is slow"*. Trap **X9**, pinned by a file-SIZE test. |
+| Qt's `svg` image-format plugin | **absent** — `QImageReader.supportedImageFormats()` has no `svg`, so `QIcon("x.svg")` is silently NULL. The app icon ships as PNGs rendered offline from the SVG by `QSvgRenderer` (the QtSvg *module*, which is present). |
+| `gen_training_data` reproducibility | bit-identical across two seeded runs in **all three modes** — the gate that had to pass before the loop was touched, and the thing that makes "the resume is bit-identical" a real claim. Needs `np.random.seed` as well as `torch.manual_seed` (trap X8). |
+| a resumed run vs an uninterrupted one | **`torch.equal` on both returned tensors**, with the kill placed so that both the cadence write and the cancel-path write are exercised. |
+| the POWER-CUT case, out of process | a checkpointed run **SIGKILLed** at 12 s (exit 137, so no handler ran at all), resumed in a **fresh process**: the last cadence commit stood at 3/6 batches with its shards intact and `state.pt` readable, and the resumed run's output was **bit-identical** to an uninterrupted reference. This is the one the in-process tests cannot cover, and the one C-11 exists for. |
+| the real `build_posterior` on the CARD | chi + rotation ON + CUDA + checkpointing, with `gen_prior` replaced by a same-typed stand-in so the stability sweep does not dominate. First call: returns, writes the checkpoint, stores `V` `(13,13)` on the CPU and a `(7,13)` probe. Second call: *"Reusing the Fisher rotation stored with the training checkpoint (2/2 batches — COMPLETE, so generation will be skipped)"*, and **zero** batches re-simulated. Confirms on the real path both fixes that had been reasoned to rather than observed — the CPU→CUDA rehoming and the complete-checkpoint `V` reuse. |
+
+### The smoke train earned its keep: a CUDA/CPU bug no CPU test could reach
+
+`scripts/smoke_train.py` ran chi + rotation on the GPU and **failed** in `build_posterior`, after the
+Fisher rotation had already burned over an hour:
+
+```
+File "core/SBI/training_checkpoint.py", in bijection_probe
+    out = theta_transform(z.to(torch.float32))
+File "core/SBI/reparam.py", in _call
+    return x @ self.M
+RuntimeError: Expected all tensors to be on the same device, but got mat2 is on cuda:0,
+              different from other tensors on cpu
+```
+
+The probe grid was built on the **CPU**; a rotated transform holds `V` in
+`OrthogonalTransform.M` on `cfg.hw.device`, and `x @ M` across devices is a hard error, not a silent
+promotion. It fires **only** with rotation ON *and* a GPU — the retrain's exact configuration — so
+every one of the 55 CPU tests passed while the real path was broken. **The general lesson: a test
+suite that runs on the CPU cannot certify a `.to(device)`; only a run on the card can.**
+
+Looking for siblings of it immediately found a second, worse one: the checkpoint stores `V` on the CPU
+(deliberately — that is what makes a checkpoint portable), so `build_posterior` must **rehome** it
+before rebuilding the rotated bijection. Without that, the *first GPU resume with rotation ON* would
+crash in the same matmul — the exact run C-11 exists to rescue. An audit of every tensor the
+checkpoint stores or returns confirmed the rest are correct (all come back on the CPU by design;
+`inits`, `V` and the RNG states are rehomed by their consumers, the schedule is read via `.item()`,
+and the probe is compared CPU-to-CPU). Both are pinned by a CUDA test that early-returns with a note
+off-GPU, and whose negative check confirms the old CPU-grid path really did raise.
+
+### The box does not identify the prior
+
+The checkpoint's identity started out as config fields only — and the training rows are drawn from the
+**prior**, which the box does not pin: `_gmm_fingerprint`'s own docstring already said *"two runs over
+the same box produce different fits"*. So rebuilding the prior and restarting would have resumed into
+the **same** directory and spliced rows from two different distributions, with every declared field
+matching and nothing to complain. `prior_fingerprint` is now part of the identity, which is also what
+turns §4.1's *"save your prior and reuse it"* from advice into a guard — before the fix that
+instruction was simply untrue.
+
+### A regression the feature introduced into the TEST SUITE, caught by looking
+
+Turning checkpointing on by default made the full-pipeline tests write real checkpoints into
+`Resources/Checkpoints/` — three appeared on the first run (spontaneous / forced / chi, `run_size=8`,
+`n_runs=2`). They are marked **complete**, and a complete checkpoint **short-circuits generation and
+returns its stored rows**. So the first suite run would create them and every run afterwards would
+skip `gen_training_data` entirely *while reporting a pass*: green, and testing nothing. The same
+applies to a repeated `smoke_train.py`, whose entire job is to exercise that path.
+
+Both harnesses now rebind `orchestrator.TRAINING_CHECKPOINT_EVERY = 0` — on the orchestrator, not
+`config`, for the same snapshot-at-import reason `smoke_train` already rebinds three other constants.
+Pinned by `test_the_suite_does_not_write_checkpoints_into_the_real_resources_tree`. **The general
+shape is worth remembering: a cache whose hit is invisible turns any harness that shares its key into
+a no-op.**
+
+That guard needed a second pass of its own. Written as *"no `train_*` directories exist"* it fails on
+any machine that has actually run a retrain — i.e. every machine where it matters — so it now
+snapshots the directories present at module import and asserts only that the suite **added** none.
+The lesson generalises past this one test: **a guard phrased over global state has to be scoped to
+what the code under test controls, or it becomes a tripwire on real use.**
+
+### Also fixed, and the pattern is worth noting
+
+`gen_training_data`'s accumulators were plain lists whose final `torch.cat` allocated a second full
+copy while the list was still live — **8.7 GiB** at the end of a multi-day run. They are preallocated
+now. That alone would not have helped: `train_nn` immediately did `data = data[valid_idx]`, a boolean
+gather that reinstates the same peak, so it is now guarded by `if not valid_idx.all()`
+(behaviour-identical, since the box round-trip cannot produce a non-finite latent — trap X4).
+
+### Three backlog items were already built
+
+**B-c**, **B-e** and the `(lo, hi)` half of **S-1** all shipped in `20a1a52` and §6 was never updated;
+`mpl_theme.py` and `icons.py` even cite the backlog IDs in their own docstrings. The same was true of
+§9.1's items 2 and 3, §9.2, and §4.1's closing "Still open" paragraph about the Infer tab. **The
+lesson is about the document, not the code:** an item marked OPEN was taken at face value and nearly
+rebuilt. Every one of those rows now carries what actually landed, including where the implementation
+diverged from what the row proposed — B-e used a bundled icon FONT rather than `.qrc`/SVGs, because
+rendering icons as text is what makes them recolour for free on a theme flip.
+
+What genuinely remained there was small and is now done: the χ probe table's `✕` was the last
+unmigrated glyph button, and **PRISM had no application icon at all** (`setWindowIcon` appeared
+nowhere, so the taskbar showed the interpreter's mark). S-1's second half — per-parameter prior type —
+is `schema_version 3`'s `"box"`, named for what it controls: it changes the COORDINATE the latent GMM
+and flow work in, and does **not** move prior mass, because `UserPrior._global_map` still samples
+uniformly in the linear box. Making the sweep geometric is a separate science decision and was
+deliberately not taken.
+
+### Three bugs on the post-retrain critical path
+
+All three sat on §4.1 steps 6–7, i.e. the first thing that happens after the retrain finishes:
+`sbc_characterize.py` wrote un-suffixed outputs, so the four-run stratified sweep the suffix exists to
+serve overwrote itself down to one stratum; it also omitted `chi_max_cycles` where its sibling passes
+it; and `retrain_convergence.py` decided "was this rotated?" by testing whether the `.rot.pt` file
+**exists** — which `save_posterior_artifacts` now writes unconditionally, so it refused every posterior
+the current build produces, naming the wrong reason.
 
 ## 2026-08-11 — the retrain OOM'd AGAIN, outside everything the first fix guarded
 

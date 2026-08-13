@@ -29,8 +29,18 @@ Env knobs:
   CHI_K_FIXED  hold the chi probe COUNT at this value instead of pooling over the training
                mixture -- run per stratum (2 / 6 / CHI_K_PAD) as well as pooled  (default: pooled)
 
+Outputs are suffixed by STRATUM (`_pooled` or `_k<N>`), because handoff 4.1 step 6 is a FOUR-RUN
+comparison and unsuffixed names meant each run overwrote the last -- so the workflow the suffix
+serves left only its final stratum on disk. Same defect degeneracy_map.py's MODE_TAG fixed, on a
+different axis. Compare strata by label across the four .npz files.
+
 Run:
   & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/sbc_characterize.py
+
+  # handoff 4.1 step 6, the full stratified sweep (chi mode, a trained chi posterior):
+  $env:CHI=1; $env:POST="<name>.pt"
+  foreach ($k in 2, 6, 12) { $env:CHI_K_FIXED=$k; & $py scripts/sbc_characterize.py }
+  Remove-Item Env:CHI_K_FIXED;                    & $py scripts/sbc_characterize.py   # pooled
 """
 import math
 import os
@@ -111,8 +121,13 @@ assert _z.shape[-1] == len(labels), f"latent prior dim {_z.shape[-1]} != n_infer
 print(f"[prior] extracted latent inferred prior from posterior.prior; sample dim={_z.shape[-1]}", flush=True)
 
 t = cfg.t
-csv_path = str(PLOT_PATH / "sbc_characterization_pvals.csv")
-npz_path = str(PLOT_PATH / "sbc_characterization_ranks.npz")
+# Outputs are suffixed by STRATUM. Handoff 4.1 step 6 is a four-run comparison -- CHI_K_FIXED at
+# 2 / 6 / CHI_K_PAD, then pooled -- and unsuffixed names meant each run silently overwrote the last,
+# so the workflow left only the final stratum on disk and you compared a file with itself. This is
+# exactly the defect degeneracy_map.py's MODE_TAG was added to fix, on a different axis.
+STRATUM_TAG = "pooled" if CHI_K_FIXED is None else f"k{CHI_K_FIXED}"
+csv_path = str(PLOT_PATH / f"sbc_characterization_pvals_{STRATUM_TAG}.csv")
+npz_path = str(PLOT_PATH / f"sbc_characterization_ranks_{STRATUM_TAG}.npz")
 
 # ---- SBC repeat loop ----
 ks_matrix = np.full((K, len(labels)), np.nan)               # (K, n_inferred) KS p-values
@@ -138,6 +153,13 @@ for r in range(K):
         # into the trained artifact (trap CHI7), so a config carrying a different one than the live
         # config.CHI_K_PAD would silently calibrate against a differently-shaped block.
         chi_freq_bounds=cfg.chi_freq_bounds, chi_k_pad=cfg.chi_k_pad, chi_k_fixed=CHI_K_FIXED,
+        # chi_max_cycles from the CONFIG for the same reason as chi_k_pad, and its absence here used
+        # to be the one field this call did not thread while orchestrator.validate_calibration did.
+        # It is the lock-in duration ceiling, so it sets the `logcyc` every probe reports -- the one
+        # channel whose job is telling the encoder how much to trust a probe. Falling back to the
+        # live config.CHI_MAX_CYCLES calibrates against a value the network may never have been
+        # trained on; benign only for as long as the load-time ceiling guard forces the two to agree.
+        chi_max_cycles=cfg.chi_max_cycles,
         n_vars=cfg.inits_tensor.shape[-1],
         dtype=dtype, device=device,
     )
@@ -198,7 +220,7 @@ axes[1].plot([0, NPS], [0, 1], color="k", ls="--", label="uniform")
 axes[1].set_title("t_offset rank ECDF vs uniform")
 axes[1].set_xlabel("rank"); axes[1].set_ylabel("CDF"); axes[1].legend()
 fig.tight_layout()
-hist_png = str(PLOT_PATH / "sbc_toffset_characterization.png")
+hist_png = str(PLOT_PATH / f"sbc_toffset_characterization_{STRATUM_TAG}.png")
 fig.savefig(hist_png, dpi=130); print("\nsaved:", hist_png, flush=True)
 
 # ---- phase-wrap diagnostic: t_offset posterior marginals for a few calibration points ----
@@ -212,7 +234,7 @@ for ax, i in zip(axm.ravel(), sel):
     ax.set_title(f"cal #{int(i)}"); ax.set_xlabel(str(labels[t_off_idx]))
 figm.suptitle("t_offset posterior marginals (dashed = truth) — multimodal/periodic => phase-wrap artifact")
 figm.tight_layout()
-marg_png = str(PLOT_PATH / "sbc_toffset_marginals.png")
+marg_png = str(PLOT_PATH / f"sbc_toffset_marginals_{STRATUM_TAG}.png")
 figm.savefig(marg_png, dpi=130); print("saved:", marg_png, flush=True)
 
 # ---- verdict heuristic ----

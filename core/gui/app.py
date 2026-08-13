@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core import config, registry
 
-from . import fonts, mpl_theme, settings, theming
+from . import app_icon, fonts, mpl_theme, settings, theming
 from .main_window import MainWindow
 
 
@@ -43,9 +43,16 @@ def build_app(argv=None):
     # construction. Per-file failures land in registry.load_errors (shown on the Settings screen).
     registry.load_user_models()
 
+    # Before the QApplication, and so before any window: this is the Windows shell's grouping key, and
+    # setting it late leaves the taskbar button showing the interpreter's icon instead of ours.
+    app_icon.set_windows_app_user_model_id()
+
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setOrganizationName(settings.ORG)   # both are needed for a stable QSettings store on Windows
     app.setApplicationName(settings.APP)
+    # On the APPLICATION, not on the window: every dialog, message box and popped-out figure window
+    # inherits it, so there is no per-window wiring to forget. PRISM had no icon at all before this.
+    app.setWindowIcon(app_icon.app_icon())
     # Fusion repaints every control from the palette (the native Windows style doesn't), so a light/dark
     # colour-scheme switch recolours consistently on Win/Mac/Linux. Theming lives here (never in
     # MainWindow) so it stays out of the test path.

@@ -15,10 +15,15 @@ network's input layer) fails here, in minutes, instead of hours into a multi-day
 WHAT TO WATCH, beyond "it finished":
 
   * `chi: N/M probes masked` -- the count, not the presence. Some masking is by design (a probe under
-    CHI_MIN_CYCLES on a short recording). A LARGE fraction is the open risk in the duration ceiling:
-    it is keyed on the batch's fastest f_peak, so a batch spanning a wide range of f_peak gives its
-    slowest rows proportionally fewer cycles. That spread has never been measured, and this is the
-    honest place to see it. Large => the fix is a per-row slice in gen_chi_raw, not a laxer key.
+    CHI_MIN_CYCLES on a short recording). The reference figure is ~37 % of TRAINING probes
+    (PRISM_HANDOFF 4.3.6: 36.8 %, reproduced at 36.7 % after the OOM work); materially above that
+    means something in the chi path regressed. Note the PPC's fraction is much higher by design and
+    is a readout of the POSTERIOR, not of the probe machinery -- see 4.3.6 before reading it as a bug.
+      HISTORICAL, and no longer true: this bullet used to say the duration ceiling "is keyed on the
+      batch's fastest f_peak, so a batch spanning a wide range of f_peak gives its slowest rows
+      proportionally fewer cycles". That WAS the defect -- it is what drove the 77 % masking this
+      script first found -- and C-8 fixed it: the ceiling is now applied PER ROW ((B,) N_row) in
+      gen_chi_raw. Trap CHI9: a scalar T_k anywhere in that path is now a regression.
   * out-of-distribution warnings from check_observation_in_distribution -- these are the guards that
     were invisible for months before _common.enable_warnings().
   * the mode banner. A width mismatch between the config and the trained net is exactly what this
@@ -37,11 +42,15 @@ Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_c
   SAVE       "1" to persist prior/posterior artifacts          (default 0 -- nothing touches disk)
   STAGES     comma list to run a subset, e.g. "prior,posterior"
              (default prior,posterior,validate,infer)
+  CHECKPOINT "1" to exercise the C-11 training-data checkpoint into a fresh temp dir (default 0;
+             see the note at the rebinding below for why OFF is the default and why you should
+             nonetheless run it ONCE on the GPU before a record run)
 
 Run (chi mode, the case this was written for):
   $env:CHI=1; & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/smoke_train.py
 """
 import os
+import pathlib
 import sys
 import time
 import traceback
@@ -65,6 +74,7 @@ N_CAL = int(os.environ.get("N_CAL", "40"))
 EPOCHS = int(os.environ.get("EPOCHS", "5"))
 SEED = int(os.environ.get("SEED", "0"))
 SAVE = os.environ.get("SAVE", "0") == "1"
+CHECKPOINT = os.environ.get("CHECKPOINT", "0") == "1"
 STAGES = [s.strip() for s in
           os.environ.get("STAGES", "prior,posterior,validate,infer").split(",") if s.strip()]
 
@@ -82,7 +92,7 @@ def main():
     torch.manual_seed(SEED)
     cfg = _common.script_cfg()
     print(f"[smoke] NUM_RUNS={NUM_RUNS} RUN_SIZE={RUN_SIZE} N_CAL={N_CAL} EPOCHS={EPOCHS} "
-          f"SEED={SEED} SAVE={SAVE}")
+          f"SEED={SEED} SAVE={SAVE} CHECKPOINT={CHECKPOINT}")
     print(f"[smoke] stages: {STAGES}")
     if cfg.chi_mode:
         print(f"[smoke] chi ceiling: <= {cfg.chi_max_cycles:g} drive cycles per probe "
@@ -101,6 +111,25 @@ def main():
     orchestrator.TRAINING_NUM_RUNS = NUM_RUNS
     orchestrator.SBC_N_CAL = N_CAL
     orchestrator.TRAINING_MAX_NUM_EPOCHS = EPOCHS
+    # Training-data checkpointing OFF by default, and this one is not merely tidiness. The checkpoint
+    # directory is keyed on a digest of the config, and a COMPLETE checkpoint short-circuits generation
+    # and returns its stored rows -- exactly right for the multi-day record run it exists for, and
+    # exactly wrong here: the second smoke run of a given config would skip the simulation path this
+    # script exists to exercise and report a cheerful pass without having run it.
+    #
+    # CHECKPOINT=1 turns it back on into a FRESH TEMP DIRECTORY, so the path is exercised and nothing
+    # is ever reused. Worth doing on the GPU before a record run: the C-11 tests are CPU-only, and a
+    # CPU test cannot catch a tensor on the wrong device -- a CPU-built probe grid meeting the CUDA
+    # rotation matrix is what this script caught on 2026-08-12, an hour into the Fisher.
+    if CHECKPOINT:
+        import tempfile
+        config.CHECKPOINT_PATH = pathlib.Path(tempfile.mkdtemp(prefix="prism_smoke_ckpt_"))
+        orchestrator.TRAINING_CHECKPOINT_EVERY = max(1, NUM_RUNS // 2)
+        print(f"[smoke] checkpointing ON into {config.CHECKPOINT_PATH} "
+              f"(every {orchestrator.TRAINING_CHECKPOINT_EVERY} batches; a temp dir, so never reused)",
+              flush=True)
+    else:
+        orchestrator.TRAINING_CHECKPOINT_EVERY = 0
     # NOT here: cfg.hw.batch_size is ALSO build_prior's stability-sweep batch (global_batch_size),
     # and the sweep is iteration-bounded, so shrinking it does not shorten the prior build -- it just
     # accepts fewer points per iteration and makes the prior WORSE for the same wall-clock. Applied
