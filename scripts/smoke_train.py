@@ -28,6 +28,23 @@ WHAT TO WATCH, beyond "it finished":
     were invisible for months before _common.enable_warnings().
   * the mode banner. A width mismatch between the config and the trained net is exactly what this
     run exists to catch before the long one.
+  * `[cfg] bounds=` AND `[cfg] rescale order=`, together -- see the BOUNDS warning below. The banner
+    is the only place the difference shows.
+
+⚠ PASS `BOUNDS` EXPLICITLY, or you smoke-test a different box than the retrain uses. The default cell
+is `master_spont.txt`, and bounds resolution prefers a same-named SIBLING over the shared
+`master.txt` (cli.resolve_bounds_for_cell, pinned by test_artifact_consistency) -- so the default
+resolves `Bounds/nadrowski/master_spont.txt`, the 12-dim SPONTANEOUS box. Under CHI=1 that is not
+loud: both boxes report `mode=chi` and both build the SAME 114-wide conditioning vector, because the
+chi block is a function of CHI_K_PAD and not of the parameter set. What silently differs is the
+inferred dimension -- 12 against 13 -- and the parameter dropped is `f_scale`, which is precisely the
+one PRISM_HANDOFF 4.1 step 5 names as the retrain's headline hypothesis. A smoke run left at the
+default therefore exercises a configuration that omits the thing the retrain exists to measure.
+(A cross-LOAD between the two is caught, by the `param_keys` guard -- but nothing catches a smoke
+train that simply runs the wrong one.)
+
+This is a property of the CELL/BOUNDS pairing, not of this script, so it is not "fixed" here: the
+sibling-first rule is shared with the CLI and the GUI and must stay that way (PRISM_HANDOFF 3.3).
 
 This is NOT a calibration measurement. SBC at these sizes has no power -- CAL_N_SCALES is t_scale's
 effective sample size (trap X5) and it is tiny here. A flat rank histogram from this run means
@@ -45,9 +62,31 @@ Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_c
   CHECKPOINT "1" to exercise the C-11 training-data checkpoint into a fresh temp dir (default 0;
              see the note at the rebinding below for why OFF is the default and why you should
              nonetheless run it ONCE on the GPU before a record run)
+  CKPT_DIR   checkpoint ROOT to use instead of a fresh temp dir, so a SECOND run can find the
+             first's checkpoint and RESUME (default unset -> temp dir). Requires PRIOR; see below.
+  PRIOR      name of a SAVED prior in Resources/Priors to LOAD instead of building a new one
+             (default unset -> build). Also cuts ~9 min off a run.
 
-Run (chi mode, the case this was written for):
-  $env:CHI=1; & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/smoke_train.py
+Run (chi mode, the case this was written for -- this is the RETRAIN's configuration, and the
+`BOUNDS` is not optional; see the warning above):
+  $env:CHI=1; $env:TOBS_S=4.5
+  $env:BOUNDS="Resources/Bounds/nadrowski/master.txt"
+  $env:CELL="Resources/Cells/nadrowski/master_spont.txt"
+  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/smoke_train.py
+
+Once on the GPU before a record run, add `$env:CHECKPOINT=1` (exercises C-11 on the card, which no
+CPU test can) and `$env:SAVE=1` (exercises the artifact writes; delete the `_smoke_*` files after).
+
+THE RESUME DRILL -- run the SAME command twice with CKPT_DIR and PRIOR both set:
+
+  $env:CHECKPOINT=1; $env:CKPT_DIR="<scratch>/ckpt"; $env:PRIOR="3d_master_08102026.pt"
+  $env:NUM_RUNS=2; $env:STAGES="prior,posterior"        # + the chi/BOUNDS/CELL block above
+
+Run 2 must print `Reusing the Fisher rotation stored with the training checkpoint` and finish in a
+fraction of run 1's time. That is the ONLY way to execute orchestrator.py's CPU->CUDA rehoming of the
+stored `V`, which is guarded by `if ckpt_resumed is not None and rotate:` and therefore runs on a
+GPU RESUME WITH ROTATION and nowhere else -- i.e. precisely the run C-11 exists to rescue, and a path
+no CPU test can certify. Delete CKPT_DIR afterwards; it must not be somewhere a real run finds it.
 """
 import os
 import pathlib
@@ -75,6 +114,8 @@ EPOCHS = int(os.environ.get("EPOCHS", "5"))
 SEED = int(os.environ.get("SEED", "0"))
 SAVE = os.environ.get("SAVE", "0") == "1"
 CHECKPOINT = os.environ.get("CHECKPOINT", "0") == "1"
+CKPT_DIR = os.environ.get("CKPT_DIR") or None
+PRIOR = os.environ.get("PRIOR") or None
 STAGES = [s.strip() for s in
           os.environ.get("STAGES", "prior,posterior,validate,infer").split(",") if s.strip()]
 
@@ -92,7 +133,8 @@ def main():
     torch.manual_seed(SEED)
     cfg = _common.script_cfg()
     print(f"[smoke] NUM_RUNS={NUM_RUNS} RUN_SIZE={RUN_SIZE} N_CAL={N_CAL} EPOCHS={EPOCHS} "
-          f"SEED={SEED} SAVE={SAVE} CHECKPOINT={CHECKPOINT}")
+          f"SEED={SEED} SAVE={SAVE} CHECKPOINT={CHECKPOINT} "
+          f"PRIOR={PRIOR or '(build new)'} CKPT_DIR={CKPT_DIR or '(temp)'}")
     print(f"[smoke] stages: {STAGES}")
     if cfg.chi_mode:
         print(f"[smoke] chi ceiling: <= {cfg.chi_max_cycles:g} drive cycles per probe "
@@ -121,15 +163,40 @@ def main():
     # is ever reused. Worth doing on the GPU before a record run: the C-11 tests are CPU-only, and a
     # CPU test cannot catch a tensor on the wrong device -- a CPU-built probe grid meeting the CUDA
     # rotation matrix is what this script caught on 2026-08-12, an hour into the Fisher.
+    #
+    # CKPT_DIR overrides the temp dir so a SECOND run can find the first's checkpoint and RESUME --
+    # the only way to reach the CPU->CUDA rehoming of the stored V, which fires on a GPU resume with
+    # rotation and nowhere else.
+    #
+    # ⚠ CKPT_DIR WITHOUT PRIOR IS A SILENT NO-OP, and this is the whole reason PRIOR exists here.
+    # orchestrator._training_identity includes prior_fingerprint, and _gmm_fingerprint's own docstring
+    # says two runs over the SAME BOX produce different fits. So two runs that each BUILD a prior
+    # resolve to two DIFFERENT directories under one CKPT_DIR: run 2 never resumes, reports
+    # "N other checkpoint(s) exist and do NOT match this run: ... differs in prior_fingerprint", and
+    # the drill passes having tested nothing. Loading one saved prior pins the fingerprint -- which is
+    # also exactly the rule PRISM_HANDOFF 4.1 step 5 gives for resuming a real retrain.
     if CHECKPOINT:
-        import tempfile
-        config.CHECKPOINT_PATH = pathlib.Path(tempfile.mkdtemp(prefix="prism_smoke_ckpt_"))
+        if CKPT_DIR:
+            config.CHECKPOINT_PATH = pathlib.Path(CKPT_DIR)
+            config.CHECKPOINT_PATH.mkdir(parents=True, exist_ok=True)
+            where = f"{config.CHECKPOINT_PATH} (CKPT_DIR; REUSED across runs, so a resume is possible)"
+        else:
+            import tempfile
+            config.CHECKPOINT_PATH = pathlib.Path(tempfile.mkdtemp(prefix="prism_smoke_ckpt_"))
+            where = f"{config.CHECKPOINT_PATH} (a temp dir, so never reused)"
         orchestrator.TRAINING_CHECKPOINT_EVERY = max(1, NUM_RUNS // 2)
-        print(f"[smoke] checkpointing ON into {config.CHECKPOINT_PATH} "
-              f"(every {orchestrator.TRAINING_CHECKPOINT_EVERY} batches; a temp dir, so never reused)",
-              flush=True)
+        print(f"[smoke] checkpointing ON into {where} "
+              f"(every {orchestrator.TRAINING_CHECKPOINT_EVERY} batches)", flush=True)
+        if CKPT_DIR and not PRIOR:
+            print("[smoke] ⚠ CKPT_DIR is set but PRIOR is not. Each run will BUILD its own prior, and "
+                  "the checkpoint identity includes prior_fingerprint -- so run 2 will route to a "
+                  "DIFFERENT directory and will NOT resume. Set PRIOR=<saved prior> or the drill "
+                  "tests nothing.", flush=True)
     else:
         orchestrator.TRAINING_CHECKPOINT_EVERY = 0
+        if CKPT_DIR:
+            print("[smoke] ⚠ CKPT_DIR is set but CHECKPOINT is not 1; no checkpoint will be written.",
+                  flush=True)
     # NOT here: cfg.hw.batch_size is ALSO build_prior's stability-sweep batch (global_batch_size),
     # and the sweep is iteration-bounded, so shrinking it does not shorten the prior build -- it just
     # accepts fewer points per iteration and makes the prior WORSE for the same wall-clock. Applied
@@ -150,8 +217,14 @@ def main():
         print(f"[ok] {name} in {done[name]:.1f}s", flush=True)
         return out
 
+    # PRIOR names a saved prior to LOAD (build_new=False); unset builds a new one, the old behaviour.
+    # Loading is not merely a time saver -- it is what makes the checkpoint identity stable across
+    # runs, see the CKPT_DIR note above. A loaded prior is never re-saved: save_name is None so the
+    # _smoke_prior artifact only ever describes a prior this run actually built.
     prior = _stage("prior", lambda: orchestrator.build_prior(
-        cfg, None, True, save=SAVE, save_name="_smoke_prior" if SAVE else None, fig_sink=_sink))
+        cfg, PRIOR, PRIOR is None,
+        save=SAVE and PRIOR is None,
+        save_name="_smoke_prior" if (SAVE and PRIOR is None) else None, fig_sink=_sink))
     if prior is None:
         print("\n[smoke] nothing further to run without a prior.")
         return 0

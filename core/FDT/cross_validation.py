@@ -166,6 +166,16 @@ def run_fdt_param_sweep(
     The HDF5 is written incrementally (PSD in Phase A, Campaign-2 data added in
     Phase B), so an interrupt still leaves a partially-populated, readable file.
 
+    DELIBERATELY NOT an atomic write, unlike the prior/posterior artifacts, and the reason is that
+    the two situations are not alike. An atomic write buys exactly one thing: an existing good file is
+    never replaced by a partial one. Here ``output_path`` defaults to a TIMESTAMPED name, so there is
+    no existing file to protect -- staging through a temp sibling would only rename "partial file at
+    X" to "partial file at X.tmp", while destroying the incremental readability above, which is a used
+    property: ``load_param_sweep`` marks a row ``failed`` precisely so a run interrupted after Phase A
+    still plots, and the all-failed error below points the reader at this path for the PSDs it does
+    have. If you ever pass an explicit ``output_path`` that already exists, note that ``"w"`` truncates
+    it up front -- that, not a torn write, is the way this function can lose data.
+
     :param cfg: baseline FDTConfig.
     :param sweep_param: NWK param name to vary (e.g. "s" or "temp"); a key in params_dict.
     :param sweep_grid: 1D array of values for sweep_param.

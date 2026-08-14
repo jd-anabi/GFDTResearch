@@ -9,33 +9,32 @@ import numpy as np
 import torch
 
 
-def atomic_torch_save(obj, path, *, retries: int = 3, backoff_s: float = 0.1) -> Path:
-    """``torch.save`` that a crash cannot leave half-written.
+def _atomic_write(path, writer: Callable[..., None], *, retries: int = 3,
+                  backoff_s: float = 0.1) -> Path:
+    """Run ``writer(fh)`` against a sibling temp file, then ``os.replace`` it over ``path``.
 
-    Writes a sibling ``<name>.tmp``, fsyncs it, then ``os.replace``s it over the destination -- which
-    is atomic on POSIX and on Windows (MoveFileEx with REPLACE_EXISTING). A reader therefore sees
-    either the whole old file or the whole new one, never a truncated mixture. The temp file is a
-    SIBLING, not a file in the system temp dir, because os.replace is only atomic within one volume.
+    The one mechanism every ``atomic_*`` helper below shares. Writes a sibling ``<name>.tmp``, fsyncs
+    it, then ``os.replace``s it over the destination -- which is atomic on POSIX and on Windows
+    (MoveFileEx with REPLACE_EXISTING). A reader therefore sees either the whole old file or the whole
+    new one, never a truncated mixture. The temp file is a SIBLING, not a file in the system temp dir,
+    because os.replace is only atomic within one volume.
 
     fsync before the rename, not after, is the load-bearing order: the rename can be durable while the
     bytes it points at are still in the page cache, which is exactly how a power cut produces a file
     that exists, has the right size, and is full of zeros.
 
+    :param writer: called with the open binary temp handle. Anything it raises propagates untouched,
+                   after the partial temp file has been removed.
     :param retries: os.replace attempts on PermissionError. Windows-specific: a virus scanner or an
                     Explorer preview holding the destination open makes the rename fail transiently,
                     and a multi-day run must not die on that.
-
-    Added for the training checkpoint (C-11), which rewrites its state file every N batches and so
-    turns "non-atomic torch.save against a cancel" from a catalogued low-priority risk into a real
-    one. Deliberately not retrofitted onto save_posterior_artifacts / save_prior_artifacts in the same
-    change -- those are one-shot end-of-run writes and are their own (already catalogued) item.
     """
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(tmp, "wb") as fh:
-            torch.save(obj, fh)
+            writer(fh)
             fh.flush()
             os.fsync(fh.fileno())
     except BaseException:
@@ -57,6 +56,33 @@ def atomic_torch_save(obj, path, *, retries: int = 3, backoff_s: float = 0.1) ->
                 raise
             time.sleep(backoff_s * (attempt + 1))
     return path                                          # unreachable; keeps the return type honest
+
+
+def atomic_torch_save(obj, path, *, retries: int = 3, backoff_s: float = 0.1) -> Path:
+    """``torch.save`` that a crash cannot leave half-written. Mechanism: :func:`_atomic_write`.
+
+    Added for the training checkpoint (C-11), which rewrites its state file every N batches and so
+    turns "non-atomic torch.save against a cancel" from a catalogued low-priority risk into a real
+    one. It now also carries the END-OF-RUN artifacts -- ``save_mix_dist`` (the ND prior) and
+    ``orchestrator.save_posterior_artifacts`` (the posterior and its ``.rot.pt`` sidecar). The window
+    there is one write rather than one every 50 batches, but what it protects is the product of a
+    multi-day run, and a torn ``.pt`` is not detectably torn: it is an unpickling error hours later,
+    or a sidecar that loads with half its keys and decodes every latent sample through a default.
+    """
+    return _atomic_write(path, lambda fh: torch.save(obj, fh), retries=retries, backoff_s=backoff_s)
+
+
+def atomic_savez(path, arrays: dict, *, retries: int = 3, backoff_s: float = 0.1) -> Path:
+    """``np.savez`` that a crash cannot leave half-written. Mechanism: :func:`_atomic_write`.
+
+    Arrays arrive as a DICT rather than ``**kwargs`` so that an array named ``path``/``retries`` can
+    never collide with this function's own parameters -- np.savez's own ``**kwds`` signature has that
+    hazard and there is no reason to inherit it.
+
+    numpy appends ``.npz`` only when it is given a NAME; handed an open handle it writes exactly what
+    it is given, so the temp file's ``.tmp`` suffix cannot end up baked into the destination.
+    """
+    return _atomic_write(path, lambda fh: np.savez(fh, **arrays), retries=retries, backoff_s=backoff_s)
 
 # --- Regex Definitions ---
 # Float Value (Scientific Notation)
@@ -405,7 +431,10 @@ def save_mix_dist(dist, filename: str, *, model: str = None, param_keys: list = 
         data_to_save['model'] = str(model)
     if param_keys is not None:
         data_to_save['param_keys'] = [str(k) for k in param_keys]
-    torch.save(data_to_save, filename)
+    # Atomic, because this is the file build_posterior's checkpoint identity fingerprints and that
+    # SBC later draws theta* from: a prior half-replaced by a crashed re-save is not a broken run, it
+    # is a run that resumes against a distribution nobody can name.
+    atomic_torch_save(data_to_save, filename)
 
 def read_prior_metadata(filename: str) -> dict:
     """The identity of a saved ND prior: ``model``, ``param_keys``, ``lows``, ``highs``, ``log_mask``.

@@ -14,9 +14,24 @@ tests the two candidate causes CHEAPLY (no retrain, no simulation):
       pile up at the flat low EDGE of the box -- a latent region the fixed-resolution spline
       flow mis-calibrates. -> compare the LINEAR box vs a LOG-on-f_scale box in latent coords.
 
-Prints a verdict + the targeted fix. NB: f_scale is a RESCALE param, so log-ing it only touches
-the (analytic) rescale bijection, NOT the ND GMM -> build_posterior's guard passes with the
-existing linear ND prior (no rebuild). A retrain is still needed to CONFIRM the fix.
+⚠ H2's RECOMMENDATION HAS BEEN TESTED AND DISCONFIRMED -- do not act on it. This docstring used to
+end "A retrain is still needed to CONFIRM the fix". That retrain was RUN, and it disconfirmed:
+PRISM_HANDOFF Appendix A 2026-07-16 records `[TRIED -> FAILED -> REVERTED]` for exactly
+`REPARAM_LOG_PARAMS=['f_scale']` -- worse TARP / expected coverage AND a worse f_scale SBC rank. That
+posterior was deleted and the config reverted to `[]`. Log-scaling f_scale is ruled out; the mild
+tilt is an accepted caveat (PRISM_HANDOFF 4.2 CAVEAT 2), not a correctness blocker. Note this is a
+SEPARATE result from the 2026-07-01 finding that log OVER-MIXED the ND degeneracy params, which the
+verdict text below correctly distinguishes -- both point the same way for f_scale.
+
+H1 IS STILL LIVE AND IS WHY THIS SCRIPT IS KEPT. "Does the deployed rotation V smear f_scale into
+the degeneracy block?" is a generic rotation diagnostic, and the chi retrain runs with rotation ON,
+so H1 applies directly to the posterior it produces. Re-point `POST` at that posterior IF, and only
+if, its SBC shows an f_scale tilt. (The default `posterior_07012026.pt` no longer exists, and 7.6's
+B1_log_Q fix means its numbers were historical record even while it did.)
+
+NB: f_scale is a RESCALE param, so log-ing it only touches the (analytic) rescale bijection, NOT the
+ND GMM -> build_posterior's guard passes with the existing linear ND prior (no rebuild). That is why
+the experiment was cheap enough to have already been run.
 
 Env: POST (default posterior_07012026.pt), CELL (default nadrowski/master_spont.txt), NS (prior samples).
 Run:  & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/diagnose_fscale.py
@@ -121,11 +136,17 @@ if V is not None and not h1_mixes and h2_edge:
     print("  so its GT and log-uniform prior pile up at the flat low edge of the linear box — a")
     print("  latent region the fixed-resolution spline flow mis-calibrates, producing the mild")
     print("  one-sided tilt. A LOG box centers f_scale's latent geometry (see u/z above).")
-    print("\n  TARGETED FIX (confirm by retrain): config.REPARAM_LOG_PARAMS = ['f_scale']")
-    print("    - log ONLY f_scale; keep kappa/lambda/x_scale/t_scale LINEAR (log OVER-MIXED those).")
-    print("    - f_scale is a RESCALE param => NO ND prior rebuild (build_posterior guard passes on")
-    print("      the existing linear ND prior). Reuse prior_forcing_no_forcing.pt, TRAIN-NEW.")
-    print("    - Re-check with sbc_characterize.py; header should read 'log-box dims=1/13'.")
+    # The fix this branch used to recommend -- REPARAM_LOG_PARAMS=['f_scale'] -- was tried and came
+    # out WORSE. Reporting the diagnosis without the recommendation is the honest form: the box
+    # geometry finding is real and reproducible, and it is simply not the lever it looks like.
+    print("\n  BUT THE OBVIOUS FIX IS RULED OUT -- DO NOT RE-TRY IT.")
+    print("    config.REPARAM_LOG_PARAMS = ['f_scale'] was trained and came out WORSE: bad TARP /")
+    print("    expected coverage AND a worse f_scale SBC rank. That posterior was deleted and the")
+    print("    config reverted to []. See PRISM_HANDOFF Appendix A, 2026-07-16, [TRIED -> FAILED ->")
+    print("    REVERTED]. (Distinct from the 2026-07-01 result that log OVER-MIXED the ND degeneracy")
+    print("    params -- both point the same way for f_scale.)")
+    print("    So: the linear box IS the mechanism, and log-ing it is NOT the remedy. The mild")
+    print("    one-sided tilt is an accepted caveat (PRISM_HANDOFF 4.2 CAVEAT 2). Quote intervals.")
 elif h1_mixes:
     print("  ROTATION appears to mix f_scale into the degeneracy block. Consider rotating only the")
     print("  degeneracy sub-block, or lowering REPARAM_FISHER_POINTS, then retrain to confirm.")

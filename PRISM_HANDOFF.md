@@ -71,9 +71,9 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 | `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
 | `tests/test_user_sbi.py` | 57 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write** |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
-| `tests/test_artifact_consistency.py` | 10 | the master Bounds/Cells triple, bounds resolution, and the prior/posterior identity guards — **eval box comes from the sidecar, not the config** |
+| `tests/test_artifact_consistency.py` | 13 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — and **the end-of-run artifact writes being atomic** (posterior, prior, loss curve) |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **213** | |
+| **Total** | **216** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -363,7 +363,9 @@ and the 2026-08-05 Appendix A entry.
   `B1_log_Q` fix (§7.6) and the consolidation. Their §4.2 numbers stand as historical record only.
 
 **The chi conditioning is now a padded probe SET (layout 2, §3.6) and the Fisher rotation is
-available under χ (§4.4). All 185 tests across six suites pass.**
+available under χ (§4.4). All six suites pass** — the per-suite counts live in §1.3 and only there,
+because a total repeated across sections is a number that goes stale twice as fast (this line said
+185 while §1.3 said 213). **COUNT them; do not trust either.**
 
 **C-6 is resolved** (§4.3.3–§4.3.6). The first end-to-end smoke train found 77 % of training probes
 masked — a typical row conditioning on ~2 live probes, which is `posterior_chi_08042026`'s
@@ -537,10 +539,19 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    > once the posterior is saved and you are happy.
    >
    > `smoke_train.py` has checkpointing **OFF** by default (a complete checkpoint would short-circuit
-   > the very simulation a smoke run exists to exercise). **Run it once with `CHECKPOINT=1` on the
-   > card before the record run** — that writes into a fresh temp dir, so nothing is ever reused, and
-   > it is the only cheap way to exercise the checkpoint path on a GPU. The C-11 tests are CPU-only
-   > and a CPU test cannot catch a wrong-device tensor; that is exactly the bug this script found.
+   > the very simulation a smoke run exists to exercise). ~~**Run it once with `CHECKPOINT=1` on the
+   > card before the record run**~~ ✅ **DONE 2026-08-13** — chi + rotation + CUDA + `CHECKPOINT=1` +
+   > `SAVE=1`, all four stages in 7069 s, training masked 34.8 %, zero OOM retries, the preflight and
+   > `complete: 4 batches` lines both present, and every saved artifact opened and checked.
+   >
+   > **The GPU RESUME has now been exercised too** (same day, second drill): two runs over one
+   > `CKPT_DIR`, run 2 in **3.0 s** against run 1's 5125 s, reusing the stored `V` and skipping both
+   > the Fisher and generation. That is the first time `build_posterior`'s CPU→CUDA rehoming of the
+   > checkpoint's `V` has ever executed — see the top Appendix A entry. Trap **X10**'s guard is no
+   > longer reasoned-to; it is observed.
+   > ⚠ **Pass `BOUNDS=Resources/Bounds/nadrowski/master.txt`** when you re-run it: the default
+   > resolves the 12-dim spontaneous box, which still calls itself `mode=chi` at the same conditioning
+   > width and silently drops `f_scale`. The script's docstring now carries the full command.
    >
    > **VRAM, because the first attempt died on it (2026-08-10 Appendix entry, trap X6).** Check
    > `nvidia-smi --query-gpu=memory.used --format=csv` before starting — **not**
@@ -1548,6 +1559,11 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   the checkpoint's stored `V` and skips the Fisher entirely, and why that reuse lives in
   `build_posterior` rather than inside `gen_training_data`. Any future "just re-run the rotation"
   shortcut re-opens it.
+  ✅ **Observed, not merely reasoned to, as of 2026-08-13.** The reuse path — including the CPU→CUDA
+  rehoming of the stored `V`, which fires on a GPU resume with rotation and nowhere else — was
+  executed on the card by the resume drill in the top Appendix A entry. Exercising it needs
+  `smoke_train.py`'s `CKPT_DIR` **and** `PRIOR` together; `CKPT_DIR` alone routes run 2 to a different
+  directory on `prior_fingerprint` and tests nothing.
 
 ### Core-side contract hooks (Phase 0 refactors — non-breaking, defaults = old CLI behaviour)
 
@@ -1566,17 +1582,20 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 ## 6. Open backlog
 
-> ### ▶ PICK UP HERE (as of 2026-08-12)
+> ### ▶ PICK UP HERE (as of 2026-08-13)
 >
 > The retrain is the priority and it is **the user's to run**, through the GUI (§4.1 step 5). It is
 > now checkpointed, so a crash costs one interval rather than the run. Everything below is small and
 > independent of it; nothing here blocks it.
 >
+> **Rows 1 and 2 are DONE (2026-08-13) — see the top Appendix A entry.** What is left needs a display
+> or a decision, and neither is something a coding session can close on its own:
+>
 > | # | What | Why it is worth doing | Size |
 > |---|---|---|---|
-> | 1 | **Migrate the remaining non-atomic writes** to `file_manager.atomic_torch_save`: `save_posterior_artifacts`, `save_prior_artifacts`, `FDT/cross_validation`. | The helper exists and is proven by the checkpoint; these three still write non-atomically, and one of them persists the posterior a multi-day run just produced. **Highest value of the three.** | ~30 min |
-> | 2 | **Two hardcoded plot colours** that do not follow the theme: `Reduction/plots.py:140` `color="white"` (on a viridis surface) and `FDT/plots.py:64` `color='gray'`. | The last residue of B-c. Cosmetic, marginal on both backgrounds. | minutes |
-> | 3 | **Eyeball the new GUI surfaces on a real display**: the application icon (taskbar + window), and the model builder's `_ParamRow`, which became TWO lines when it gained the box selector. | Headless tests cover the wiring, never the pixels — the standing rule in the last row of this table. Both are new since 2026-08-12 and no human has seen either. | minutes |
+> | ~~1~~ | ~~**Migrate the remaining non-atomic writes.**~~ `save_posterior_artifacts` (all three writes), `save_mix_dist` (hence `save_prior_artifacts`) and `retrain_convergence.py` now go through `file_manager.atomic_torch_save` / the new `atomic_savez`. **`FDT/cross_validation` was deliberately NOT migrated** and the reason is recorded at the function: its output path is TIMESTAMPED, so there is no existing file for atomicity to protect, and staging through a temp sibling would only rename "partial file at X" to "partial file at X.tmp" while destroying the incremental readability `load_param_sweep` is built around. | ✅ **DONE 2026-08-13** |
+> | ~~2~~ | ~~**Two hardcoded plot colours.**~~ Done, and neither was what the row assumed — read the Appendix entry before "improving" either. `Reduction/plots.py`'s white **is correct and must stay** (its backdrop is viridis, not the page); the real defect was its invisible LEGEND swatch, fixed with a `text.color` halo. `FDT/plots.py` moved to `axes.edgecolor`, **not** `grid.color` — that was tried and is worse. | ✅ **DONE 2026-08-13** |
+> | 3 | **Eyeball the new GUI surfaces on a real display**: the application icon (taskbar + window), and the model builder's `_ParamRow`, which became TWO lines when it gained the box selector. | Headless tests cover the wiring, never the pixels — the standing rule in the last row of this table. Both are new since 2026-08-12 and no human has seen either. **Add to the list: the two figures above** — they were verified by rendering to PNG under both themes plus plain matplotlib, which is stronger than a headless test but still not a human looking at the app. | minutes |
 > | 4 | **Decide the ND log-SAMPLING question** (S-1's remaining half). | `"box": "log"` changes the coordinate the GMM is fitted in; it does **not** move prior mass, because `UserPrior._global_map` still samples uniformly in the linear box. Making the sweep geometric is a *science* decision and would have to move the built-ins too. **Not a coding task — needs the user's call first.** | — |
 >
 > Do **not** re-open: B-c, B-e, S-1's `(lo, hi)` half, C-1 through C-11, or §9.1/§9.2 — all done, and
@@ -1602,7 +1621,7 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 | **C-2** | ~~The Infer tab's variable-length probe table.~~ The Infer tab now holds an add/remove probe table; each row is **one `_ChiProbeRow` widget** carrying its recording AND the frequency it was actually driven at, and `_infer` submits `(path, freq_Hz)` PAIRS. Both stated constraints are met and pinned by tests: `_rebuild_chi_fields` **preserves** existing rows (they hold hand-typed frequencies and browsed paths a rebuild cannot regenerate; it seeds only when empty, never tops up or trims), and one-widget-per-row makes the middle-deletion mispairing structurally impossible. A blank frequency box is caught before the run — `FloatField.value()` returns 0.0 on bad text, and 0 Hz is a genuine DC probe the lock-in would attempt. | ✅ **DONE 2026-08-10** |
 | **C-3** | ~~A GUI probe planner.~~ A **Plan probes…** button on the Infer tab's χ page measures Ω₀ from the selected passive recording and reports the in-band range in Hz, the minimum seconds to clear the `CHI_MIN_CYCLES` floor at the low edge, the length above which the ceiling truncates, and a per-row verdict at the entered `T_obs`. It also fills BLANK frequency boxes with a nominal in-band grid (blank only — a typed frequency is a record of what the bench did). **The predicates are not reimplemented:** they live in `chi.probe_verdict`, which `orchestrator.build_experiment_obs_chi` was refactored to call, so the planner and the run cannot disagree. | ✅ **DONE 2026-08-10** |
 | — | ~~Make the `scripts/` diagnostics chi-aware.~~ | ✅ **DONE 2026-07-28** — `scripts/_common.py`; see §4.1 |
-| — | Non-atomic `torch.save`/HDF5 writes against a cancel (narrow window; worst case a partial-but-valid sweep file, not corruption). **Narrowed:** `file_manager.atomic_torch_save` (tmp sibling → fsync → `os.replace`, with a short retry for Windows' transient `PermissionError` from AV/Explorer) now exists and is used by the training checkpoint, which rewrites its commit file every 50 batches and so would otherwise have promoted this from low to real. Deliberately **not** retrofitted onto `save_posterior_artifacts` / `save_prior_artifacts` / `cross_validation` in the same change — those are one-shot end-of-run writes and are what remains of this row. | OPEN, low — helper exists, callers not migrated |
+| — | ~~Non-atomic `torch.save`/HDF5 writes against a cancel.~~ The mechanism is now one function — `file_manager._atomic_write` (tmp sibling → fsync → `os.replace`, with a short retry for Windows' transient `PermissionError` from AV/Explorer) — with `atomic_torch_save` and the new **`atomic_savez`** on top of it. Callers: the training checkpoint (C-11), `save_mix_dist` (hence `save_prior_artifacts`), all three writes in `save_posterior_artifacts`, and `scripts/retrain_convergence.py`. `atomic_savez` takes its arrays as a **dict**, not `**kwargs`, so an array named `path`/`retries` cannot collide with the helper's own parameters — and passing a HANDLE rather than a name is what stops numpy appending `.npz` to the temp file's `.tmp` suffix. **`FDT/cross_validation` is a deliberate exception, recorded at the function:** its `output_path` is TIMESTAMPED, so there is no pre-existing file for atomicity to protect, and staging through a temp sibling would only move the partial file to `X.tmp` while destroying the incremental readability `load_param_sweep` and the all-failed error message both depend on. Its real data-loss path is an explicit `output_path` that already exists, since `"w"` truncates up front. Pinned by 3 tests in `test_artifact_consistency.py`, each verified to FAIL against the pre-change writes. | ✅ **DONE 2026-08-13** |
 | — | **Never run for real on a display** — ask before assuming these work: the Parameter-Inference Save buttons, Validate, Infer (simulated and experimental), a full FDT/CrossVal run, a cancel *during* live NN training, the nav click-through, the Simulate trace/heatmap/cancel, the model-builder round-trip, and the accent/Inter checkboxes. Headless tests cover the wiring, not the pixels. **Added 2026-08-12 and unseen by anyone: the application icon (taskbar + window) and the model builder's `_ParamRow`, which is now TWO lines because it gained the box selector — `_ParamRow` is §10.2's worst offender for crowding, so the second line is the thing to look at.** | ONGOING |
 
 **Closed since the last handoff** (do not re-open): FEATURE 1 v1/v2/v3 (user models: Simulate → SBI →
@@ -2082,6 +2101,188 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
+
+## 2026-08-13 — the last two non-retrain backlog rows, and both were wrong about themselves
+
+§6's *PICK UP HERE* rows 1 and 2. The retrain is the user's to run, so this session took the two
+items that are independent of it. Neither turned out to be the change its row described, and in both
+cases the row's own premise is the thing worth recording.
+
+### Row 1: three of the four writes migrated, and the fourth refused for a reason
+
+`file_manager.atomic_torch_save`'s body is now `_atomic_write(path, writer)` — the tmp-sibling →
+fsync → `os.replace` mechanism, with the writer passed in — and `atomic_savez` sits beside it for the
+`.loss.npz`. Migrated: `save_mix_dist` (so `save_prior_artifacts` comes free), all three writes in
+`save_posterior_artifacts`, and `scripts/retrain_convergence.py`'s own loss curve.
+
+**`FDT/cross_validation` was not migrated, and that is the finding.** The row grouped it with the
+other two; they are not alike. Atomicity buys exactly one thing — *an existing good file is never
+replaced by a partial one* — and `run_fdt_param_sweep`'s `output_path` defaults to a **timestamped**
+name, so there is no existing file. Staging through a temp sibling would rename "partial file at X"
+to "partial file at X.tmp" and buy nothing, while destroying a property that IS used: the HDF5 is
+written incrementally so `load_param_sweep` can mark a row `failed` when a run is interrupted after
+Phase A, and the all-points-failed error tells the reader that path holds the PSDs. Its actual
+data-loss path is different from the one the row imagined — an explicit `output_path` that already
+exists, because `"w"` truncates before Phase A writes anything. All of that is now at the function.
+
+Two details worth keeping:
+
+- **`atomic_savez` takes a dict, not `**kwargs`.** np.savez's own signature is `**kwds`, so
+  inheriting it would let an array named `path` or `retries` bind to the helper's own parameters.
+- **numpy appends `.npz` to a NAME, not to a HANDLE.** `_atomic_write` hands the writer an open
+  handle, which is what stops the file landing at `<name>.loss.npz.tmp.npz`. The round-trip half of
+  the new test exists for that specific failure, which is silent — the run reports success and the
+  convergence read later finds nothing.
+
+### Row 2: the white line was RIGHT, and the row named the wrong defect
+
+`Reduction/plots.py`'s `color="white"` does not follow the theme **and must not**: its backdrop is a
+viridis surface, not the page, so a themed colour would be near-black on dark purple under the light
+theme. That is the same call `cross_validation_plots` already makes with `darkorange` and
+`simulate_export` makes by pinning a white video figure. Changing it would have been a regression.
+
+The real defect was one line further down: the line carries a **legend** entry, and the legend sits
+on `legend.facecolor` — `#FFFFFF` under the light theme, and `inherit` → white under plain
+matplotlib. A white swatch on white. So the fix is a `text.color` **halo** (`path_effects.Stroke`)
+around the white core: contrast-guaranteed against the legend background by construction of the token
+pair, and on the surface it only adds a thin outline. Both the 3D ridge line and the 2D `"w-"` carry
+it; only the first was in the row.
+
+`FDT/plots.py`'s `'gray'` was straightforward chrome and moved to a token — but **`grid.color` is the
+wrong token and was caught by rendering rather than by reasoning.** It is the border colour
+(`#3D3D3D`) and the dark theme paints axes on `#2B2B2B`, so the χ''=0 line *and its legend swatch*
+both vanished — worse than the hardcoded gray. It is now `axes.edgecolor`, the same token as the
+equilibrium line directly above it, the two separated by dash pattern and width, which is
+matplotlib's own convention and survives a theme flip.
+
+Both figures were rendered to PNG under the light theme, the dark theme and plain matplotlib
+defaults, and looked at. That is stronger than a headless test and still not a human looking at the
+app, so they join §6 row 3's eyeball list.
+
+> **The generalisable bit, since it has now happened twice in three sessions** (the 2026-08-12 entry
+> records three backlog rows that were already built): **a backlog row is a hypothesis, not a
+> specification.** Row 1 named four call sites of which one should not change; row 2 named two colours
+> of which one was already correct and pointed at the wrong line of the other. Both rows were written
+> by someone who had just been in that code. Re-derive the defect before implementing the fix.
+
+### What kept it honest
+
+Each of the three new tests was run against a **restored pre-change write** (`atomic_*` rebound to a
+plain `torch.save`/`np.savez` at the destination) and confirmed to fail with the message it claims —
+a torn-write test that passes either way is the easiest kind to write and guards nothing. The
+injected failure writes its bytes and *then* raises, because failing before the writer starts passes
+against a bare `torch.save` too: the destination is only clobbered once writing has begun.
+
+Suites: 216 tests, all green (`test_artifact_consistency` 10 → 13).
+
+### The CHECKPOINT=1 smoke train — §4.1 step 5's last un-done pre-flight, now DONE
+
+`scripts/smoke_train.py`, **chi + rotation ON + CUDA + `CHECKPOINT=1` + `SAVE=1`**, `TOBS_S=4.5`,
+master bounds + `master_spont`, card otherwise idle. **All four stages, 7069 s** (prior 571,
+posterior 5638, validate 206, infer 653) — against 8218 s on 2026-08-12 and 8827 s on 2026-08-11.
+
+| signal | result | reading |
+|---|---|---|
+| **training masked** | **34.8 %** (245/704) | §4.3.6 records 36.8 %; the runs so far read 36.7 / 38.2 / 34.8 at the same 704 probes. SE at that n is 1.8 pp, so this is 1.1 SE low — noise, and the watch condition is *materially ABOVE* ~37 %, not below |
+| validate masked | 40.6 % (73/180) | between §4.3.6's 47.2 % and 2026-08-12's 38.3 %; 180 probes, so spread is expected |
+| PPC masked | 61.2 % (2938/4800) | §4.3.6's 79.9 % → 64.6 % → 61.2 %. A readout of the posterior, not the probe machinery |
+| OOM retries, either level | **0** | 13 GiB free; not evidence the retries work |
+| `[checkpoint]` lines | preflight (dir + free disk) and `complete: 4 batches` | **the point of the run** — see below |
+| `[fisher]` | `averaged simulation Fisher over 8/8 operating points` | rotation genuinely ON, i.e. the configuration that shipped the C-11 device bug |
+| artifacts | `_smoke_prior.pt`, `_smoke_posterior.pt`, `.rot.pt`, `.loss.npz` all landed; **zero stray `.tmp`** | all four writes migrated today, exercised on the real path |
+
+Every artifact was then opened rather than assumed: the sidecar carries `mode=chi`, `chi_layout=2`,
+`k_pad=12`, `elem_w=6`, `max_cycles=20`, the `(0.03, 0.3)` band, 13 `param_keys` and a **(13,13) `V`
+on the CPU that is orthogonal to 1e-5**; the posterior unpickles as a `DirectPosterior`; the prior
+reports NADROWSKI with a 10-dim box; the `.loss.npz` reads back all five keys. That last one is the
+check worth keeping — `atomic_savez`'s failure mode (numpy appending `.npz` to the temp file's
+`.tmp`) is silent, and only opening the file at the expected path catches it. All `_smoke_*` files
+and the checkpoint temp dir were deleted afterwards; `Resources/Posteriors/` is empty again.
+
+**What this does and does not prove.** It proves the checkpoint's *write* path runs on the card under
+the retrain's exact configuration — the thing §4.1 asked for, and the thing no CPU test can certify
+(2026-08-12). It did **not** exercise a RESUME. That gap was closed separately, below.
+
+### Then the RESUME drill — the line that exists to rescue the retrain had never run
+
+`build_posterior` rehomes the checkpoint's stored `V` from the CPU onto `cfg.hw.device`, guarded by
+`if ckpt_resumed is not None and rotate:`. Read that guard literally: the line executes **only on a
+resume, with rotation on** — i.e. only on the run C-11 exists to rescue, and never in any CPU test.
+Its own comment says *"Without this the FIRST GPU resume with rotation ON would crash."* Nothing had
+ever run it. It was reasoned to, written, reviewed — and unexecuted.
+
+**The trap that would have made the obvious drill a silent pass.** `smoke_train.py` allocated
+`tempfile.mkdtemp` per run, so a second run never found the first's checkpoint. A stable directory
+knob alone is **not enough**, and this is the part worth remembering: `_training_identity` includes
+`prior_fingerprint`, and `_gmm_fingerprint`'s own docstring says two runs over the *same box* produce
+different fits. Two runs that each BUILD a prior therefore land in two different directories under
+one `CKPT_DIR` — run 2 never resumes, and the drill reports success having tested nothing. So
+`smoke_train.py` gained **both** `CKPT_DIR` and `PRIOR` (load a saved prior instead of building), the
+second being what pins the fingerprint. A `CKPT_DIR` without a `PRIOR` now prints a warning naming
+this exact failure. Note this is the same mechanism as §4.1 step 5's *"keep the prior it started
+with"* rule, met from the other direction.
+
+| | run 1 | run 2 (identical command) |
+|---|---|---|
+| prior | 1.4 s (**loaded**, against 571 s to build) | 1.4 s |
+| posterior | 5123.7 s — Fisher + generation + fit | **1.6 s** — Fisher and generation both skipped |
+| total | 5125.2 s | **3.0 s** |
+
+Run 2 printed `Reusing the Fisher rotation stored with the training checkpoint (2/2 batches —
+COMPLETE, so generation will be skipped)`. That print sits **after** the `.to(device=…, dtype=…)` in
+the same block, so emitting it *is* the proof the rehoming ran. Checked rather than inferred: the
+stored `V` is a real `(13,13)` **CPU** float32 tensor, orthogonal to 1e-5; `torch.cuda.is_available()`
+is True; the flow then trained six epochs through the rotated bijection; and the run contains **zero**
+`Expected all tensors to be on the same device` errors. A `V` left on the CPU meeting a CUDA
+`OrthogonalTransform` is a hard error, not a silent promotion — which is precisely how this bug class
+announced itself on 2026-08-12.
+
+**Still not exercised:** the *partial* splice. Run 1 completed, so run 2 took the
+complete-checkpoint short-circuit rather than resuming mid-generation and appending new rows to old.
+That case is covered on the CPU, including an out-of-process SIGKILL (2026-08-12). What is now
+observed on the GPU is the `V` rehoming and the short-circuit; what remains reasoned-to is the splice.
+
+The scratch `CKPT_DIR` was deleted and `Resources/Checkpoints/` was never created — a real run must
+not find a smoke checkpoint.
+
+### Two script-level defects fixed in the same pass
+
+- **`retrain_convergence.py` omitted `chi_max_cycles`** from `training_params`, while both
+  `sbc_characterize.py` and `build_posterior` thread it. Under `CHI=1` it fell through to
+  `gen_training_data`'s module fallback. Benign *only* while `SimConfig`'s default happens to equal
+  `config.CHI_MAX_CYCLES` — which makes it the identical latent class to the bug recorded three lines
+  above it in that same dict (*"omitting them silently took the forced branch"*). One line.
+- **`diagnose_fscale.py` recommended a config that is known to be worse.** Its docstring said *"A
+  retrain is still needed to CONFIRM the fix"* and its H2 verdict printed
+  `config.REPARAM_LOG_PARAMS = ['f_scale']`. **That retrain was run, and it disconfirmed** — Appendix
+  A 2026-07-16, `[TRIED → FAILED → REVERTED]`, worse TARP/expected coverage *and* a worse `f_scale`
+  SBC rank. §9's "two stale things found, not fixed" had already caught this; the script had simply
+  never been told. Both now report the finding and cite the entry. **H1 was deliberately left
+  intact** — "does the deployed `V` smear `f_scale` into the degeneracy block?" is a generic rotation
+  diagnostic and the retrain is rotated, so H1 applies directly to the posterior about to exist. Only
+  H2's *recommendation* was stale, not the tool.
+
+### A trap found on the way in: the smoke train's own default box is not the retrain's
+
+`smoke_train.py` had to be given `BOUNDS=…/master.txt` explicitly. Left at its default it resolves
+the cell's **same-named sibling**, `Bounds/nadrowski/master_spont.txt` — correct behaviour
+(`cli.resolve_bounds_for_cell`, shared with the CLI and GUI, pinned by `test_artifact_consistency`)
+and the wrong box for this purpose. Measured both ways:
+
+```
+DEFAULT (no BOUNDS)    mode=chi  dims=12  chi block=72  rescale=['x_scale','t_scale']
+BOUNDS=master.txt      mode=chi  dims=13  chi block=72  rescale=['x_scale','t_scale','f_scale']
+```
+
+**Both say `mode=chi` and both build the same 114-wide conditioning vector**, because the chi block is
+a function of `CHI_K_PAD` and not of the parameter set — so no width guard anywhere can see the
+difference. What differs is the inferred dimension, and the parameter dropped is **`f_scale`**, which
+§4.1 step 5 names as the retrain's headline hypothesis (unmeasured → measurable, 213× on `‖g‖`). A
+smoke run at the default therefore exercises a box that omits the thing the retrain exists to measure,
+and the only place it shows is one line of the banner. The script's own documented invocation was the
+defaulting one; it now carries the full command and a warning, and `[cfg] rescale order` joined its
+WHAT-TO-WATCH list. A cross-*load* between the two boxes is still caught, by the `param_keys` guard —
+what was uncovered is running the wrong one in the first place.
 
 ## 2026-08-12 (later) — the smoke train, re-run after the device fix: clean
 
@@ -2992,8 +3193,15 @@ old path's parameter ORDER, values, inits and mode **identically** across all fo
 ### Two stale things found, not fixed
 
 - `POST` defaults to `posterior_3d.pt` in three scripts; that file does not exist in this repo.
-- `diagnose_fscale`'s verdict recommends `REPARAM_LOG_PARAMS=['f_scale']`, which Appendix A below
-  records as **tried → failed → reverted**. The script has never been told.
+  **Still true**, and `diagnose_fscale`'s own `posterior_07012026.pt` default is gone too. Deliberately
+  left: every one of these needs a real name after the retrain anyway, and inventing a default now
+  would only be wrong differently. **Set `POST` explicitly.**
+- ~~`diagnose_fscale`'s verdict recommends `REPARAM_LOG_PARAMS=['f_scale']`, which Appendix A below
+  records as **tried → failed → reverted**. The script has never been told.~~ ✅ **FIXED 2026-08-13** —
+  docstring and H2 verdict branch both corrected; H1 kept, because it is a rotation diagnostic and the
+  retrain is rotated. It took two sessions to act on a defect this document had already written down,
+  which is the same lesson as the 2026-08-12 entry's "three backlog items were already built": **a
+  row in this file is only worth writing if someone later acts on it.**
 
 ## 2026-07-28 — Chi-mode OOM, `SimulationError`, and two chi correctness bugs
 

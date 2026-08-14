@@ -54,7 +54,7 @@ from core.config import (
 from core.SBI import pipeline, embedded_network, statistics
 from core.SBI.Priors import sbi_prior_wrapper
 from core.SBI.reparam import build_inferred_bijection, read_sidecar, sidecar_path
-from core.Helpers import visualizers
+from core.Helpers import file_manager, visualizers
 
 # ---- knobs ----
 _common.enable_warnings()
@@ -132,6 +132,13 @@ training_params = {
     # gen_training_data's module fallback -- it is frozen into the saved artifact (trap CHI7).
     "chi_mode": cfg.chi_mode, "chi_f0": cfg.chi_f0,
     "chi_freq_bounds": cfg.chi_freq_bounds, "chi_k_pad": cfg.chi_k_pad,
+    # chi_max_cycles for the same reason as chi_k_pad, and it was the one field this dict did not
+    # thread while both sbc_characterize and orchestrator.build_posterior did. It is the lock-in
+    # duration ceiling, so it sets the `logcyc` every probe reports -- the channel the encoder uses to
+    # decide how much to trust a probe. Falling through to the module fallback retrains against a
+    # ceiling the base posterior may never have seen; benign only for as long as SimConfig's default
+    # happens to equal config.CHI_MAX_CYCLES, which is the same latent bug as the one two lines above.
+    "chi_max_cycles": cfg.chi_max_cycles,
     "n_vars": cfg.inits_tensor.shape[-1],
     "dtype": cfg.hw.dtype, "device": cfg.hw.device,
 }
@@ -166,12 +173,14 @@ posterior_latent, diag = pipeline.train_nn(
 orchestrator.save_posterior_artifacts(NAME, posterior_latent, None, None, cfg)
 val = diag.get("validation_loss") or []
 train = diag.get("training_loss") or []
-np.savez(str(PLOT_PATH / (NAME + ".loss.npz")),
-         training_loss=np.asarray(train, dtype=float),
+file_manager.atomic_savez(
+    PLOT_PATH / (NAME + ".loss.npz"),
+    dict(training_loss=np.asarray(train, dtype=float),
          validation_loss=np.asarray(val, dtype=float),
          best_validation_loss=float(diag.get("best_validation_loss") or float("nan")),
          epochs_trained=int(diag.get("epochs_trained") or -1),
-         stop_after_epochs=int(diag.get("stop_after_epochs") or STOP_AFTER))
+         stop_after_epochs=int(diag.get("stop_after_epochs") or STOP_AFTER)),
+)
 visualizers.plot_training_loss(diag, save_path=str(PLOT_PATH / (NAME + "_loss.png")))
 print("saved:", str(POSTERIOR_PATH / (NAME + ".pt")))
 print("saved:", str(PLOT_PATH / (NAME + "_loss.png")))

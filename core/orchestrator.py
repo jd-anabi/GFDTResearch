@@ -836,6 +836,10 @@ def save_prior_artifacts(name: str, nd_prior, cfg: SimConfig, *, fig_sink=None) 
     Persist an ND prior GMM to Resources/Priors/<name>.pt and its corner PNG to Resources/Plots.
     Shared by build_prior (CLI, save=True) and a GUI's explicit "Save prior" control. With no
     fig_sink the corner plot falls back to plt.show() (a no-op under the GUI's Agg backend).
+
+    The .pt write is ATOMIC (file_manager.save_mix_dist -> atomic_torch_save). The PNG beside it is
+    not, deliberately: a half-written PNG is loud and free to regenerate, whereas a half-written prior
+    is the file a checkpointed resume fingerprints and SBC later draws theta* from.
     """
     # model + the ND parameter ORDER travel with the file so _assert_prior_matches can refuse a
     # cross-config load. Without them a prior is identifiable only by its box edges, which several
@@ -979,8 +983,14 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     <name>.rot.pt reparam sidecar (rotation V + log params, when either is active), and the
     <name>.loss.npz curve + <name>_loss.png. Shared by build_posterior (CLI) and a GUI's explicit
     "Save posterior" control.
+
+    Every write here is ATOMIC (file_manager._atomic_write: sibling tmp -> fsync -> os.replace). These
+    are one-shot end-of-run writes, so the window is narrow -- but the ``.pt`` and its ``.rot.pt`` are
+    the product of a multi-day run, the GUI's Save button can be pressed twice over the same name, and
+    a torn artifact does not announce itself: it is an unpickling error hours later, or a sidecar that
+    loads with half its keys and silently decodes every latent sample through a default box.
     """
-    torch.save(posterior_latent, str(POSTERIOR_PATH / (name + ".pt")))
+    file_manager.atomic_torch_save(posterior_latent, POSTERIOR_PATH / (name + ".pt"))
     # Self-describing sidecar so eval reconstructs the exact training box (log-mask + rotation V) AND
     # knows which observation mode produced this posterior.
     #
@@ -995,7 +1005,7 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     # divergence here would be invisible until the posterior evaluated in the wrong coordinate.
     log_params_used = resolved_log_params(cfg, log_params=_log_params_for(cfg))
     from .SBI.statistics import FEATURE_LABELS
-    torch.save({
+    file_manager.atomic_torch_save({
         "V": V,
         "log_params": log_params_used,
         # Observation mode + conditioning geometry -- see SBI/reparam.posterior_mode, which prefers
@@ -1031,16 +1041,18 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
         "nd_highs": torch.tensor([b[1] for _, b in cfg.params_dict.values()], dtype=torch.float64),
         "rescale_lows": torch.tensor([b[0] for _, b in cfg.rescale_params.values()], dtype=torch.float64),
         "rescale_highs": torch.tensor([b[1] for _, b in cfg.rescale_params.values()], dtype=torch.float64),
-    }, str(POSTERIOR_PATH / (name + ".rot.pt")))
+    }, POSTERIOR_PATH / (name + ".rot.pt"))
     # Loss curve: persisted so the convergence check is reproducible (sbi keeps it only in the trainer).
     if diagnostics is not None and diagnostics.get("validation_loss"):
-        np.savez(
-            str(PLOT_PATH / (name + ".loss.npz")),
-            training_loss=np.asarray(diagnostics.get("training_loss", []), dtype=float),
-            validation_loss=np.asarray(diagnostics.get("validation_loss", []), dtype=float),
-            best_validation_loss=float(diagnostics.get("best_validation_loss") or float("nan")),
-            epochs_trained=int(diagnostics.get("epochs_trained") or -1),
-            stop_after_epochs=int(diagnostics.get("stop_after_epochs") or -1),
+        file_manager.atomic_savez(
+            PLOT_PATH / (name + ".loss.npz"),
+            dict(
+                training_loss=np.asarray(diagnostics.get("training_loss", []), dtype=float),
+                validation_loss=np.asarray(diagnostics.get("validation_loss", []), dtype=float),
+                best_validation_loss=float(diagnostics.get("best_validation_loss") or float("nan")),
+                epochs_trained=int(diagnostics.get("epochs_trained") or -1),
+                stop_after_epochs=int(diagnostics.get("stop_after_epochs") or -1),
+            ),
         )
         fig_loss = visualizers.plot_training_loss(diagnostics, save_path=str(PLOT_PATH / (name + "_loss.png")))
         if fig_loss is not None:

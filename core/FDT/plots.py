@@ -61,7 +61,13 @@ def plot_eff_temp_ratio(omegas: np.ndarray, ratio: np.ndarray,
     ax.set_yscale('symlog', linthresh=linthresh)
     ax.axhline(1.0, color=plt.rcParams['axes.edgecolor'], linestyle='--', linewidth=0.8,
                label=r'$T_{\rm eff}/T = 1$ (equilibrium)')
-    ax.axhline(0.0, color='gray', linestyle=':', linewidth=0.6,
+    # axes.edgecolor, not 'gray': this is figure CHROME and must follow the theme, exactly like the
+    # equilibrium line above it. Deliberately the SAME token as that line -- the two are separated by
+    # dash pattern and width, which is matplotlib's own convention for reference lines and survives a
+    # theme flip. `grid.color` was the obvious "dimmer neutral" and is WRONG: it is the border token
+    # (#3D3D3D) and the dark theme paints axes on #2B2B2B, so the line and its legend swatch both
+    # disappear -- worse than the hardcoded gray it replaced. (B-c's last residue.)
+    ax.axhline(0.0, color=plt.rcParams['axes.edgecolor'], linestyle=':', linewidth=0.6,
                 label=r"$T_{\rm eff}/T = 0$ ($\chi''=0$ crossing)")
     if x_res is not None:
         ax.axvline(x_res, color='darkorange', linestyle=':', linewidth=1.2,

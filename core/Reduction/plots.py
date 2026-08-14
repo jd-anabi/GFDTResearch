@@ -11,12 +11,35 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 
 _PLOT_DIR = Path("Resources/Plots")
+
+
+def _overlay_halo() -> list:
+    """A themed outline for a WHITE line drawn on a colormap (B-c's last residue).
+
+    White is the right colour for the line itself and must NOT follow the page theme -- its backdrop
+    is viridis, not the figure, so a themed colour would be near-black on dark purple under the light
+    theme. That is the same call ``cross_validation_plots`` makes with ``darkorange`` and
+    ``simulate_export`` makes by pinning a white video figure.
+
+    Its LEGEND swatch is the part that was actually broken: the legend sits on ``legend.facecolor``,
+    which is ``#FFFFFF`` under the light theme and ``inherit`` -> white under plain matplotlib, so the
+    entry for the predicted-Omega_0 line was an invisible white line on white. A stroke in
+    ``text.color`` fixes the swatch on any background -- the token pair is contrast-guaranteed by
+    construction -- and on the surface it only adds a thin halo, which helps in light and is neutral
+    in dark.
+
+    Read at CALL time, never hoisted to a module constant: rcParams is global and re-applied on a
+    theme flip (``gui.mpl_theme``), so an import-time snapshot would pin the theme the process started
+    in.
+    """
+    return [pe.Stroke(linewidth=3.5, foreground=plt.rcParams["text.color"]), pe.Normal()]
 
 
 def plot_sweep_summary(df: pd.DataFrame, save: bool = True, show: bool = False) -> Path | None:
@@ -131,13 +154,15 @@ def plot_cross_validation_3d(
     ax3d = fig.add_subplot(1, 2, 1, projection="3d")
     ax2d = fig.add_subplot(1, 2, 2)
 
+    halo = _overlay_halo()
     OMEGA, MU = np.meshgrid(omega, mu_axis)
     ax3d.plot_surface(OMEGA, MU, T_eff_matrix, cmap="viridis",
                       edgecolor="none", alpha=0.85)
     ax3d.plot(Omega_axis, mu_axis,
               [T_eff_matrix[i, np.argmin(np.abs(omega - Omega_axis[i]))]
                for i in range(len(mu_axis))],
-              color="white", lw=2, label=r"predicted $\Omega_0^{(N)}(\mu_H)$")
+              color="white", lw=2, path_effects=halo,
+              label=r"predicted $\Omega_0^{(N)}(\mu_H)$")
     ax3d.set_xlabel(r"$\tilde\omega$")
     ax3d.set_ylabel(r"$\mu_H^{(N)}$")
     ax3d.set_zlabel(r"$T_{\rm eff}/T$")
@@ -145,7 +170,7 @@ def plot_cross_validation_3d(
     ax3d.set_title("FDT response vs bifurcation distance")
 
     im = ax2d.pcolormesh(OMEGA, MU, T_eff_matrix, cmap="viridis", shading="auto")
-    ax2d.plot(Omega_axis, mu_axis, "w-", lw=2,
+    ax2d.plot(Omega_axis, mu_axis, "w-", lw=2, path_effects=halo,
               label=r"predicted $\Omega_0^{(N)}(\mu_H)$")
     ax2d.axhline(0.0, color="r", lw=0.7, ls="--", label="Hopf manifold")
     ax2d.set_xlabel(r"$\tilde\omega$")

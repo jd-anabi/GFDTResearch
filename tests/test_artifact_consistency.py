@@ -309,6 +309,126 @@ def test_a_posterior_trained_at_a_different_cycle_ceiling_is_refused():
         path.unlink(missing_ok=True)
 
 
+# ── the end-of-run artifact writes are atomic ─────────────────────────────────────────────────────
+class _WriteFailed(RuntimeError):
+    """Injected mid-write failure. Not OSError, so a handler that swallows disk errors cannot hide it."""
+
+
+def _failing(real):
+    """Wrap a serializer so it writes its bytes and THEN fails -- the tear that atomicity must absorb.
+
+    Failing before writing anything would pass against a plain `torch.save` too: the destination is
+    only clobbered once the writer has begun. The bytes have to land first for the test to mean
+    anything.
+
+    Signature-agnostic (`*a, **k`) because the two serialisers order their arguments differently --
+    ``torch.save(obj, file)`` against ``np.savez(file, **arrays)``.
+    """
+    def _boom(*a, **k):
+        real(*a, **k)
+        raise _WriteFailed("disk full")
+    return _boom
+
+
+def test_a_torn_posterior_write_leaves_the_previous_artifact_intact():
+    """The posterior and its .rot.pt sidecar are the product of a multi-day run, and the GUI's Save
+    button can be pressed a second time over the same name. A bare torch.save truncates the
+    destination before it writes, so a failure there leaves a file that exists, has a plausible size,
+    and cannot be unpickled -- discovered whenever someone next tries to load it.
+
+    Routed through save_posterior_artifacts rather than the helper directly, because what regresses is
+    not the helper (it has its own test) but a call site quietly reverting to torch.save."""
+    cfg = _cfg(chi_mode=True, chi_n_freqs=4)
+    name = "_ptest_atomic"
+    pt, rot = POSTERIOR_PATH / f"{name}.pt", POSTERIOR_PATH / f"{name}.rot.pt"
+    real_save = torch.save
+    try:
+        orchestrator.save_posterior_artifacts(name, {"generation": 1}, None, None, cfg)
+        assert torch.load(str(pt), weights_only=False)["generation"] == 1
+        assert torch.load(str(rot), weights_only=False)["mode"] == "chi", "no sidecar was written"
+
+        torch.save = _failing(real_save)
+        try:
+            orchestrator.save_posterior_artifacts(name, {"generation": 2}, None, None, cfg)
+            raise AssertionError("the injected failure did not propagate")
+        except _WriteFailed:
+            pass
+        finally:
+            torch.save = real_save
+
+        assert torch.load(str(pt), weights_only=False)["generation"] == 1, \
+            "a torn write clobbered the posterior it was replacing"
+        assert not (POSTERIOR_PATH / f"{name}.pt.tmp").exists(), "a failed write left its temp behind"
+    finally:
+        torch.save = real_save
+        for p in (pt, rot, POSTERIOR_PATH / f"{name}.pt.tmp", POSTERIOR_PATH / f"{name}.rot.pt.tmp"):
+            p.unlink(missing_ok=True)
+
+
+def test_a_torn_prior_write_leaves_the_previous_prior_intact():
+    """A prior is not just a file: it is what the training checkpoint's identity fingerprints and what
+    SBC draws theta* from. Half-replacing one does not produce a broken run, it produces a run that
+    resumes against a distribution nobody can name (2026-08-12: prior_fingerprint is in the checkpoint
+    identity for exactly this reason)."""
+    path = PRIOR_PATH / "_ptest_atomic.pt"
+    real_save = torch.save
+    try:
+        _write_prior(path, [0.0, 0.0], [1.0, 1.0], ["a", "b"])
+        first = file_manager.read_prior_metadata(str(path))["param_keys"]
+        assert first == ["a", "b"], first
+
+        torch.save = _failing(real_save)
+        try:
+            _write_prior(path, [0.0, 0.0], [1.0, 1.0], ["c", "d"])
+            raise AssertionError("the injected failure did not propagate")
+        except _WriteFailed:
+            pass
+        finally:
+            torch.save = real_save
+
+        assert file_manager.read_prior_metadata(str(path))["param_keys"] == ["a", "b"], \
+            "a torn write clobbered the prior it was replacing"
+        assert not (PRIOR_PATH / "_ptest_atomic.pt.tmp").exists(), "a failed write left its temp behind"
+    finally:
+        torch.save = real_save
+        path.unlink(missing_ok=True)
+        (PRIOR_PATH / "_ptest_atomic.pt.tmp").unlink(missing_ok=True)
+
+
+def test_atomic_savez_round_trips_and_cannot_be_torn():
+    """The .loss.npz is a zip, so a truncated one raises BadZipFile rather than reading short -- and it
+    is the file scripts/retrain_convergence.py reads back for its convergence verdict.
+
+    The round-trip half is load-bearing on its own: np.savez appends '.npz' when handed a NAME but not
+    when handed a HANDLE, which is the difference between landing on <name>.loss.npz and on
+    <name>.loss.npz.tmp.npz."""
+    import numpy as np
+    path = PRIOR_PATH / "_ptest_atomic.npz"
+    real_savez = np.savez
+    try:
+        file_manager.atomic_savez(path, dict(validation_loss=np.arange(3.0), epochs_trained=7))
+        assert path.exists(), f"nothing landed at {path} -- np.savez rewrote the name"
+        with np.load(str(path)) as z:
+            assert list(z["validation_loss"]) == [0.0, 1.0, 2.0] and int(z["epochs_trained"]) == 7
+
+        np.savez = _failing(real_savez)
+        try:
+            file_manager.atomic_savez(path, dict(validation_loss=np.arange(99.0), epochs_trained=99))
+            raise AssertionError("the injected failure did not propagate")
+        except _WriteFailed:
+            pass
+        finally:
+            np.savez = real_savez
+
+        with np.load(str(path)) as z:
+            assert int(z["epochs_trained"]) == 7, "a torn write clobbered the previous curve"
+        assert not (PRIOR_PATH / "_ptest_atomic.npz.tmp").exists(), "a failed write left its temp behind"
+    finally:
+        np.savez = real_savez
+        path.unlink(missing_ok=True)
+        (PRIOR_PATH / "_ptest_atomic.npz.tmp").unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     failures = 0
     for test_name, fn in sorted(globals().items()):
