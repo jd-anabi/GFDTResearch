@@ -181,7 +181,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 # Note the asymmetry, because it is why this hid so well: the 11 Group-G columns are
                 # EXACTLY zero in chi mode and cost nothing (0/1e-9 = 0). It is the NEARLY constant
                 # channel that is lethal, not the constant one. See trap CHI10 and backlog C-9/C-10.
-                zero = torch.zeros((mm, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                zero = _forcing.zero_force(mm, n_force_ch, t_fine.shape[0], dtype, device)
                 torch.manual_seed(2)
                 xs_d = xsc * s(zero).double() + xof
                 spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
@@ -232,7 +232,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
             # are ~216 of them per rotation, so an n_vars-wide one over-allocates 3x for Nadrowski
             # and 5x for BP. See forcing.n_force_channels -- the channel count is a property of the
             # model's DRIFT, so a driveless Hopf still needs 2 channels.
-            zero = torch.zeros((mm, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+            zero = _forcing.zero_force(mm, n_force_ch, t_fine.shape[0], dtype, device)
             torch.manual_seed(2); xs = s(zero)
             return pipeline.gen_stats(xsc * xs.double() + xof, None, cfg.dt_exp, None, None, None,
                                       device=device, spontaneous_only=True).numpy()

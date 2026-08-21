@@ -2352,6 +2352,152 @@ def test_checkpoint_rng_snapshot_round_trips_the_streams_it_owns():
         raise AssertionError("a CUDA RNG state was accepted onto a CPU run")
 
 
+# ── the CUDA-graph solver fast path ───────────────────────────────────────────────────────────────
+def _graph_test_model(B, T, dev):
+    """A Nadrowski model with EVERY noise channel zeroed, so the dynamics are deterministic.
+
+    That is what makes a bitwise graph-vs-eager comparison possible at all: with noise live the two
+    paths draw in a different order and can only be compared statistically, which would not catch an
+    off-by-one in the force index or the output slice. The drive is time-VARYING on purpose -- a
+    constant force is indistinguishable under an indexing error.
+    """
+    from core.Models.nadrowski_model import NadrowskiModel
+    o = lambda v: torch.full((B,), float(v), device=dev)
+    f = torch.zeros((B, 1, T), device=dev)
+    f[:, 0, :] = torch.sin(torch.linspace(0, 20, T, device=dev)).unsqueeze(0) * 0.3
+    m = NadrowskiModel(o(0.8), o(3.57), o(1.32), o(0.027), o(0.0), o(0.95), o(10.), o(14.1),
+                       o(50.), o(0.0), f, batch_size=B, device=dev, dtype=torch.float32)
+    m._x_noise_const = torch.zeros_like(m._x_noise_const)
+    m._y_noise_const = torch.zeros_like(m._y_noise_const)
+    return m
+
+
+def test_the_cuda_graph_step_matches_the_eager_step_bitwise():
+    """The graphed solver must integrate the SAME trajectory as the eager loop.
+
+    ~88% of solver wall-clock was CPU kernel-launch overhead (measured 54.87 -> 6.65 us/step at batch
+    2048), so the step loop is now replayed from a captured CUDA graph. The graph bakes in the force
+    slice offsets and writes a whole chunk of outputs at once, which is exactly where an off-by-one
+    would hide -- and it would present as slightly-wrong physics, never as an error.
+
+    T is chosen so the run is NOT a whole number of chunks: it must exercise the eager tail too.
+
+    ⚠ THE WARM-UP BELOW IS LOAD-BEARING, and finding out why was most of the work. TorchScript's
+    PROFILING EXECUTOR runs the first invocations of a scripted function unoptimised, then
+    specialises and fuses -- and the fused kernel differs from the unfused one by ~1 ULP (a fused
+    multiply-add against separate ops). Measured: three consecutive EAGER runs of this same
+    deterministic model gave run1 != run2 (differing from row 1, max|diff| 7.5e-09) and
+    run2 == run3. So "graphed == eager bitwise" is not even well posed until both are warm --
+    the eager baseline is not bitwise reproducible against ITSELF. Warm first, and then all four
+    comparisons (eager/eager, graph/graph, graph/eager, replayed-region) are exactly 0.0.
+
+    This is CUDA-only and TorchScript-only, so it does not touch the CPU suite's seeded-reproducibility
+    gates: `euler_compiled` is selected only on CUDA, and every CPU test runs the plain eager `euler`.
+    """
+    from core import config as _cfg
+    from core.Solvers import sdeint as _sd
+    if not torch.cuda.is_available():
+        print("      (no CUDA -- skipping the graph/eager equivalence check)")
+        return
+    dev = torch.device("cuda")
+    B, T = 128, 2 * _cfg.SOLVER_GRAPH_CHUNK + 3        # 2 full chunks + a 2-step tail
+    x0 = torch.linspace(-0.2, 0.2, B, device=dev).unsqueeze(1).repeat(1, 3).contiguous()
+    ts = (0.0, (T - 1) * 0.001)
+
+    prev = _cfg.SOLVER_CUDA_GRAPHS
+    try:
+        _cfg.SOLVER_CUDA_GRAPHS = False
+        for _ in range(3):                             # specialise the scripted step; see above
+            _sd.Solver().euler_compiled(_graph_test_model(B, T, dev), x0.clone(), ts, T)
+        eager = _sd.Solver().euler_compiled(_graph_test_model(B, T, dev), x0.clone(), ts, T)
+        _cfg.SOLVER_CUDA_GRAPHS = True
+        _sd._GRAPH_CACHE.clear()
+        graphed = _sd.Solver().euler_compiled(_graph_test_model(B, T, dev), x0.clone(), ts, T)
+    finally:
+        _cfg.SOLVER_CUDA_GRAPHS = prev
+
+    n_full = (T - 1) // _cfg.SOLVER_GRAPH_CHUNK * _cfg.SOLVER_GRAPH_CHUNK
+    assert torch.equal(graphed[:n_full + 1], eager[:n_full + 1]), (
+        "the GRAPH-REPLAYED region disagrees with the eager loop -- this is the region the capture "
+        f"owns, max|diff|={float((graphed[:n_full + 1] - eager[:n_full + 1]).abs().max()):.3e}")
+
+    assert graphed.shape == eager.shape == (T, B, 3), (graphed.shape, eager.shape)
+    assert torch.equal(graphed[0], x0), "row 0 must be the initial condition, untouched"
+    assert torch.isfinite(graphed).all(), "graphed trajectory went non-finite"
+    assert float((graphed[-1] - graphed[0]).abs().max()) > 1e-3, \
+        "the trajectory did not move -- the test would pass trivially"
+    assert torch.equal(graphed, eager), \
+        f"graphed and eager disagree, max|diff|={float((graphed - eager).abs().max()):.3e}"
+
+
+def test_the_cuda_graph_preserves_the_rng_contract_c11_depends_on():
+    """C-11's resume restores the CUDA RNG state and expects the noise stream to continue from there.
+
+    A captured graph could plausibly have broken this in two ways: by FREEZING the noise (replaying
+    identical draws, which would silently collapse every ensemble to one trajectory), or by keeping a
+    private offset that torch.cuda.set_rng_state_all cannot rewind (which would break the
+    bit-identical resume). Neither happens, and both are cheap to keep pinned.
+    """
+    from core import config as _cfg
+    from core.Solvers import sdeint as _sd
+    if not torch.cuda.is_available():
+        print("      (no CUDA -- skipping the graph RNG contract check)")
+        return
+    dev = torch.device("cuda")
+    B, T = 128, 2 * _cfg.SOLVER_GRAPH_CHUNK + 1
+    x0 = torch.zeros((B, 3), device=dev)
+    ts = (0.0, (T - 1) * 0.001)
+
+    def run():
+        from core.Models.nadrowski_model import NadrowskiModel
+        o = lambda v: torch.full((B,), float(v), device=dev)
+        f = torch.zeros((B, 1, T), device=dev)
+        m = NadrowskiModel(o(0.8), o(3.57), o(1.32), o(0.027), o(0.268), o(0.95), o(10.), o(14.1),
+                           o(50.), o(1.5), f, batch_size=B, device=dev, dtype=torch.float32)
+        return _sd.Solver().euler_compiled(m, x0.clone(), ts, T)
+
+    prev = _cfg.SOLVER_CUDA_GRAPHS
+    try:
+        _cfg.SOLVER_CUDA_GRAPHS = True
+        _sd._GRAPH_CACHE.clear()
+        a = run()
+        b = run()
+        assert not torch.equal(a, b), \
+            "consecutive graphed runs produced IDENTICAL noise -- the RNG is frozen inside the graph"
+
+        state = torch.cuda.get_rng_state_all()
+        c = run()
+        torch.cuda.set_rng_state_all(state)
+        d = run()
+        assert torch.equal(c, d), \
+            "restoring the CUDA RNG state did not reproduce the run -- C-11's resume would break"
+    finally:
+        _cfg.SOLVER_CUDA_GRAPHS = prev
+
+
+def test_the_graph_cache_is_not_hung_off_the_solver_class():
+    """Trap X1 in a new costume.
+
+    The graph cache is module-level, NOT a Solver attribute or a module-level Solver singleton,
+    because `sdeint.Solver` must stay resolvable at CALL time for
+    test_solver_failure_raises_instead_of_killing_the_process to patch it. It is also bounded --
+    graph memory lives in a private pool that torch.cuda.empty_cache() cannot reclaim.
+    """
+    import inspect
+    from core import config as _cfg
+    from core.Solvers import sdeint as _sd
+    src = inspect.getsource(_sd)
+    assert "_GRAPH_CACHE" in src and isinstance(_sd._GRAPH_CACHE, dict)
+    assert not hasattr(_sd.Solver, "_GRAPH_CACHE"), "the cache must not live on the Solver class"
+    for bad in ("_SOLVER_SINGLETON", "_SOLVER = Solver()"):
+        assert bad not in src, f"{bad}: a module-level Solver singleton re-opens trap X1"
+    assert _cfg.SOLVER_GRAPH_CACHE_MAX >= 1
+    if not torch.cuda.is_available():
+        print("      (no CUDA -- cache-bound check is structural only)")
+        return
+    assert len(_sd._GRAPH_CACHE) <= _cfg.SOLVER_GRAPH_CACHE_MAX, "graph cache exceeded its bound"
+
+
 if __name__ == "__main__":
     failures = 0
     for test_name, fn in sorted(globals().items()):

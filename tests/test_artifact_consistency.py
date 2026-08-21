@@ -429,6 +429,61 @@ def test_atomic_savez_round_trips_and_cannot_be_torn():
         (PRIOR_PATH / "_ptest_atomic.npz.tmp").unlink(missing_ok=True)
 
 
+# ── the chi band/drive preflight (2026-08-19 regression) ─────────────────────────────────────────
+def test_a_chi_run_at_a_non_default_band_is_refused_before_the_simulation_spend():
+    """A ~5-day retrain was spent at the RETIRED band (0.1, 10.0) because QSettings restored a value
+    saved before C-5 changed it. `_assert_mode_matches` catches that disagreement only when a
+    posterior is LOADED, i.e. after the days are gone.
+
+    The subtle half is the LOAD path: it compares the posterior against cfg, so a stale cfg loading
+    the posterior trained under that same stale cfg agrees with itself and stays silent. This guard
+    compares against config.py, the one party that cannot go stale.
+
+    Scope matters as much as existence: chi_n_freqs must NOT be an error. It is the count an
+    OBSERVATION supplies, training draws its own K per batch, and failing on it would refuse a
+    perfectly good 7-recording experiment.
+    """
+    import os as _os
+    cfg = _cfg(chi_mode=True, chi_n_freqs=4)
+
+    orchestrator._assert_chi_config_is_deliberate(cfg)          # at the defaults: must not raise
+
+    for field, bad in (("chi_freq_bounds", (0.1, 10.0)), ("chi_f0", cfg.chi_f0 * 2)):
+        stale = _cfg(chi_mode=True, chi_n_freqs=4)
+        setattr(stale, field, bad)
+        try:
+            orchestrator._assert_chi_config_is_deliberate(stale)
+            raise AssertionError(f"a chi run with a non-default {field} was accepted")
+        except ValueError as e:
+            assert field in str(e), f"the message must name {field}, got: {e}"
+            assert "PRISM.ini" in str(e) or "QSettings" in str(e), \
+                "the message must point at the persisted-settings cause, which is what bit"
+
+    # K alone is legitimate -- one posterior serves any probe count (build_posterior omits it from
+    # training_params on purpose). Refusing it would break the K-agnosticism the set encoder buys.
+    k_only = _cfg(chi_mode=True, chi_n_freqs=4)
+    k_only.chi_n_freqs = int(config.CHI_N_FREQS) + 3
+    orchestrator._assert_chi_config_is_deliberate(k_only)       # must not raise
+
+    # A non-chi run is never gated by a chi knob.
+    spont = _cfg("master_spont.txt")
+    spont.chi_freq_bounds = (0.1, 10.0)
+    orchestrator._assert_chi_config_is_deliberate(spont)        # must not raise
+
+    # The escape hatch works, and is explicit -- a band sweep is a real activity.
+    prev = _os.environ.get(orchestrator.CHI_OVERRIDE_ENV)
+    _os.environ[orchestrator.CHI_OVERRIDE_ENV] = "1"
+    try:
+        override = _cfg(chi_mode=True, chi_n_freqs=4)
+        override.chi_freq_bounds = (0.1, 10.0)
+        orchestrator._assert_chi_config_is_deliberate(override)  # must not raise
+    finally:
+        if prev is None:
+            _os.environ.pop(orchestrator.CHI_OVERRIDE_ENV, None)
+        else:
+            _os.environ[orchestrator.CHI_OVERRIDE_ENV] = prev
+
+
 if __name__ == "__main__":
     failures = 0
     for test_name, fn in sorted(globals().items()):

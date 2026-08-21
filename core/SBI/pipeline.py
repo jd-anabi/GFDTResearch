@@ -1469,7 +1469,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 if chi_mode:
                     # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
                     # Conditioning [S(41, Group G zeroed) | log(T) | chi(3K)] -- chi replaces the forcing block.
-                    force0 = torch.zeros((n, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                    force0 = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
                     x_nd_spont_fine = gen_obs(
                         model=model, params=nd, t=t_fine, inits=init_rows,
                         force=force0, n_segs=n_segs_k, steady_idx=steady_idx,
@@ -1513,7 +1513,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     return training_stats
                 elif spontaneous_only:
                     # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
-                    force = torch.zeros((n, n_force_ch, t_fine.shape[0]), dtype=dtype, device=device)
+                    force = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
                     x_nd_spont_fine = gen_obs(
                         model=model, params=nd, t=t_fine, inits=init_rows,
                         force=force, n_segs=n_segs_k, steady_idx=steady_idx,

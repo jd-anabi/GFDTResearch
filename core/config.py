@@ -142,6 +142,23 @@ T_MIN_EXP_S = 1.0      # shortest expected recording (1 s)
 T_MAX_EXP_S = 60.0     # longest expected recording (1 min)
 
 # === SIMULATION COST CONSTANTS ===
+# CUDA Graphs for the Euler-Maruyama step loop. ~88% of solver wall-clock was CPU kernel-LAUNCH
+# overhead: measured on the real Nadrowski step, 54.87 us/step eager against 6.65 us/step replayed
+# from a captured graph at batch 2048 (8.25x), 7.80x at 8192. The solver is the whole run -- training
+# generation alone is ~97% of a production retrain -- so this is the single largest lever in the
+# project. Read LIVE via `config.SOLVER_CUDA_GRAPHS` (never `from .config import`, which snapshots),
+# so a test or a debugging session can turn it off in-process.
+#
+# Set False to force the eager TorchScript loop. Behaviour is otherwise identical; the graph path
+# falls back to eager on its own if capture fails for any reason.
+SOLVER_CUDA_GRAPHS = True
+SOLVER_GRAPH_CHUNK = 50     # Euler steps captured per graph. Amortises replay overhead without
+                            # making the captured region large enough to matter for memory: the
+                            # static output block is (CHUNK, batch, d) = ~1.2 MB at batch 2048.
+SOLVER_GRAPH_CACHE_MAX = 8  # distinct (step, shape, dt) graphs kept alive. The pipeline uses one
+                            # width plus the OOM halving ladder, so ~5 in practice. Graph memory
+                            # lives in a PRIVATE pool that torch.cuda.empty_cache() cannot reclaim,
+                            # which is why this is bounded rather than unlimited.
 CHUNK_LEN = 100_000    # fine integration steps per segment (per-chunk memory cap)
 N_ND_MAX = 300_000     # max total fine integration steps per batch (pre-filter ceiling)
 PPC_BIN_SIZE = 50      # samples per mini-batch for posterior-predictive-check simulation

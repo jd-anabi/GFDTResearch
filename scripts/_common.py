@@ -31,6 +31,12 @@ Env knobs honoured here (each script documents its own on top of these):
   CHI_K     number of probe frequencies K
   CHI_F0    ND drive amplitude
   CHI_LO/CHI_HI   chi frequency bounds, as multiples of the measured Omega_0
+
+⚠ CHI_F0 and CHI_LO/CHI_HI now require PRISM_CHI_OVERRIDE=1 for anything that reaches
+``orchestrator.build_prior``/``build_posterior``. They set the BAND and DRIVE the network is trained
+on, both baked into the encoder's weights, and a silent disagreement with ``config.CHI_*`` cost a
+~5-day retrain once (Appendix A, 2026-08-19). Reading them is still free -- the guard fires only on
+the two expensive entry points, so the measurement scripts that merely build a config are unaffected.
 """
 import os
 import sys

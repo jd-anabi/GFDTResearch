@@ -7,6 +7,7 @@ This module owns the pipeline flow: observe -> prior -> posterior -> validate.
 import hashlib
 import importlib
 import math
+import os
 import time
 import warnings
 
@@ -449,6 +450,65 @@ def _training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dic
     }
 
 
+CHI_OVERRIDE_ENV = "PRISM_CHI_OVERRIDE"
+
+
+def _assert_chi_config_is_deliberate(cfg: SimConfig) -> None:
+    """Refuse a chi run whose BAND or DRIVE silently disagrees with config.py's defaults.
+
+    WHY THIS EXISTS, and it is not hypothetical. The 2026-08-19 retrain spent ~5 days and 10.24M rows
+    training at ``chi_freq_bounds=(0.1, 10.0)``, ``chi_f0=0.1`` -- the band C-5 RETIRED on 2026-08-06,
+    and verbatim the configuration of ``posterior_chi_08042026``, which section 4.1 records as
+    "well-calibrated but uninformative ... 8 of its 10 probes measured noise". The values came from
+    QSettings: ``inference_tabs`` seeds the chi widgets from ``config.CHI_*`` and then ``_restore``
+    overwrites them from ``PRISM.ini``, so a value saved before the band changed was reapplied on
+    every launch afterwards with nothing to say so. Trap Q, with a science payload.
+
+    ``_assert_mode_matches`` already catches the same disagreement -- but only when a posterior is
+    LOADED, i.e. after the days are spent. This fires before the first simulation.
+
+    SCOPE IS DELIBERATELY NARROW. Only the band and the drive amplitude are checked, because only
+    they shape the TRAINING distribution and are baked into the encoder's weights.
+    ``chi_n_freqs`` is deliberately NOT an error: it is the count an OBSERVATION supplies, training
+    draws K per batch so one posterior serves any count (see build_posterior's training_params, which
+    omits it on purpose), and failing on it would refuse a perfectly good 7-recording experiment. It
+    is reported alongside a real mismatch as context, never as the cause.
+
+    :raises ValueError: on a band/drive mismatch, unless ``PRISM_CHI_OVERRIDE=1``. Deliberate band
+        exploration is a real activity -- ``scripts/chi_f0_sweep.py`` exists for it -- so the escape
+        hatch is explicit rather than absent.
+    """
+    if not cfg.chi_mode:
+        return
+    checks = (("chi_freq_bounds", tuple(float(v) for v in cfg.chi_freq_bounds),
+               tuple(float(v) for v in config.CHI_FREQ_BOUNDS)),
+              ("chi_f0", float(cfg.chi_f0), float(config.CHI_F0)))
+    diffs = [(n, got, want) for n, got, want in checks
+             if (got != want if isinstance(got, tuple) else abs(got - want) > 1e-12)]
+    if not diffs:
+        return
+    detail = "\n".join(f"    {n:<16} this run: {got!r:<16} config.py: {want!r}" for n, got, want in diffs)
+    k_note = ""
+    if int(cfg.chi_n_freqs) != int(config.CHI_N_FREQS):
+        k_note = (f"\n  (FYI, not an error: chi_n_freqs is {cfg.chi_n_freqs} against config's "
+                  f"{config.CHI_N_FREQS}. K is per-observation and training draws its own, so it is "
+                  f"legitimate -- but if you did not choose it either, it points at the same source.)")
+    if os.environ.get(CHI_OVERRIDE_ENV) == "1":
+        print(f"[chi] {CHI_OVERRIDE_ENV}=1 -- proceeding with a NON-DEFAULT chi configuration:\n"
+              f"{detail}{k_note}", flush=True)
+        return
+    raise ValueError(
+        f"This chi run's configuration does not match config.py, and the difference decides what the "
+        f"network is trained on:\n{detail}{k_note}\n\n"
+        f"  The band and drive amplitude fix the encoder's frequency normalization and are baked into "
+        f"its weights, so a run at the wrong values cannot be reinterpreted afterwards -- it has to be "
+        f"redone. This has cost a ~5-day run once already (Appendix A, 2026-08-19).\n"
+        f"  MOST LIKELY CAUSE: stale persisted GUI settings. The Config tab seeds these from config.py "
+        f"and then restores them from QSettings, so a value saved before a config change wins silently."
+        f" Check the [inference_config] chi_lo / chi_hi / chi_f0 keys in PRISM.ini.\n"
+        f"  If the difference is DELIBERATE (a band sweep, say), re-run with {CHI_OVERRIDE_ENV}=1.")
+
+
 def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
                 *, save: bool = True, save_name: str | None = None, fig_sink=None) -> tuple[Distribution, Distribution]:
     """
@@ -464,6 +524,11 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     :param fig_sink: Optional (title, fig) -> None display callback for the corner plot; None => plt.show().
     :return: A Distribution that can be sampled and scored.
     """
+    # FIRST, before the ~9-minute stability sweep: is this chi configuration the one you meant? The
+    # prior itself is chi-independent, so this is here purely to fail at the START of a session
+    # rather than after its first expensive stage.
+    _assert_chi_config_is_deliberate(cfg)
+
     # User-model guard: the bounds ND section order MUST equal the compiled param order (torch.unbind
     # binds columns positionally). A hand-edited JSON over a stale Bounds file would mis-bind silently.
     from core import registry
@@ -602,6 +667,12 @@ def build_posterior(
     :param fig_sink: Optional (title, fig) -> None display callback for the training-loss curve
                      (a GUI embeds it); None keeps the CLI behavior (loss saved to PNG, not shown).
     """
+    # Above BOTH branches, and the load branch is the subtle half. _assert_mode_matches compares the
+    # posterior against cfg -- so a STALE cfg loading the posterior trained under that same stale cfg
+    # agrees with itself and says nothing, while every inference it serves is at a retired band. This
+    # check is against config.py, which is the only party to the comparison that cannot go stale.
+    _assert_chi_config_is_deliberate(cfg)
+
     # The TRAINING bijection. Its log box must be the one gen_prior fitted the latent GMM in, hence
     # the same resolver the guard below and the sidecar use (_log_params_for).
     T = build_inferred_bijection(cfg, log_params=_log_params_for(cfg))

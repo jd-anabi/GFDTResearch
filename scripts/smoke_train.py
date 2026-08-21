@@ -17,7 +17,19 @@ WHAT TO WATCH, beyond "it finished":
   * `chi: N/M probes masked` -- the count, not the presence. Some masking is by design (a probe under
     CHI_MIN_CYCLES on a short recording). The reference figure is ~37 % of TRAINING probes
     (PRISM_HANDOFF 4.3.6: 36.8 %, reproduced at 36.7 % after the OOM work); materially above that
-    means something in the chi path regressed. Note the PPC's fraction is much higher by design and
+    means something in the chi path regressed.
+      ⚠ THE RUN-LEVEL FIGURE IS NOISY, AND BY MUCH MORE THAN IT LOOKS. Do NOT treat "704 probes" as
+      the sample size: all rows in a batch share one (t_scale, T) stratum AND one probe set, so the
+      704 are 4 correlated strata and the EFFECTIVE n is the BATCH COUNT. Measured per-batch masked
+      fractions span 13.5-57.3 % (SD 12.2 pp over 12 batches), so a 4-batch run has SD ~6.1 pp --
+      not the ~1.8 pp a binomial on 704 would suggest. Observed run figures at the corrected band:
+      31.7 / 32.7 / 34.8 / 35.4 / 36.7 / 38.2 / 44.9 %, mean ~36 %.
+      So: compare the MEAN of a few runs against ~37 %, and treat a single run within roughly
+      +/-12 pp as uninformative. SEED does not make runs comparable either -- it sets torch's RNG but
+      not numpy's, and initial conditions come from np.random.randint (trap X8).
+      (2026-08-20: a 31.7 % reading was chased through a physics A/B before this was understood --
+      Omega_0, which is what drives masking, was identical between solver paths at KS D = 0.0020
+      against a 0.0347 critical value, n = 3072 per arm.) Note the PPC's fraction is much higher by design and
     is a readout of the POSTERIOR, not of the probe machinery -- see 4.3.6 before reading it as a bug.
       HISTORICAL, and no longer true: this bullet used to say the duration ceiling "is keyed on the
       batch's fastest f_peak, so a batch spanning a wide range of f_peak gives its slowest rows

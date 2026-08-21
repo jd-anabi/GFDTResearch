@@ -34,6 +34,22 @@ FORCING_PARAM_NAMES = {
 }
 
 
+def zero_force(batch: int, n_channels: int, n_steps: int, dtype, device) -> torch.Tensor:
+    """A driveless force tensor that costs ``batch x n_channels`` elements instead of ``x n_steps``.
+
+    Every consumer only ever READS ``force[:, ch, t]``, so a stride-0 expansion along time is
+    indistinguishable from a materialised block of zeros -- verified bit-identical end-to-end through
+    ``gen_obs`` (identical checksum, peak 2.29 -> 1.82 GiB). At the production geometry the
+    materialised version is ~2.3 GiB per spontaneous run, allocated and zeroed once per training
+    batch and once per Fisher evaluation, to hold nothing but zeros.
+
+    ⚠ The result is a VIEW with a zero stride: it must never be written into. Every hand-built force
+    that IS written (FDT's ``campaigns``/``sanity`` cosine drives) builds its own real tensor and does
+    not come through here. Slicing (``[s:e]``, ``[:, :, a:b]``) is fine and stays expanded.
+    """
+    return torch.zeros((batch, n_channels, 1), dtype=dtype, device=device).expand(batch, n_channels, n_steps)
+
+
 def n_force_channels(model: str, forcing_idx: dict | None = None, n_vars: int | None = None) -> int:
     """
     Number of force channels the model's simulator expects -- the single source of truth for the

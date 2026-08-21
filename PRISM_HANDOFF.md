@@ -69,11 +69,11 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 |---|---|---|
 | `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
 | `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
-| `tests/test_user_sbi.py` | 57 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write** |
+| `tests/test_user_sbi.py` | 60 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
-| `tests/test_artifact_consistency.py` | 13 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — and **the end-of-run artifact writes being atomic** (posterior, prior, loss curve) |
+| `tests/test_artifact_consistency.py` | 14 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **216** | |
+| **Total** | **220** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -348,7 +348,10 @@ old chi exclusion. It builds its Jacobian over the *Fisher* channel set (4 per p
 ### 4.1 START HERE
 
 **Everything before 2026-08-05 is archived under `archive/2026-08-05-pre-consolidation/`, and no
-posterior currently exists.** The Nadrowski inputs were consolidated to ONE bounds pair
+USABLE posterior currently exists** — `Resources/Posteriors/` holds only
+`08192026_posterior_RETIRED_band_0p1_to_10.pt`, which trained on the retired χ band and must not be
+used for anything (§4.1 step 5, and the top Appendix A entry). The Nadrowski inputs were
+consolidated to ONE bounds pair
 (`Bounds/nadrowski/master.txt` + `master_spont.txt`) and THREE cells (`Cells/nadrowski/master_spont`
 / `master_weak` / `master_entrained`), chosen by measurement — see `scripts/build_master_cells.py`
 and the 2026-08-05 Appendix A entry.
@@ -496,11 +499,42 @@ what is left open (C-2, C-3, C-7) does not. What remains:
    `append_simulations` fix exercised end to end. Re-run it after any further chi-path change; watch
    the masked fraction, any `OOM ...` lines, and the `[mem]` peak-allocated figure.
 
-5. **The retrain** ⬅ **NEXT** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON** (§4.4).
+5. **The retrain** ⬅ **STILL NEXT** on `master_spont` with `master.txt` bounds, χ ON, **rotation ON**
+   (§4.4).
+
+   > ### ⚠ ATTEMPTED 2026-08-19 AND MUST BE REDONE — it trained on the RETIRED band
+   >
+   > 10.24M rows, ~5 days, completed cleanly and calibrated well — at
+   > `chi_freq_bounds = (0.1, 10.0)`, `chi_f0 = 0.1`, `K = 10`, i.e. verbatim
+   > `posterior_chi_08042026`'s configuration. Stale QSettings (trap **Q4**); full account in the top
+   > Appendix A entry. The artifact is renamed `08192026_posterior_RETIRED_band_0p1_to_10.pt` and its
+   > ~5 GB checkpoint is unusable (its identity digest includes the band, so a corrected run routes
+   > elsewhere rather than splicing — safe, just wasted).
+   >
+   > **`_assert_chi_config_is_deliberate` now refuses this before the first simulation**, so the
+   > specific failure cannot recur silently. Confirm before starting: the banner must read
+   > `chi: K=6 F0=0.15 range=(0.03, 0.3)`.
+   >
+   > **Post-fix smoke train, 2026-08-20:** all four stages, 7183.6 s (prior 526, posterior 5772,
+   > validate 204, infer 682), training masked **35.4 %** (249/704), zero OOM retries — squarely
+   > inside the 34.8–38.2 % spread of every prior corrected-band run. The chi path is healthy and the
+   > config fix broke nothing. **Cleared to retrain.**
+   >
+   > **The three hypotheses below are therefore STILL UNTESTED.** Do not read the 2026-08-19 result
+   > as evidence about any of them — the band it used destroys exactly the phase channels §4.4.1 says
+   > carry `lam`. The one thing it did confirm is the `k`~`x_scale` alias, which came back off by an
+   > identical +11.3 % on both.
+
    C-6 is resolved, step 3 says go, and C-9/C-10 are closed. Budget
    ≈ (1 + E[K]) / 2 × a spontaneous run for the training data, plus (K+1)/2 × a forced-mode Fisher
    for the rotation. At `CHI_K_PAD = 12`, `E[K] = 7`. From the smoke train's timings, expect the prior
    build alone to be ~9 min and the Fisher rotation to dominate the pre-training cost.
+
+   > **⚠ BOTH SENTENCES ABOVE ARE NOW MISLEADING — corrected 2026-08-20.** (a) The solver is **~8×
+   > faster** since CUDA graphs landed (§8, 5520 → 698 ms per 100 k-step call), so every wall-clock
+   > figure written before that date is an over-estimate. (b) "The Fisher dominates the pre-training
+   > cost" is true of a 4-batch SMOKE train and false of a 5000-batch retrain, where training
+   > generation is **~97 %** and the Fisher ~1–2 %. Budget against the production denominator.
    **Expect `k`~`x_scale` to stay aliased** — §4.4.1 is the third measurement saying so. The
    hypotheses worth testing on the result are `f_scale` (unmeasured → measurable, 213× on `‖g‖`),
    `t_scale` and `lam`.
@@ -1023,6 +1057,17 @@ differs by stage and the differences are the informative part:
 | stage | masked | reading |
 |---|---|---|
 | posterior (training) | **36.8 %** | the fix working — and it matches `chi_mask_audit`'s 35.8 %, which validates the cheap audit as a proxy for the full chain |
+
+> ⚠ **HOW PRECISE IS THIS NUMBER? Much less than it looks — corrected 2026-08-20.** A smoke train's
+> training masked fraction has a run-level SD of **~6.1 pp**, not the ~1.8 pp a binomial on 704
+> probes suggests: every row in a batch shares one `(t_scale, T)` stratum *and* one probe set, so
+> 704 probes are **4 correlated strata** and the effective n is the batch count. Measured per-batch
+> fractions span **13.5–57.3 %** (SD 12.2 pp over 12 batches). Seven corrected-band runs read
+> 31.7 / 32.7 / 34.8 / 35.4 / 36.7 / 38.2 / 44.9 %, mean ~36 %. **So compare the MEAN of two or three
+> runs against ~37 %; a single run within roughly ±12 pp is uninformative**, and `SEED` does not make
+> runs comparable (torch is seeded, `np.random` is not — trap X8). If masking really does look
+> moved, the decisive follow-up is a physics A/B on Ω₀ — the quantity masking depends on — which is
+> measurable at n = 3000+ in about a minute, rather than another two-hour smoke train.
 | validate (SBC calibration) | 47.2 % | same code path as training; 180 probes, so mostly small-sample spread |
 | infer (PPC) | **79.9 %** | **unchanged, and correctly so** |
 
@@ -1287,6 +1332,19 @@ block (~46 s) — those are silent, so the button reads "Cancelling…".
   file; a saved value from a *different* cell is a stale, wrong bound. Only the free knobs persist.
 - **Q3. Pickers: persist `combo.currentData()`** (the model-namespaced relpath) and restore via
   `findData` with a **−1 guard** (file gone → leave at default, never `setCurrentIndex(-1)`).
+- **Q4. A PERSISTED SCIENCE CONSTANT OUTLIVES THE CONFIG CHANGE THAT RETIRED IT — this cost a 5-day
+  retrain.** `inference_tabs` seeds the χ widgets from `config.CHI_*` (lines ~297-299) and `_restore`
+  then overwrites them from QSettings (~465-469). That is correct for a *preference*; it is a trap
+  for a **measurement definition**. When C-5 moved `CHI_FREQ_BOUNDS` from `(0.1, 10.0)` to
+  `(0.03, 0.3)` on 2026-08-06, every machine with a saved value silently kept training at the retired
+  band, and nothing anywhere compared the two. The 2026-08-19 retrain is the bill (Appendix A).
+  **The general rule: if a persisted value defines what is measured rather than how it is displayed,
+  something must compare it against the module default before the spend.**
+  `orchestrator._assert_chi_config_is_deliberate` now does exactly that for the band and F₀, on both
+  `build_prior` and `build_posterior`, with `PRISM_CHI_OVERRIDE=1` as the deliberate escape hatch.
+  ⚠ It gates the band and drive only — **`chi_n_freqs` is NOT gated**, because K is the count an
+  *observation* supplies and training draws its own per batch; failing on it would refuse a
+  legitimate 7-recording experiment and break the K-agnosticism the set encoder exists to provide.
 
 ### F — Interactive figures (`widgets/figure_window.py`)
 
@@ -1550,6 +1608,16 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   ~435 GiB over a run. It presents as *"checkpointing got slow"*, never as a wrong answer, so no
   correctness test catches it — `test_checkpoint_shards_do_not_serialize_the_whole_accumulator`
   exists solely to pin the file SIZE.
+- **X11. On CUDA, a TorchScript step is NOT bitwise reproducible until it has warmed up.** The
+  profiling executor runs a scripted function's first invocations unoptimised, then specialises and
+  fuses; the fused kernel differs by ~1 ULP. **Measured: three consecutive eager runs of a fully
+  deterministic model gave run1 ≠ run2 (differing from row 1, max|diff| 7.5e-09) and run2 == run3.**
+  So any GPU claim of the form *"this seeded run reproduces bit-for-bit"* must warm up first or it is
+  measuring the JIT, not the code. Harmless to the science (1 ULP against noise 8 orders larger) and
+  invisible to the CPU suite — `euler_compiled` is CUDA-only and every CPU test runs the plain eager
+  `euler` — but it cost a full investigation once, because it presents as *"my change broke bitwise
+  equality"*. **Ask whether the BASELINE reproduces against itself before assuming you broke it.**
+  Full account in §8.3 and the 2026-08-20 (later) Appendix entry.
 - **X10. The Fisher rotation `V` is NOT reproducible across processes.** `build_latent_fisher_rotation`
   seeds its *noise* under `fork_rng`, but its **operating points** come from
   `latent_prior.sample(...)` on the caller's global RNG (`decorrelate.py`, the `z_med` and `z_samp`
@@ -1799,9 +1867,47 @@ filter to the specific noisy third-party categories.
 
 ## 8. Performance opportunities
 
-> **Status: §8 is CLOSED.** Everything actionable is done (see the top Appendix A entry).
-> **Three of its recommendations were REJECTED after investigation**, each with the reason recorded
-> at the code site so it is not re-attempted:
+> ### ▶ REOPENED 2026-08-20, and the reason it was ever closed is the lesson
+>
+> §8 was marked **CLOSED — "everything actionable is done"**, and it was wrong by ~8×. Every item it
+> catalogued was a real but *small* one (a memset here, a duplicate FFT there), and the total of all
+> of them is under 1 % of a production run. **The thing nobody had measured is that ~88 % of solver
+> wall-clock was CPU kernel-LAUNCH overhead** — the GPU was ~6 % utilised and the CPU could not feed
+> it. `scripts/profile_sde.py`, batch 2048, 100 000 steps:
+>
+> | | before | after | |
+> |---|---|---|---|
+> | end-to-end simulator call | **5520.5 ms** (±75.1) | **698.5 ms** (±1.0) | **7.90×** |
+>
+> Fixed by replaying the Euler step loop from a captured **CUDA Graph**
+> (`config.SOLVER_CUDA_GRAPHS`, `Solvers/sdeint.py`). Note the variance too: ±75 ms → ±1 ms, because
+> the jitter *was* the CPU.
+>
+> **Why it was missed for so long, in one sentence:** `euler_compiled`'s own docstring claimed
+> "torch.compile + CUDA Graphs" and required a step "wrapped with
+> `@torch.compile(mode='reduce-overhead')`" — so anyone reading the solver concluded the fast path
+> already existed. **`torch.compile(` appeared exactly once in the entire repo: inside that
+> docstring.** Every `compiled_step` is `@torch.jit.script`, which removes Python overhead and not
+> launch overhead. *A docstring describing a design that was never built is worse than no docstring:
+> it is a closed door with a sign on it saying the room is already furnished.*
+>
+> **Rank optimisations against the PRODUCTION denominator, not a smoke train's.** §4.1 step 5 says
+> the Fisher rotation dominates the pre-training cost; that is true of a *smoke* train (4 batches)
+> and false of the *record* run, and the difference has misdirected effort:
+>
+> | stage | share of a production retrain |
+> |---|---|
+> | **training generation** | **~97 %** (5000 batches × (1+K) sims) |
+> | validate | ~3 % |
+> | Fisher rotation | ~1–2 % |
+> | `gen_stats`, all 41 features | ~0.3 % (~7.5 min over the whole run) |
+>
+> So the Fisher's 216-call structure and the duplicate FFTs in `statistics.py` — the two most
+> obvious-looking targets — are together worth **~20 minutes out of ~38 hours**. See §8.3 for what
+> is left and what it is gated on.
+
+> **The REJECTED list stands unchanged.** Four recommendations were investigated and refused, each
+> with the reason recorded at the code site so they are not re-attempted:
 >
 > | Rejected | Why |
 > |---|---|
@@ -1853,6 +1959,75 @@ while the spontaneous run allocates its own. At `run_size=2048`, `n_fine≈300k`
 | `SBI/statistics.py` `_build_spectral` | Clones the whole PSD purely to zero one bin; `psd_nodc` is read in exactly two places, both of which could mask the DC bin at use. |
 | `SBI/decorrelate.py` `feats` | Runs the entire statistics stack in **float64**, which makes every FFT **complex128**, across ~216 calls — for a Fisher that is immediately `.numpy()`'d and whose eigenvectors are cast back to float32. |
 | `SBI/overlay.py` `_analytic_phase` | ~2.4 GB peak at 1000 draws × 60000 samples (float64 + two complex128 `(B,n)` tensors). Sits inside the `try/except`, so an OOM degrades to a one-line warning and you lose the figures without learning why. |
+
+---
+
+### 8.3 What the CUDA-graph work landed, and what is left (2026-08-20)
+
+**Landed.** `Solvers/sdeint.py` captures `SOLVER_GRAPH_CHUNK = 50` Euler steps into a
+`torch.cuda.CUDAGraph` and replays it, with the last `n % chunk` steps run eagerly as a tail.
+Config: `SOLVER_CUDA_GRAPHS` (live-read, so it can be flipped in-process), `SOLVER_GRAPH_CHUNK`,
+`SOLVER_GRAPH_CACHE_MAX`. Also landed, both bit-identical: `Simulator.simulate`'s `sol` is
+`torch.empty` not `torch.zeros` (the *larger* of the two buffers, ~6.95 GiB — §8.1 listed the
+`sdeint` one and missed this), and `forcing.zero_force` returns a stride-0 expansion instead of a
+materialised block of zeros (2.29 → 1.82 GiB, verified identical checksum through `gen_obs`).
+
+**Four things about the graph path that are load-bearing:**
+
+- **The parameters are STATIC buffers copied in per call, not captured by reference.** That is what
+  lets one capture serve every training batch. Capturing `compiled_params()` directly would bake one
+  model's tensor addresses and silently replay stale physics for the next batch — wrong numbers, no
+  error.
+- **The cache is module-level, deliberately.** Not on `Solver` (trap **X1**: `sdeint.Solver` must
+  stay patchable at call time) and not a module-level `Solver` singleton (same trap). A per-Solver
+  cache would also be useless — `Solver` is constructed once per *time segment*, so it would
+  recapture constantly. Pinned by `test_the_graph_cache_is_not_hung_off_the_solver_class`.
+- **The bar must be advanced by the chunk.** `_step_bar` exists for this; the GUI finds the solver
+  bar by `config.SOLVER_BAR_DESC` and renders its it/s as the Solver Performance meter, so a graphed
+  run that ticked once per replay would read 1/50th of the truth (trap S).
+- **Capture failure falls back to the eager loop** and disables further attempts for the process,
+  with one printed line. A solver that refuses to run is worse than a slow one.
+
+> ### ⚠ NEW TRAP — TorchScript's profiling executor is not bitwise reproducible on its first runs
+>
+> Chasing a 0.83-ULP discrepancy between the graphed and eager paths turned up something that has
+> nothing to do with CUDA graphs: **three consecutive EAGER runs of a fully deterministic model gave
+> run1 ≠ run2 (differing from row 1, max|diff| 7.5e-09) and run2 == run3.** TorchScript runs the
+> first invocations of a scripted function unoptimised, then specialises and fuses, and the fused
+> kernel differs by ~1 ULP (fused multiply-add against separate ops).
+>
+> So **"graphed == eager bitwise" is not a well-posed assertion until both are warm** — the eager
+> baseline is not bitwise reproducible against *itself*. After a 3-run warm-up, all four comparisons
+> (eager/eager, graph/graph, graph/eager, replayed-region) are exactly 0.0.
+>
+> This is **CUDA-only and TorchScript-only**, so it does not touch the CPU suite's
+> seeded-reproducibility gates (X8) or C-11's bit-identical resume: `euler_compiled` is selected only
+> on CUDA, and every CPU test runs the plain eager `euler`. But any future claim of the form "this
+> GPU run reproduces bit-for-bit" has to warm up first, or it is measuring the JIT.
+
+**Still open, in value order, each with its blocker:**
+
+| item | worth | gated on |
+|---|---|---|
+| **Probe concatenation** — `gen_chi_raw` walks the time loop `1+K` ≈ 8 times per chi batch, once per probe. Width is FREE in time (measured flat 512 → 16384 rows), so running them as one wider call is up to **8× on the dominant cost**, and largely multiplicative with the graph win since the card is still unsaturated. | up to 8× | **The force tensor.** `build_nondim_sin_force_tensor` returns 2.16 GiB with an **8.64 GiB transient** (4×) — `forcing.py` materialises a full `(batch, T)` `t_dim` plus three more `(batch, T)` temporaries. Fix that first (fold `t_scale`/`t_offset` into the phase) or concatenation buys only ~1.25×. ⚠ **`_max_sim_batch` budgets only `n_ch * n_fine` for the drive, under-counting the real peak 4× — a plausible contributor to trap X7's unwrapped OOMs.** |
+| **Strided + single-variable solver output** — the solver materialises the full fine trajectory of all variables, then the caller keeps every `subsample_factor`-th sample of variable 0 (mean ratio 9.7, p90 24.3) | ~23 % time, ~6× peak | Keep indices are **global** and segment boundaries are not stride-aligned; the seam duplication (`simulator.py`) must be reproduced; the return has to become `(kept, x_final)` because the segment carry-over needs all variables at the true last step; and the PPC path uses a **per-row** subsample, so `keep` must accept an explicit index tensor. |
+| **PPC binning by a step budget** instead of `PPC_BIN_SIZE = 50` | 0.02–0.8 h | Bins are `t_scale`-**sorted** and each bin's `n_fine` is keyed on its *smallest* `t_scale`, so a 5× wider bin is not 5× cheaper (3.6–3.9×) and the worst bin's memory grows 5×. Bin on `rows × per_row_elements`. |
+| **Fisher arm stacking** (2×13 sequential `feats` calls per operating point) | **~15–30 min of ~38 h — DROP** | Needs CRN-preserving *tiled* noise, arms grouped by `(n_fine, subs, n_segs)` (the `t_scale` arms differ), and split granularity pinned to multiples of `m` or a mid-arm split silently destroys CRN (trap X3 in a new costume). High risk, negligible payoff. Take only the free part §8.1 lists: hoist `feats`'s per-call re-derivation of `subs`/`n_fine`/`t_fine`/`n_segs`/`base_inits`. |
+| **`gen_stats` dedup** — `_acf` and `_analytic_bandpass` each computed twice with identical arguments; `chi.peak_freq` re-does the rfft peak `_build_spectral` already has | **~6 min of ~38 h** | Nothing. Genuine duplicates. Drive-by only if already in `statistics.py`; never a session. |
+
+**A measurement, not a change: `dt_nd_min` is a sampling constraint wearing an integration
+constraint's clothes.** `config.dt_nd_min = dt_exp / t_scale_MAX` is derived from a *prior bound*, so
+raising `t_scale`'s upper bound from 40 to 80 would silently double every simulation's cost and
+accuracy with no change to any physics, and a batch whose own `t_scale` is 1 integrates ~40× finer
+than it samples. Nothing has ever established what `dt` the ND dynamics actually need — and the
+current step is already 250× larger than the fastest admissible `tau`, so a study could equally
+conclude the run is *under*-resolved. **The obvious fix is wrong:** a per-batch `dt_nd_k` would make
+integration error a deterministic function of `t_scale`, which is an *inferred parameter* — the
+network could learn to read `t_scale` off a numerical artifact present in training and absent in real
+data, which is the same train/eval mismatch class as the 2026-08-19 retired-band failure. The
+defensible form is to establish `dt_nd_required` by a dt-halving convergence study on **each of the
+41 features individually, in `fnoise` units**, make it a constant *independent of `t_scale`*, and set
+`subs_k` from it. Science decision; do not bundle it with a performance session.
 
 ---
 
@@ -2098,6 +2273,259 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 ---
 
 # Appendix A — Change history
+
+## 2026-08-20 (later) — the solver was 8× slower than it needed to be, and the docstring said otherwise
+
+Asked to speed up training generation, validation and inference before the retrain. The answer was
+none of the things on the list: **~88 % of solver wall-clock was CPU kernel-LAUNCH overhead.** The
+GPU was doing ~5 µs of work per Euler step and sitting idle for the other ~50 waiting for the CPU to
+submit the next three kernels.
+
+`scripts/profile_sde.py --batch 2048 --steps 100000`, the same command before and after:
+
+| | before | after |
+|---|---|---|
+| simulator call | **5520.5 ms** (±75.1) | **698.5 ms** (±1.0) |
+
+**7.90× end-to-end on the real path**, not a microbenchmark — and the ±75 ms → ±1 ms collapse is its
+own evidence, because the jitter *was* the CPU.
+
+### Why nobody found it
+
+`euler_compiled`'s docstring said the fast path already existed: *"torch.compile + CUDA Graphs"*,
+with a stated requirement that the model expose a step *"wrapped with
+`@torch.compile(mode='reduce-overhead')`"*. **`torch.compile(` appeared exactly once in the whole
+repo — inside that docstring.** Every `compiled_step` is `@torch.jit.script`, which removes *Python*
+overhead and not *launch* overhead. §8 was meanwhile marked CLOSED, so the door was shut and labelled
+already-furnished. Both are now corrected.
+
+### Two measurements that reordered the whole plan
+
+- **Batch width is free in TIME and linear in MEMORY.** 512 / 2048 / 8192 / 16384 rows at 20 k steps:
+  1159 / 1164 / 1106 / 1191 ms — flat 8× beyond the ~2048 the code's comments assume. Every "batch it
+  wider" idea is therefore bounded by memory alone, which is why the remaining §8.3 items are all
+  gated on a *tensor*, never on the solver.
+- **The Fisher does NOT dominate a production run.** §4.1 step 5 says it does; that is true of a
+  4-batch smoke train and false of a 5000-batch retrain, where training generation is ~97 % and the
+  Fisher ~1–2 %. Ranking optimisations off smoke timings is what makes the Fisher's 216-call
+  structure look like the prize when it is worth ~15 minutes out of ~38 hours. **Rank against the
+  production denominator.**
+
+### What was verified before trusting it
+
+| check | result |
+|---|---|
+| graphed vs eager, deterministic model (all noise zeroed), time-VARYING drive, 2 full chunks + a 2-step tail | **bitwise equal**, max diff 0.0 |
+| RNG advances across replays | yes — not frozen (consecutive replays differ) |
+| `get_rng_state_all` / `set_rng_state_all` round-trip through replay | **reproduces exactly** → C-11's resume is safe |
+| graph cache placement | module-level, not on `Solver`, not a `Solver` singleton (trap **X1**) |
+
+The deterministic-model trick is what made the first row possible: with noise live the two paths draw
+in a different order and can only be compared statistically, which would never catch an off-by-one in
+the force index or the output slice. Zeroing every noise channel and using a *time-varying* drive
+makes any indexing error a hard failure.
+
+### The 0.83-ULP detour, which found something unrelated and worth keeping
+
+The first equivalence run failed at **max|diff| 5.8e-11** — sub-ULP, and only in the eager tail after
+100 bitwise-identical replayed rows. Chasing it: `ent["x"] == a[100]` exactly, `a[100] == b[100]`
+exactly, identical params and force — identical inputs, one eager step, different answers. The cause
+is not the graph at all. **Three consecutive EAGER runs of the same deterministic model gave
+run1 ≠ run2 (from row 1, max|diff| 7.5e-09) and run2 == run3**: TorchScript's profiling executor runs
+the first invocations unoptimised, then specialises and fuses, and the fused kernel differs by ~1 ULP.
+
+So *"graphed == eager bitwise"* is not well posed until both are warm — the eager baseline is not
+bitwise reproducible against itself. After a 3-run warm-up every comparison is exactly 0.0. Recorded
+as a trap in §8.3, because it is CUDA-only and TorchScript-only and therefore invisible to the CPU
+suite, but it bounds any future *"this GPU run reproduces bit-for-bit"* claim.
+
+> **Worth generalising:** the failing assertion was mine, not the code's. When a sub-ULP discrepancy
+> appears, the question "is my baseline reproducible with itself?" comes before "what did I break?"
+
+### End to end: the smoke train, and the masked fraction that had to be chased
+
+Same invocation as the 2026-08-20 baseline (chi, `TOBS_S=4.5`, master bounds + `master_spont`):
+
+| stage | 2026-08-20 | with graphs | |
+|---|---|---|---|
+| prior | 526 s | 455 s | 1.16× — mostly the HDBSCAN/GMM fit, not the solver |
+| **posterior** | **5772 s** | **531 s** | **10.9×** |
+| validate | 204 s | 25 s | 8.2× |
+| infer | 682 s | 63 s | 10.8× |
+| **total** | **7183.6 s** | **1073.3 s** | **6.7×** |
+
+Zero OOM retries. Note the prior stage is now the *single largest* item — the profile of the run has
+inverted, and any further optimisation should be re-ranked against that rather than against this
+document's older numbers.
+
+**Training masking came in at 31.7 %, below the 34.8–38.2 % band** the standing rule says to check.
+Treated as a signal rather than waved through, because "the masked fraction moved" is exactly how a
+solver change that altered the trajectories would present. Chasing it produced a real correction to
+the check itself.
+
+- **A direct physics A/B, graphs ON vs OFF, 3072 rows per arm, both RNGs seeded.** Ω₀ — the quantity
+  that *drives* masking — is indistinguishable: two-sample **z = −0.01**, **KS D = 0.0020 against a
+  5 % critical value of 0.0347**. Trace mean and std agree to 0.05 % and 0.025 % of one SD. At that
+  sample size the test would catch a 0.06-SE shift. **The solver did not move the physics.**
+- **Two more smoke trains**, now that one costs 18 min instead of two hours: **44.9 %** and
+  **32.7 %**. Three graph-path runs mean **36.4 %**, against the four pre-graph runs' **36.3 %**.
+
+### ⚠ The masked-fraction check has ~10× less power than this document implied
+
+The band was being read as a tolerance on 704 probes, i.e. a ~1.8 pp binomial standard error. That is
+the wrong error model. **All rows in a batch share one `(t_scale, T)` stratum AND one probe set**
+(both drawn above the seam, by design — see `_rows_with_oom_retry`), so the 704 probes are **4
+correlated strata** and the effective sample size is the BATCH count. Measured per-batch masked
+fractions across the three runs:
+
+```
+seed=0:  44.2%  13.5%  18.8%  39.1%
+seed=1:  44.6%  39.6%  35.4%  57.3%
+seed=2:  36.2%  27.1%  43.8%  20.3%
+   per-batch SD = 12.2 pp over 12 batches  ->  a 4-batch run has SD ~6.1 pp
+```
+
+At SD 6.1 pp, 31.7 % is **−0.75 SD** and 44.9 % is **+1.4 SD** — both unremarkable, and the old
+band's 3.4 pp tightness across four draws was luck, not precision. **Read the MEAN of a few runs
+against ~37 %; treat a single run within roughly ±12 pp as uninformative.** `smoke_train.py`'s own
+WHAT-TO-WATCH list now says so, with the numbers.
+
+Compounding it: `smoke_train.py` sets `torch.manual_seed` but not `np.random.seed`, and initial
+conditions come from `np.random.randint` (trap **X8**) — so two runs at the same `SEED` were never
+comparable anyway.
+
+> **The generalisable bit, and it is the same question twice at different scales.** The 0.83-ULP
+> detour above was resolved by asking *"is my baseline reproducible against itself?"*. This one is
+> resolved by asking it of a statistic instead of a number: *"what is this check's actual error
+> bar?"* A threshold assembled from a handful of unseeded runs is a **distribution**, not a
+> tolerance, and quoting a binomial SE over correlated units understates it by the square root of
+> the cluster size.
+
+### Also landed, both bit-identical
+
+- `Simulator.simulate`'s `sol` is `torch.empty`, not `torch.zeros` — the *larger* of the two solver
+  buffers (~6.95 GiB at production geometry against `sdeint`'s ~2.3 GiB). §8.1 listed the small one
+  and missed this one entirely.
+- `forcing.zero_force` returns a stride-0 expansion instead of a materialised block of zeros
+  (2.29 → 1.82 GiB, identical checksum through `gen_obs`). Four call sites in `pipeline` and
+  `decorrelate`. The helper carries the warning that the result must never be written into — every
+  hand-built force that IS written (FDT's cosine drives) builds its own real tensor.
+
+### Deliberately NOT done, with the reasons in §8.3
+
+Probe concatenation (gated on `build_nondim_sin_force_tensor`'s **8.64 GiB transient for a 2.16 GiB
+result** — and `_max_sim_batch` under-counts that 4×, a plausible contributor to trap X7); strided
+single-variable output; PPC budget binning; Fisher arm stacking (**dropped** — ~15 min for a CRN
+hazard); `gen_stats` dedup (~6 min). And `dt_nd_min`, which is a *sampling* constraint derived from a
+prior bound masquerading as an integration constraint — a science measurement, and one whose obvious
+fix (per-batch `dt`) would make integration error a function of an inferred parameter.
+
+## 2026-08-20 — the retrain finished, and it trained on the RETIRED band
+
+The first full chi retrain completed on 2026-08-19: 10.24M rows (2048 × 5000), rotation ON,
+~5 days. It has to be redone. **It trained at `chi_freq_bounds = (0.1, 10.0)`, `chi_f0 = 0.1`,
+`K = 10`** — the band C-5 retired on 2026-08-06, and verbatim `posterior_chi_08042026`'s
+configuration, the one §4.1 records as *"well-calibrated but uninformative… 8 of its 10 probes
+measured noise"*.
+
+Read from the artifact, not inferred: the `.rot.pt` sidecar and the checkpoint header both carry
+`(0.1, 10.0)` / `0.1` / `10` against `config.py`'s `(0.03, 0.3)` / `0.15` / `6`.
+
+**Cause — trap Q4, newly written down.** `PRISM.ini` held `chi_lo=0.1 chi_hi=10.0 chi_f0=0.1
+chi_k=10` from a session predating C-5. `inference_tabs` seeds those widgets from `config.CHI_*` and
+`_restore` then overwrites them from QSettings, so the retired band was silently reapplied on every
+launch for two weeks. The `_assert_mode_matches` band guard **did** exist — and is useless here,
+because it compares the posterior against `cfg`, and a stale `cfg` loading the posterior trained
+under that same stale `cfg` agrees with itself.
+
+### It was visible in a plot the whole time
+
+`ppc.png` reports `Invalid stats: 24/114`. Under chi, invalid = 11 zeroed Group-G columns + `log T` +
+`(CHI_K_PAD − K) × 6` dead pad channels. At `K_PAD = 12` that is 24 **only at K = 10**; at the
+intended K = 6 it would have been 48. The run's own diagnostic encoded its probe count in a number
+nobody had a reason to decode. Worth remembering as a general habit: **the invalid-column count is a
+free readout of K.**
+
+### Why the failure pattern is the band, and not the "structural degeneracy" it looked like
+
+Probes were log-spaced over (0.1, 10): 0.100, 0.167, 0.278, 0.464, 0.774, 1.29, 2.15, 3.59, 5.99,
+10.0. §4.3.2 put the entrainment knee at **0.35–0.4×**, above which *"a captured bundle reports the
+drive back to itself"*. **Three probes in band; seven reporting the drive.** Against §4.4.1's payload
+table:
+
+| parameter | §4.4.1 says it rides | fate above the knee | observed |
+|---|---|---|---|
+| `lam` | chi **phase** (`chi2_sin` is its top feature) | phase dies first under capture | **worst of 13**; marginal ramps to the box edge |
+| `f_scale` | chi **magnitude** | magnitude survives | sharp, near truth |
+| `t_scale` | chi magnitude + `A3_log_fpeak` | survives | sharp, near truth |
+| `k`, `x_scale` | `A1_mean`, `A2_log_var` — **spontaneous** | untouched by the band | both off by an *identical* **+11.3%** |
+
+Four for four. The identical +11.3% on `k`/`x_scale` is the §4.4.1 alias (|cos| 0.96–0.98) being
+traversed rather than broken — the one prediction §4.1 step 5 made that this run did confirm.
+
+**What is NOT the band, and no retrain will fix:** `n`, `temp` and `tau_c` appear in
+`Models/nadrowski_model.py` **only inside noise amplitudes** (`_x_noise_const`/`_y_noise_const`,
+`c_noise`) and never in the drift, while §3.1 fixes the observable at state column 0 — so `y` and `c`
+are latent and those three are seen only through how latent-variable noise propagates into `x`. That
+is provable from the model file with zero simulation, and it accounts for three of the four ramping
+marginals. `lam` is the fourth, and `lam` is the one the band destroyed.
+
+### Why the smoke train could never have caught this — and it is not about the masked fraction
+
+The obvious theory is that the retired band flattered the smoke train's headline metric (entrainment
+lives at *high* frequency, where probes clear `CHI_MIN_CYCLES` easily, so masking should read low).
+**That theory is untested and probably wrong, and it is the less important answer.** Masking across
+four corrected-band smoke trains reads 36.7 / 38.2 / 34.8 / 35.4 % — *this entry originally quoted a
+±1.8 pp binomial standard error at n = 704, which is **wrong**: the run-level SD is ~6.1 pp, because
+the 704 probes are 4 correlated strata (corrected in the 2026-08-20 (later) entry)* — and §4.3.4
+already established that the driver of masking is the ROW's own Ω₀, not the band. There is no
+retired-band smoke measurement to compare against, because:
+
+> **`scripts/` and the GUI were configured from DIFFERENT SOURCES.** Every script builds its config
+> through `_common.script_cfg` → `cli.make_sim_config`, which falls back to `config.CHI_*`. Nothing
+> under `scripts/` reads `PRISM.ini` at all. The GUI reads QSettings. So **every smoke train ever run
+> — including the ones on 2026-08-12 and 2026-08-13, hours before the retrain — was green at
+> (0.03, 0.3) while the GUI was about to train at (0.1, 10.0).** No masked fraction, no OOM count, no
+> stage timing could have revealed that, because the pre-flight was not testing the configuration the
+> record run would use.
+
+That is the real lesson and it generalises past chi: **a pre-flight that reads its configuration from
+a different source than the run it is clearing is not a pre-flight.** It is why
+`_assert_chi_config_is_deliberate` lives in `orchestrator` — the one path both front-ends share — and
+why it compares against `config.py` rather than against another artifact.
+
+### Two instruments that mislead, and what to read instead
+
+- **Flat SBC is not evidence of success.** All 13 rank CDFs sat on the diagonal, TARP on the
+  diagonal, PPC mean |z| 0.396 — and the run is unusable. `posterior_chi_08042026` was likewise flat
+  on 12/13 with TARP p = 1.000 *and* every marginal at the prior. A posterior that returns the prior
+  is perfectly SBC-flat **by construction**: calibration is a property of the joint, not of any
+  conditional. Flat SBC says "not overconfident"; it never says "informative".
+- **The best-fit-draw table is not a recovery measurement.** `overlay.rank_by_stats` standardises by
+  `s.std(dim=0)` — the spread **across posterior draws**, not measurement noise — so its RMS z says
+  "this draw is inside the predictive cloud", not "this draw is indistinguishable from truth". And
+  the distance weights all live features equally, so it is nearly blind along degenerate directions
+  and the argmin is close to a free draw there. `N` came back at **+4.5 %** while its marginal ramps
+  to 300 with truth at 50: luck, not recovery. **Trust that table only where the marginal is sharp;
+  read the marginal quantile of the true value otherwise.**
+
+### Fixed
+
+`orchestrator._assert_chi_config_is_deliberate(cfg)` — called at the top of `build_prior` **and**
+`build_posterior`, before any simulation. Refuses when `chi_freq_bounds` or `chi_f0` differ from the
+`config.CHI_*` defaults, names both values, points at `PRISM.ini` as the likely source, and offers
+`PRISM_CHI_OVERRIDE=1` for a deliberate sweep. Placed above the load branch as well as the training
+one, for the self-agreeing-stale-config reason above. Keyed on the module defaults, never a literal,
+so C-5's successor moves one constant and the guard follows. **`chi_n_freqs` is deliberately not
+gated** (K is per-observation; training draws its own). Pinned by
+`test_a_chi_run_at_a_non_default_band_is_refused_before_the_simulation_spend`, verified to fail
+against the pre-change orchestrator. The retired artifact is renamed
+`08192026_posterior_RETIRED_band_0p1_to_10.pt`; `PRISM.ini` is corrected.
+
+> **The lesson, which is bigger than chi.** A constant that defines *what is measured* must not be
+> persisted like a UI preference. Every guard in this file compares an artifact against a live
+> config; none compared the live config against the code that defines it. That gap is what a
+> two-week-old settings file walked through.
 
 Newest first. Nothing here is required to work on the code; it records **why** decisions were made,
 and — importantly — **which dead ends were already tried**, so they are not retried.
