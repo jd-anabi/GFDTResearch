@@ -259,11 +259,18 @@ TRAINING_SHOW_SUMMARY = True             # print sbi's train/validation-loss sum
 QUIET_SEGMENT_BAR = False
 
 # The SDE solver's per-step bar (core/Solvers/sdeint.py) is f"{SOLVER_BAR_DESC} (batch={batch_size})".
-# It stays ON under the GUI: its it/s IS the "Solver Performance" meter, and its percentage is the only
-# thing that moves during a ~10s training iteration. The GUI does NOT render it as a progress row (a
-# posterior build constructs 10k-30k of these bars, one per time segment) -- it feeds a dedicated widget,
-# found by this desc prefix. Keyed on the DESC, never on the row: the bar's tqdm `pos` is 0, 1 or 2
-# depending on which phase and which panel is running. See core/gui/widgets/progress_pane.py.
+# The GUI finds it by this desc prefix -- keyed on the DESC, never on the row, because the bar's tqdm
+# `pos` is 0, 1 or 2 depending on which phase and which panel is running.
+#
+# WHAT THE GUI DOES WITH IT: exclude it, and only that. Its total is in the tens of thousands, so it
+# would win the overall bar's election every time and sweep it 0->100% every second (trap S3). It is
+# NOT the "Solver Performance" meter's source any more -- that number comes from core.progress.SOLVER,
+# because a solver call shorter than its own bar's mininterval never paints a rate at all, which is
+# exactly what CUDA graphs made happen (§10.5).
+#
+# The bar nevertheless stays ENABLED under the GUI, unlike QUIET_SEGMENT_BAR above: its redraws are the
+# cooperative cancel's most frequent checkpoint and feed the stall detector's heartbeat through a long
+# batch. See core/gui/widgets/progress_pane.py.
 SOLVER_BAR_DESC = "step"
 
 # === DECORRELATING REPARAMETERIZATION (Track A: flow calibration via latent rotation) ===

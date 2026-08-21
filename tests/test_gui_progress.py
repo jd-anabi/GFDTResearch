@@ -225,6 +225,8 @@ def test_end_to_end_log_pane_gains_zero_blocks():
 
     prog.end()
     assert not prog._rows, "ProgressPane.end() left rows behind"
+    assert not prog.caption.text(), "ProgressPane.end() left the caption behind"
+    assert prog.overall.maximum() == 0, "ProgressPane.end() left the overall bar determinate"
 
 
 def test_print_output_still_reaches_the_log():
@@ -382,11 +384,11 @@ def test_plus_meter_is_one_sign_per_order_of_magnitude():
     assert plus_meter(None) == "—"
 
 
-def test_solver_bar_is_not_rendered_as_a_row_and_does_not_drive_the_overall_bar():
-    """A posterior build creates 10k-30k solver bars, so it must never become a row (a widget churned
-    every few seconds). And it must not drive the overall bar: its total is in the tens of thousands and
-    it is the deepest bar, so it would win _retarget every time and drag the overall bar through a full
-    0->100% sweep every second, instead of showing the top-level count."""
+def test_the_solver_bar_never_drives_the_overall_bar_and_is_not_the_caption():
+    """The solver bar must not decide the overall bar: its total is in the tens of thousands and it is
+    the deepest bar there is, so it would win the election every time and drag the bar through a full
+    0->100% sweep every second instead of showing the top-level count (trap S3). It is also not a row
+    any more -- nothing is -- so it must not surface as the caption either."""
     _app()
     prog = ProgressPane()
     prog.begin()
@@ -395,39 +397,101 @@ def test_solver_bar_is_not_rendered_as_a_row_and_does_not_drive_the_overall_bar(
     solver = parse_bar(("err", 2), 2, "step (batch=32):  88%|####| 13269/14999 [00:01<00:00, 13267.85it/s]")
     prog.set_rows((top, solver))
 
-    assert len(prog._rows) == 1, f"the solver bar was rendered as a row: {list(prog._rows)}"
-    assert next(iter(prog._rows)) == ("err", 1)
+    assert prog._rows == (top,), f"the solver bar survived into the pane's row set: {prog._rows}"
     assert prog.overall.maximum() == 100 and prog.overall.value() == 38, \
         "the overall bar must track the top-level count, not the solver"
-    assert prog.solver_strip.isVisible() and prog.solver_strip.value() == 88
-    assert "++++" in prog.solver_label.text(), prog.solver_label.text()
-    assert "13.3k it/s" in prog.solver_label.text(), prog.solver_label.text()
+    assert prog.caption.text().startswith("Generating training data"), prog.caption.text()
+    assert "step (batch=" not in prog.caption.text(), prog.caption.text()
+    assert "step (batch=" not in prog.overall.toolTip(), prog.overall.toolTip()
+    assert "1902/5000" in prog.overall.toolTip(), "the detail tooltip lost the live nest"
     prog.end()
 
 
-def test_solver_meter_holds_its_rate_across_bars_then_goes_idle():
-    """Rate samples arrive in gaps: a bar shorter than mininterval=1.0 emits only '?it/s', and with
-    leave=False there is no final 100% frame. So the last rate is HELD -- but not forever: during
-    neural-network training the solver genuinely is not running, and a stale '++++' would be a lie."""
+def test_the_solver_meter_reads_the_step_counter_not_a_rendered_bar():
+    """THE REGRESSION THIS DESIGN EXISTS TO KILL. The meter used to be scraped from the rendered text
+    of the solver's tqdm bar, so a solver call SHORTER than that bar's own `mininterval` produced no
+    rate at all -- and CUDA graphs made every call shorter than it, so the meter read "-- (idle)" for
+    whole multi-day runs.
+
+    The property asserted here is the one the scrape could never have: a correct rate with ZERO tqdm
+    frames painted. Not one bar is created below.
+    """
+    from core import progress
     from core.gui.widgets import progress_pane as pp
 
     _app()
     prog = ProgressPane()
     prog.begin()
+    prog.set_rows(())                       # no bars at all, anywhere
 
-    prog.set_rows((parse_bar(("err", 0), 0, "step (batch=32):  88%|# | 132/149 [00:01<00:00, 13267.85it/s]"),))
-    assert "++++" in prog.solver_label.text()
+    assert "idle" in prog.solver_label.text(), "a fresh pane should not claim a rate"
 
-    # a fresh bar with no measurement yet must not wipe the held rate
-    prog.set_rows((parse_bar(("err", 0), 0, "step (batch=32):   0%|  | 0/83190 [00:00<?, ?it/s]"),))
-    assert "++++" in prog.solver_label.text(), "an opening '?it/s' frame clobbered the held rate"
+    # One second of solver, 120k steps. The clock is nudged rather than slept on: time.monotonic()
+    # has ~15ms granularity on Windows, so back-to-back ticks can measure dt == 0.
+    prog._steps_at = time.monotonic() - 1.0
+    progress.SOLVER.add(120_000)
+    prog._tick()
+    assert "120.0k it/s" in prog.solver_label.text(), prog.solver_label.text()
+    assert "+++++" in prog.solver_label.text(), prog.solver_label.text()
 
-    # ...but once the solver stops reporting for SOLVER_IDLE_S, the meter must admit it is idle
+    # A tick with no new steps must NOT wipe the rate -- the gaps between solver calls are real work.
+    prog._tick()
+    assert "120.0k it/s" in prog.solver_label.text(), \
+        f"one quiet tick clobbered the held rate: {prog.solver_label.text()}"
+
+    # ...but once the counter has been still for SOLVER_IDLE_S, the meter must admit it is idle.
     prog._rate_at -= pp.SOLVER_IDLE_S + 1
-    prog.set_rows(())
+    prog._tick()
     assert "idle" in prog.solver_label.text(), prog.solver_label.text()
-    assert not prog.solver_strip.isVisible(), "the step strip should hide when no solver is running"
     prog.end()
+
+
+def test_the_solver_bar_paints_a_rate_even_when_the_call_is_under_a_second():
+    """The CLI half of the same regression, pinned at the tqdm layer.
+
+    The GUI no longer reads this bar, but `python -m core` has nothing else: with mininterval=1.0 a
+    graphed 100k-step call (~0.7s) rendered its opening "?it/s" frame and never a rate -- measured 123
+    chars of stderr containing none. Drives the REAL settings from sdeint._bar_kwargs, and checks the
+    counterfactual so the test cannot go vacuous if someone puts mininterval back.
+    """
+    import re
+    from io import StringIO
+
+    from core.Solvers import sdeint
+
+    n, chunk, seconds = 100_000, 50, 0.4
+
+    def render(**override):
+        buf = StringIO()
+
+        class Sink:
+            def write(self, text):
+                buf.write(text)
+                return len(text)
+
+            def flush(self):
+                pass
+
+            def isatty(self):
+                return False
+
+        kw = sdeint._bar_kwargs(n, 2048)
+        kw.update(override)
+        bar = tqdm(total=n - 1, file=Sink(), **kw)
+        steps = (n - 1) // chunk
+        t0 = time.perf_counter()
+        for k in range(steps):
+            while time.perf_counter() - t0 < (k + 1) * seconds / steps:
+                pass
+            bar.update(chunk)
+        bar.close()
+        return re.findall(r"[0-9.]+(?:it/s|s/it)", buf.getvalue())
+
+    assert sdeint._bar_kwargs(n, 2048)["mininterval"] <= 0.2, \
+        "the solver bar's mininterval is back above a short call's duration"
+    assert render(), "the solver bar rendered NO rate over a 0.4s call -- the CLI meter is blind again"
+    assert not render(mininterval=1.0), \
+        "the counterfactual rendered a rate, so this test no longer proves anything"
 
 
 def test_spinner_animates_and_then_reports_a_stall():
@@ -451,6 +515,245 @@ def test_spinner_animates_and_then_reports_a_stall():
     prog.heartbeat()                      # output resumes -> back to spinning
     prog._tick()
     assert "no output for" not in prog.spinner.text()
+    prog.end()
+
+
+def test_the_solver_step_iterator_closes_its_bar_when_the_consumer_raises():
+    """`sdeint._step_iter` is a GENERATOR wrapping the tqdm bar, so it adds a frame to trap C1's unwind
+    path -- a cancel raises from inside a bar redraw, and tqdm's own `finally: self.close()` has to run
+    anyway or its global write lock leaks and the NEXT `tqdm.__new__` DEADLOCKS. (C1's own test hangs
+    rather than failing, which is why this cheap structural guard is worth having in front of it.)
+
+    Not a proof that the generator changed anything -- it is a guard on the property the generator put
+    at risk.
+    """
+    import gc
+
+    from core.Solvers import sdeint
+
+    class Quiet:
+        def write(self, text):
+            return len(text)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    real, sys.stderr = sys.stderr, Quiet()
+    try:
+        before = len(tqdm._instances)
+        try:
+            for i in sdeint._step_iter(5000, 32):
+                if i == 10:
+                    raise RuntimeError("the consumer blew up mid-integration")
+        except RuntimeError:
+            pass
+        gc.collect()
+        after = len(tqdm._instances)
+    finally:
+        sys.stderr = real
+
+    assert after == before, \
+        f"the solver bar was stranded by the generator wrapper ({before} -> {after} live tqdm instances)"
+
+
+# -- the training budget (Posterior tab) ----------------------------------------------------------
+def _budget_cfg():
+    """Stub SimConfig carrying exactly the fields the budget lines read.
+
+    A stub, not a real build: the arithmetic under test is geometry -> elements -> GiB, and a real
+    make_sim_config drags in bounds files and a 300k-point time grid for nothing.
+    """
+    from core import config
+
+    class Cfg:
+        hw = config.detect_device()
+        t = type("T", (), {"shape": (250_000,)})()
+        inits_dict = {"x": 0.0, "xa": 0.0, "f": 0.0}
+        steady_idx = 500
+        forcing_idx = {}
+        model = "NADROWSKI"
+        chi_mode = False
+        chi_k_pad = 12
+        observation_mode = "spontaneous"
+    return Cfg()
+
+
+def _budget_panel(cfg=None, prior=None):
+    from core.gui.screens.inference_screen import InferenceScreen
+    from core.gui.session import SbiSession
+
+    _app()
+    inf = InferenceScreen()
+    inf.session = SbiSession()
+    inf.session.cfg = cfg
+    inf.session.inf_prior = prior
+    inf.refresh_gates()
+    return inf, inf.tabs.widget(2)          # Config Prior Posterior Validate Infer
+
+
+def test_the_training_budget_shows_the_simulation_count_and_the_cap_trade():
+    """The count was invisible: 5000 x 2048 = 10,240,000 simulations lived only in config.py. The line
+    also has to say what the cap really trades, because batch width is NOT a speed knob -- the solver
+    is kernel-launch-bound (measured 7.37 s at 2048 against 7.74 s at 1024, the SMALLER batch being
+    slightly slower), so halving it halves the training rows for the same wall-clock."""
+    from core import config
+
+    cfg = _budget_cfg()
+    _inf, panel = _budget_panel(cfg)
+    width = cfg.hw.batch_size
+
+    assert panel.num_runs.value() == config.TRAINING_NUM_RUNS
+    assert panel.run_size_cap.value() == config.TRAINING_RUN_SIZE
+    assert f"{config.TRAINING_NUM_RUNS * width:,} simulations" in panel.budget_total.text(), \
+        panel.budget_total.text()
+    assert "diversity" in panel.budget_total.text(), \
+        "the line must say batch COUNT is the (t_scale, T) diversity, not just a budget"
+
+    panel.run_size_cap.setText(str(width // 4))
+    assert f"{config.TRAINING_NUM_RUNS * (width // 4):,} simulations" in panel.budget_total.text()
+    assert "capped from" in panel.budget_total.text(), panel.budget_total.text()
+
+    # ...and quadrupling the batch COUNT is what buys those rows back, at 4x the wall-clock.
+    panel.num_runs.setText(str(config.TRAINING_NUM_RUNS * 4))
+    assert f"{config.TRAINING_NUM_RUNS * width:,} simulations" in panel.budget_total.text()
+
+
+def test_the_training_budget_reaches_build_posterior_as_arguments_not_via_config():
+    """THE WIRING THAT MAKES THE FIELDS DO ANYTHING AT ALL.
+
+    orchestrator binds TRAINING_NUM_RUNS / TRAINING_RUN_SIZE at import, so a panel that "applied" the
+    user's numbers by assigning to core.config would be a silent no-op -- the run would simulate 5000
+    x 2048 anyway and nothing would say otherwise. Both halves are asserted: the values arrive as
+    call kwargs, AND the config constants are untouched.
+    """
+    from core import config
+
+    before = (config.TRAINING_NUM_RUNS, config.TRAINING_RUN_SIZE)
+    _inf, panel = _budget_panel(_budget_cfg(), prior=object())
+    panel.num_runs.setText("777")
+    panel.run_size_cap.setText("256")
+
+    seen = {}
+    panel.dispatch = lambda fn, *a, **kw: seen.update(fn=fn, args=a, kwargs=kw)
+    panel._build_posterior()
+
+    assert seen, "the Train button dispatched nothing"
+    assert seen["kwargs"].get("num_runs") == 777, seen["kwargs"]
+    assert seen["kwargs"].get("run_size_cap") == 256, seen["kwargs"]
+    assert (config.TRAINING_NUM_RUNS, config.TRAINING_RUN_SIZE) == before, \
+        "the panel mutated the config constants, which orchestrator has already snapshotted"
+
+
+def test_the_budget_refuses_a_batch_count_below_one():
+    """0 batches is a whole run that simulates nothing and then trains on an empty tensor."""
+    _inf, panel = _budget_panel(_budget_cfg(), prior=object())
+    panel.num_runs.setText("0")
+    seen = []
+    panel.dispatch = lambda fn, *a, **kw: seen.append(kw)
+    panel._build_posterior()
+    assert not seen, "a zero batch count was dispatched"
+
+
+def test_the_budget_memory_line_reads_pipelines_own_cost_model():
+    """The estimate must come from pipeline.peak_sim_elements, not a second copy of the formula, and
+    it must be quoted at the WORST geometry the Sobol pre-filter admits -- n_fine swings from a median
+    ~40k to a p99 ~283k, so a width that fits the median still OOMs on a few percent of batches, which
+    is how two retrains actually died."""
+    from core import config
+    from core.SBI import pipeline
+
+    cfg = _budget_cfg()
+    _inf, panel = _budget_panel(cfg)
+    width = cfg.hw.batch_size
+
+    if cfg.hw.device.type != "cuda":
+        assert "CUDA-only" in panel.budget_mem.text(), panel.budget_mem.text()
+        return
+
+    n_fine = min(config.N_ND_MAX, cfg.t.shape[0])
+    need = pipeline.peak_sim_elements(width, n_fine, cfg.steady_idx, len(cfg.inits_dict), 1, 1)
+    gib = need * cfg.hw.dtype.itemsize / float(1 << 30)
+    assert f"{gib:.2f} GiB" in panel.budget_mem.text(), panel.budget_mem.text()
+    assert f"{n_fine:,}" in panel.budget_mem.text(), "the line must name the geometry it assumed"
+    assert "upper bound" in panel.budget_mem.text().lower(), \
+        "free-VRAM readings overstate what is available; the line must not present one as fact"
+
+    # Halving the width must halve the estimate -- the peak is linear in the batch.
+    panel.run_size_cap.setText(str(width // 2))
+    assert f"{gib / 2:.2f} GiB" in panel.budget_mem.text(), panel.budget_mem.text()
+
+
+def test_the_budget_lines_never_raise_on_a_config_they_do_not_understand():
+    """_sync_budget runs from refresh_gates(), so an exception in a STATUS LINE would take down the
+    whole tab. The gate tests set session.cfg to a bare object(); so could any future stub."""
+    _inf, panel = _budget_panel(cfg=object(), prior=object())
+    panel._sync_budget()                                   # must not raise
+    assert panel.budget_total.text(), "the total line went blank on an unknown config"
+    assert "config" in panel.budget_ckpt.text().lower(), panel.budget_ckpt.text()
+
+
+def test_the_training_budget_round_trips_through_settings():
+    """"I have to retype it every launch" is the complaint L1 already answered for splitters."""
+    from core.gui import settings as st
+
+    path = _temp_settings()
+    try:
+        _inf, panel = _budget_panel(_budget_cfg())
+        panel.num_runs.setText("1234")
+        panel.run_size_cap.setText("512")
+        panel.save_settings(st.settings())
+
+        _inf2, fresh = _budget_panel(_budget_cfg())
+        fresh.restore_settings(st.settings())
+        assert fresh.num_runs.value() == 1234, fresh.num_runs.text()
+        assert fresh.run_size_cap.value() == 512, fresh.run_size_cap.text()
+        # And the derived line followed the restored values, not the defaults.
+        assert "1,234 batches" in fresh.budget_total.text(), fresh.budget_total.text()
+    finally:
+        st.use_ini_file(None) if hasattr(st, "use_ini_file") else None
+        os.unlink(path)
+
+
+def test_the_caption_falls_back_to_the_sbi_epoch_counter():
+    """THE REASON THE CAPTION EXISTS. sbi's neural-network training -- hours of a multi-day build --
+    emits no tqdm bar at all, only a printed epoch counter (an overwrite-mode row, pct and total both
+    None). The only other live row is `Training neural posterior -- 0/1`, which is degenerate. Render
+    "no rows, just the bar" literally and that whole phase is a blank indeterminate bar."""
+    _app()
+    prog = ProgressPane()
+    prog.begin()
+
+    degenerate = parse_bar(("err", 0), 0, "Training neural posterior:   0%|  | 0/1 [00:00<?, ?it/s]")
+    epochs = parse_bar(("out", 0), 0, " Training neural network. Epochs trained: 812")
+    prog.set_rows((degenerate, epochs))
+
+    assert prog.overall.maximum() == 0, "a total=1 bar was allowed to drive the overall bar"
+    assert "Epochs trained: 812" in prog.caption.text(), \
+        f"the longest phase of the run has no caption: {prog.caption.text()!r}"
+    prog.end()
+
+
+def test_the_overall_bar_follows_the_largest_non_degenerate_total():
+    """Largest total, not deepest. The per-time-segment bar wraps segs in {1,2,3}, so it is BOTH
+    deeper and far coarser than "Generating training data" -- picking the deepest row would sweep the
+    overall bar 0->100% every couple of seconds. (config.QUIET_SEGMENT_BAR hides that bar under the
+    GUI today; the election should not depend on it still being set.)"""
+    _app()
+    prog = ProgressPane()
+    prog.begin()
+
+    rounds = parse_bar(("err", 0), 0, "Training neural posterior:   0%|  | 0/1 [00:00<?, ?it/s]")
+    data = parse_bar(("err", 1), 1, "Generating training data:  38%|### | 1902/5000 [05:12<13:41]")
+    segs = parse_bar(("err", 2), 2, "Running time segments:  66%|##  | 2/3 [00:01<00:00]")
+    solver = parse_bar(("err", 3), 3, "step (batch=32):  88%|####| 13269/14999 [00:01<00:00, 13267.85it/s]")
+    prog.set_rows((rounds, data, segs, solver))
+
+    assert prog.overall.value() == 38, \
+        f"the overall bar followed the deepest bar ({prog.overall.value()}%), not the largest total"
+    assert prog.caption.text().startswith("Generating training data"), prog.caption.text()
     prog.end()
 
 

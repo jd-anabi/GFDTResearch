@@ -14,11 +14,13 @@ stage completes.
 """
 import math
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
-from core import cli, config, orchestrator, registry
+from core import cli, config, forcing, orchestrator, registry
 from core.Helpers import file_manager, labels, visualizers
+from core.SBI import pipeline, training_checkpoint
 from core.config import (VALID_MODELS, VALID_LABELS, BOUNDS_PATH, CELL_PATH, PRIOR_PATH,
                          POSTERIOR_PATH, T_MIN_EXP_S, CHI_K_MAX)
 
@@ -50,6 +52,20 @@ HELP = {
              "stability-screened parameter prior.",
     "posterior": "Load a trained posterior (.pt), or “(from scratch)” to train a new one. Training "
                  "from scratch needs a prior; loading an existing posterior does not.",
+    "num_runs": "How many training BATCHES to simulate. Each batch is one Sobol (t_scale, T) "
+                "operating point that every row in it shares — so this is the data budget AND the "
+                "timescale/duration diversity of the training set, and it is what wall-clock scales "
+                "with. Raising it is the honest way to buy a better posterior. ⚠ It is part of the "
+                "training checkpoint's identity: changing it means an in-progress run cannot be "
+                "resumed.",
+    "run_size": "CEILING on simulations per batch; 0 = follow the hardware default. This is a VRAM "
+                "escape hatch, NOT a speed control — the SDE solver is kernel-launch-bound, so a "
+                "narrower batch is not faster (measured 7.37 s at 2048 against 7.74 s at 1024, i.e. "
+                "the smaller batch is slightly slower). Lowering it trades training rows for peak "
+                "memory about 1:1, and you have to raise Batches to get those rows back, which does "
+                "cost wall-clock. The per-batch splitter already handles the geometry tail, so reach "
+                "for this only if you see splitting on most batches. ⚠ Also part of the checkpoint "
+                "identity.",
     "infer_mode": "Simulated: infer on a synthetic observation from a cell’s ground truth. "
                   "Experimental: infer on your own recording (a driven spontaneous+forced pair, or — "
                   "for a no-forcing model — a single passive recording).",
@@ -662,7 +678,13 @@ class PosteriorPanel(_StagePanel):
     the three conditioning widths cannot collide, so a cross-mode load is caught immediately rather
     than as a matrix-shape error deep inside the embedding net.
 
-    Persists (group "inference_posterior"): the posterior picker selection and the save name.
+    Also owns the TRAINING BUDGET (batches x rows-per-batch), which was previously reachable only by
+    editing config.py. Both fields are passed to build_posterior as arguments rather than written to
+    config: orchestrator snapshots those constants at import, so assigning to them would be a silent
+    no-op. See _sync_budget for the three derived lines and why the checkpoint one is not a tooltip.
+
+    Persists (group "inference_posterior"): the posterior picker selection, the batch count and the
+    rows-per-batch cap.
     """
     def __init__(self, screen, parent=None):
         super().__init__(screen, parent)
@@ -687,7 +709,28 @@ class PosteriorPanel(_StagePanel):
         row.addWidget(self.btn_save_post)
         v.addLayout(row)
         self.controls_layout.addWidget(box)
+
+        # -- training budget: what a new posterior will actually simulate, and what it costs -------
+        budget = QGroupBox("Training budget")
+        bv = QVBoxLayout(budget)
+        bform = make_form()
+        self.num_runs = IntField(config.TRAINING_NUM_RUNS)
+        self.run_size_cap = IntField(config.TRAINING_RUN_SIZE)
+        add_help_row(bform, "Batches", self.num_runs, HELP["num_runs"])
+        add_help_row(bform, "Max rows per batch (0 = auto)", self.run_size_cap, HELP["run_size"])
+        bv.addLayout(bform)
+        self.budget_total = self._derived_label()
+        self.budget_mem = self._derived_label()
+        self.budget_ckpt = self._derived_label()
+        for lab in (self.budget_total, self.budget_mem, self.budget_ckpt):
+            bv.addWidget(lab)
+        # After the labels exist: textChanged fires during restore_settings below.
+        for fld in (self.num_runs, self.run_size_cap):
+            fld.textChanged.connect(lambda _t: self._sync_budget())
+        self.controls_layout.addWidget(budget)
+
         self.restore_settings(settings.settings())
+        self._sync_budget()
 
     def _build_posterior(self):
         cfg = self.session.cfg
@@ -697,10 +740,20 @@ class PosteriorPanel(_StagePanel):
         if is_new and self.session.inf_prior is None:
             self.log_pane.append_line("Build or load a prior first to train a new posterior.", "warning")
             return
+        n_runs, cap = self._budget_values()
+        if n_runs < 1:
+            self.log_pane.append_line("Batches must be at least 1.", "warning")
+            return
+        if cap < 0:
+            self.log_pane.append_line("Max rows per batch cannot be negative (0 = auto).", "warning")
+            return
         self.session.reset_downstream("posterior")
         self._screen.refresh_gates()
+        # Passed, never written to config: orchestrator does `from .config import TRAINING_NUM_RUNS`,
+        # so setting the constant here would be a silent no-op and the run would use the default.
         self.dispatch(orchestrator.build_posterior, cfg, self.session.inf_prior,
                       self.session.force_prior, entry, is_new, save=False,
+                      num_runs=n_runs, run_size_cap=cap,
                       provide_fig_sink=True, on_result=self._on_posterior)
 
     def _on_posterior(self, payload):
@@ -731,6 +784,133 @@ class PosteriorPanel(_StagePanel):
     def refresh_local_gates(self):
         self._sync_train_button()
         self.btn_save_post.setEnabled(self.session.posterior_latent is not None)
+        # A config or a prior arriving changes every derived line, and the checkpoint line cannot be
+        # computed without both.
+        self._sync_budget()
+
+    # -- the training budget ---------------------------------------------------------------------
+    @staticmethod
+    def _derived_label() -> QLabel:
+        """A read-only derived line under the budget fields.
+
+        Word-wrapped and PlainText on purpose: these carry generated strings that can be long (a
+        checkpoint directory name and the field it differs in), and an unwrapped label widens the
+        whole controls column -- defect L13, which is what put a permanent horizontal scrollbar on the
+        crossval panel.
+        """
+        lab = QLabel()
+        lab.setWordWrap(True)
+        lab.setTextFormat(Qt.PlainText)
+        return lab
+
+    def _hardware(self):
+        """The DeviceConfig a config would be built with. Memoised: detect_device() probes the
+        accelerator and _sync_budget runs on every keystroke in the two fields."""
+        if getattr(self, "_hw_cache", None) is None:
+            self._hw_cache = config.detect_device()
+        return self._hw_cache
+
+    def _budget_values(self) -> tuple:
+        return self.num_runs.value(), self.run_size_cap.value()
+
+    def _effective_width(self, cfg, cap: int) -> tuple:
+        """(rows actually simulated per batch, the hardware default it was capped from)."""
+        hw = cfg.hw if cfg is not None else self._hardware()
+        return (min(hw.batch_size, cap) if cap else hw.batch_size), hw
+
+    def _sync_budget(self) -> None:
+        """Recompute the three derived lines. Pure and cheap -- safe on every keystroke.
+
+        ⚠ Treats anything without a `.hw` as no-config-yet rather than trusting `session.cfg` to be a
+        SimConfig. Two reasons, and the second is the real one: the gate tests set `session.cfg` to a
+        bare `object()` sentinel, and more importantly a derived STATUS LINE must never be able to
+        raise into refresh_gates() and take the whole tab down with it.
+        """
+        cfg = self.session.cfg
+        if getattr(cfg, "hw", None) is None:
+            cfg = None
+        n_runs, cap = self._budget_values()
+        width, hw = self._effective_width(cfg, max(0, cap))
+        n_runs = max(1, n_runs)
+
+        capped = "" if width == hw.batch_size else f" (capped from {hw.batch_size:,})"
+        chi = ""
+        if cfg is not None and cfg.chi_mode:
+            chi = (f"\nIn chi mode each row costs 1+K solver passes, K up to {cfg.chi_k_pad}.")
+        self.budget_total.setText(
+            f"{n_runs * width:,} simulations = {n_runs:,} batches x {width:,} rows{capped}."
+            f"\nBatches is also the (t_scale, T) diversity count: every row in a batch shares one "
+            f"operating point, so batch COUNT is the statistics and batch WIDTH is not.{chi}")
+        self.budget_mem.setText(self._budget_memory(cfg, hw, width))
+        self.budget_ckpt.setText(self._budget_checkpoint(cfg, width, n_runs))
+
+    def _budget_memory(self, cfg, hw, width: int) -> str:
+        """Peak device memory for ONE batch at the worst geometry the Sobol pre-filter admits.
+
+        The WORST case is the one worth showing: n_fine swings from a median ~40k to a p99 ~283k, so a
+        width that fits the median still OOMs on a few percent of batches -- which is how the
+        2026-08-10 and 2026-08-11 retrains both died. gen_training_data rejects any (t_scale, T) whose
+        n_fine exceeds min(N_ND_MAX, len(t)), so that IS the ceiling, by construction.
+
+        Reads pipeline's own cost model rather than restating it, so this cannot drift from what the
+        planner does (pipeline.peak_sim_elements / sim_memory_budget_elements).
+        """
+        if hw.device.type != "cuda":
+            return f"Peak-memory estimate is CUDA-only; this config runs on {hw.device.type}."
+        n_fine = min(config.N_ND_MAX, cfg.t.shape[0]) if cfg is not None else config.N_ND_MAX
+        n_vars = len(cfg.inits_dict) if cfg is not None else 3
+        steady = cfg.steady_idx if cfg is not None else 0
+        n_ch = 1
+        if cfg is not None:
+            try:
+                n_ch = forcing.n_force_channels(cfg.model, cfg.forcing_idx, n_vars)
+            except Exception:                 # noqa: BLE001 -- a display must not break the tab
+                n_ch = 1
+        try:
+            # var_idx=0 in the training path, so exactly one variable is kept.
+            need = pipeline.peak_sim_elements(width, n_fine, steady, n_vars, n_ch, 1)
+            have = pipeline.sim_memory_budget_elements(hw.device, hw.dtype)
+        except Exception as e:                # noqa: BLE001
+            return f"Peak-memory estimate unavailable: {type(e).__name__}: {e}"
+        gib = hw.dtype.itemsize / float(1 << 30)
+        verdict = ("fits in one piece" if need <= have else
+                   "does NOT fit -- the planner will split this batch, costing wall-clock")
+        return (f"Worst-case peak ~{need * gib:.2f} GiB per batch (n_fine <= {n_fine:,}, {n_vars} "
+                f"state vars); planner budget right now ~{have * gib:.2f} GiB, so it {verdict}.\n"
+                f"That budget is an UPPER bound: free-VRAM readings overstate what is really "
+                f"available by roughly the size of the desktop, so closing browsers is a bigger lever "
+                f"than lowering the cap." + ("" if cfg is not None else
+                                             "\n(Estimated from hardware defaults until a config is built.)"))
+
+    def _budget_checkpoint(self, cfg, width: int, n_runs: int) -> str:
+        """THE GUARD THAT MAKES THESE TWO FIELDS SAFE TO EXPOSE AT ALL.
+
+        Both are inside the C-11 checkpoint identity, which is DIGESTED into the checkpoint's
+        directory name. Change either and a resumable multi-day run silently resolves to a different
+        directory -- there is no error, just a run that starts from zero. A tooltip is not a strong
+        enough guard for that, so the state is stated inline and re-evaluated as you type;
+        describe_siblings even names the field that differs.
+        """
+        if not config.TRAINING_CHECKPOINT_EVERY:
+            return "Checkpointing is off (config.TRAINING_CHECKPOINT_EVERY = 0): a crash loses the run."
+        if cfg is None or self.session.inf_prior is None:
+            return "Checkpoint status needs a config and a prior -- the prior is part of the identity."
+        try:
+            ident = orchestrator.training_identity(cfg, self.session.inf_prior, width, n_runs)
+            state = training_checkpoint.peek(training_checkpoint.resolve_dir(ident))
+            siblings = training_checkpoint.describe_siblings(ident)
+        except Exception as e:                # noqa: BLE001 -- never let a status line break the tab
+            return f"Checkpoint status unavailable: {type(e).__name__}: {e}"
+        if state and state.get("batches_done"):
+            done = int(state["batches_done"])
+            if state.get("complete"):
+                return (f"Resumes a COMPLETE checkpoint ({done:,} batches) -- simulation will be "
+                        f"skipped entirely and only the flow retrained.")
+            return f"Resumes an existing checkpoint: {done:,}/{n_runs:,} batches already done."
+        if siblings:
+            return ("WARNING: these settings match no checkpoint, so this starts a NEW run.\n"
+                    + siblings)
+        return "No checkpoint exists yet; this starts a new run."
 
     @staticmethod
     def _extract_rotation(posterior):
@@ -747,11 +927,17 @@ class PosteriorPanel(_StagePanel):
     def save_settings(self, qs):
         qs.beginGroup("inference_posterior")
         qs.setValue("posterior", self.post_picker.key())
+        qs.setValue("num_runs", self.num_runs.value())
+        qs.setValue("run_size_cap", self.run_size_cap.value())
         qs.endGroup()
 
     def restore_settings(self, qs):
         qs.beginGroup("inference_posterior")
         self.post_picker.restore_key(settings.get_str(qs, "posterior"))
+        # Defaults are the config constants, so a fresh install and a wiped QSettings both land on
+        # exactly the CLI's behaviour.
+        self.num_runs.setText(str(settings.get_int(qs, "num_runs", config.TRAINING_NUM_RUNS)))
+        self.run_size_cap.setText(str(settings.get_int(qs, "run_size_cap", config.TRAINING_RUN_SIZE)))
         qs.endGroup()
 
 

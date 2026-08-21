@@ -1,22 +1,41 @@
-"""Live progress: a solver line, an overall bar with a spinner, and one row per active tqdm bar.
+"""Live progress: ONE overall bar, one caption naming the stage, and a solver rate with no bar.
 
-    Solver Performance: ++++  (13.3k it/s)   [▓▓▓▓▓▓▓░░░░░░]
+    Solver Performance: +++++  (142.4k it/s)   [sparkline]
     [███████░░░░░░░░░░░░░  38%]  ⠹
-        Training neural posterior
-        Generating training data  —  1902/5000 [05:12<13:41]
-
-Two things this widget exists to solve.
+    Generating training data  —  1902/5000 [05:12<13:41]
 
 WHY PROGRESS DOES NOT SHARE THE LOG PANE. The pipeline nests bars up to three deep, and inlining
 several redrawing bars into a scrolling text widget is what produced the append storm this replaces.
-Each bar owns a row, keyed by its tqdm `pos`, and simply overwrites it.
 
-WHY THE SOLVER GETS ITS OWN LINE INSTEAD OF A ROW. A top-level iteration ("Generating training data")
-takes ~10 seconds, so the overall bar sits still and the GUI reads as frozen. The thing that IS moving
-is the SDE solver underneath it (core/Solvers/sdeint.py), and its `it/s` is the number the user wants.
-But it cannot be a row: a posterior build constructs 10k-30k of those bars -- one per time segment,
-each alive 1-10s -- so a row would mean creating and destroying a widget every few seconds. It gets one
-fixed line instead, whose rate is HELD across the gaps between bars.
+WHY THERE IS ONE BAR AND NOT ONE ROW PER TQDM BAR. There are 17 tqdm sites in core/, in seven
+families, and this pane used to render a row for each live one -- a stack of bars mostly saying the
+same thing at different granularities, plus rows like `Training neural posterior -- 0/1` that carry
+no information at all. The nest is still parsed in full (core/gui/vt.py); it is just rendered as one
+bar plus one caption. The whole live set is on the overall bar's TOOLTIP, one hover away.
+
+    ⚠ THE CAPTION IS NOT DECORATION -- IT IS WHAT KEEPS THE LONGEST PHASE OF A RUN VISIBLE.
+    sbi's neural-network training emits NO tqdm bar at all: it prints "\\r" + "Training neural
+    network. Epochs trained: N" (trap P7), which vt turns into an overwrite-mode row with pct=None.
+    During that phase -- hours of a multi-day build -- the only live rows are that status line and a
+    degenerate total=1 bar. With no caption the pane would show an indeterminate bar and nothing
+    else. Hence the fallback in _paint_caption: when nothing reports a percentage, show the deepest
+    row whose total is not 1.
+
+WHY THE SOLVER GETS ITS OWN LINE, AND WHERE ITS NUMBER COMES FROM. The thing that is really moving
+during a build is the SDE solver (core/Solvers/sdeint.py), and its it/s is the number the user wants.
+It cannot be a bar in here: a posterior build constructs 10k-30k of those bars, one per time segment.
+
+    ⚠ THE RATE IS NO LONGER SCRAPED FROM THE BAR'S RENDERED TEXT, AND MUST NOT GO BACK TO BEING.
+    It was, and that coupling broke the moment the solver got fast: tqdm paints a frame carrying a
+    rate only once `mininterval` has elapsed, so a solver call SHORTER than its own bar's mininterval
+    renders "?it/s" and nothing else. When CUDA graphs took a 100k-step call from ~10 s to ~0.7 s the
+    meter read "-- (idle)" for entire runs -- a 10x speedup made a progress bar too fast to render.
+    The rate now comes from `core.progress.SOLVER`, a monotonic step count the solver publishes,
+    differenced here on the 100 ms tick. That is correct at any speed, including the next speedup.
+
+    The solver bar still exists and is still found by `config.SOLVER_BAR_DESC` -- but only to EXCLUDE
+    it from the election that drives the overall bar (trap S3: its total is in the tens of thousands,
+    so it would win every time and sweep the bar 0->100% every second).
 """
 import math
 import time
@@ -26,14 +45,24 @@ from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget)
 
+from core import progress
+
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _SPIN_MS = 100
 
-# A solver bar shorter than its mininterval (1.0s) paints only a "?it/s" opening frame, and with
-# leave=False there is no final 100% frame either -- so rate samples arrive in gaps. Hold the last one
-# for this long before calling the solver idle. Comfortably longer than the ~1s between rate frames,
-# and short enough that neural-network training (where the solver genuinely is not running) reads idle.
-SOLVER_IDLE_S = 45.0
+# How long to keep showing the last rate after the step counter stops advancing. This bridges the
+# NON-solver work between solver calls (force construction, gen_stats) so the meter does not flicker
+# between segments; it is not there to bridge a bar's mininterval any more.
+#
+# It was 45.0, sized for ~10 s solver calls whose rate frames arrived about a second apart. Samples
+# now arrive every 100 ms, so 45 s only meant displaying a stale number long after the solver stopped
+# -- through the whole start of neural-network training, where the solver genuinely is not running.
+SOLVER_IDLE_S = 8.0
+
+# EMA weight for the sampled rate. 0.3 is tqdm's own `smoothing` default, so the number reads the way
+# the CLI's bar does. Raw 100 ms deltas are jumpy: the graphed path submits work to the GPU faster
+# than the GPU completes it, so the counter advances in bursts.
+_RATE_SMOOTH = 0.3
 
 # No output of ANY kind for this long means the run is probably wedged. Say so, instead of spinning
 # cheerfully at a corpse.
@@ -65,10 +94,11 @@ def format_rate(rate: float | None) -> str:
 class _Sparkline(QWidget):
     """A tiny live trend line of the SDE solver's throughput -- the primary at-a-glance solver readout.
 
-    Fed one sample per 100 ms tick with the HELD solver rate; ``None`` marks a gap (the solver is idle or
-    the run has stalled), which breaks the line so a pause reads as a pause rather than a flat crawl. Drawn
-    on a log10 scale, so a 10 it/s -> 10k it/s ramp is a gentle slope, not a cliff. Colours come from the
-    palette (Highlight for the trace, Mid for the baseline), so it reads correctly in light and dark.
+    Fed one sample per 100 ms tick with the current solver rate; ``None`` marks a gap (the solver is
+    idle or the run has stalled), which breaks the line so a pause reads as a pause rather than a flat
+    crawl. Drawn on a log10 scale, so a 10 it/s -> 10k it/s ramp is a gentle slope, not a cliff. Colours
+    come from the palette (Highlight for the trace, Mid for the baseline), so it reads correctly in
+    light and dark.
     """
 
     def __init__(self, capacity: int = 64, parent=None):
@@ -134,50 +164,18 @@ class _Sparkline(QWidget):
         p.end()
 
 
-class _BarRow(QWidget):
-    """One tqdm bar: a label for the description and a bar for the percentage."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.label = QLabel()
-        # Pin the size policy: QLabel.setText() calls updateGeometry() unconditionally, so an
-        # unpinned label re-lays-out the whole right-hand pane on every frame (~60/s across all
-        # rows), visibly jittering the figure/log splitter as the frame text changes width.
-        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.label.setTextFormat(Qt.PlainText)
-
-        self.bar = QProgressBar()
-        self.bar.setTextVisible(False)
-        self.bar.setFixedHeight(6)
-        self.bar.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 2)
-        layout.setSpacing(1)
-        layout.addWidget(self.label)
-        layout.addWidget(self.bar)
-
-    def update_from(self, state) -> None:
-        depth = "    " * state.row
-        stats = f"  —  {state.stats}" if state.stats else ""
-        self.label.setText(f"{depth}{state.desc}{stats}")
-        if state.pct is None:
-            self.bar.setRange(0, 0)              # indeterminate: this bar has no total
-        else:
-            self.bar.setRange(0, 100)
-            self.bar.setValue(state.pct)
-
-
 class ProgressPane(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._rows: dict[tuple, _BarRow] = {}
+        self._rows: tuple = ()          # the last snapshot, solver bar excluded
         self._rate: float | None = None
         self._rate_at = 0.0
+        self._steps = 0                 # last sampled core.progress.SOLVER.steps
+        self._steps_at = 0.0
         self._beat_at = 0.0
         self._frame = 0
 
-        # ── solver line: the rate meter + the live step strip ────────────────
+        # -- solver line: the rate meter + the live trend ---------------------
         self.solver_label = QLabel()
         self.solver_label.setTextFormat(Qt.PlainText)
         self.solver_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -186,20 +184,15 @@ class ProgressPane(QWidget):
         # compact secondary. Must be constructed before _reset_solver() below (it clears the sparkline).
         self.sparkline = _Sparkline()
 
-        self.solver_strip = QProgressBar()
-        self.solver_strip.setTextVisible(False)
-        self.solver_strip.setFixedHeight(8)
-        self.solver_strip.setToolTip("Progress through the current SDE integration segment")
-
         solver_line = QWidget()
         solver_layout = QHBoxLayout(solver_line)
         solver_layout.setContentsMargins(0, 0, 0, 0)
         solver_layout.setSpacing(8)
         solver_layout.addWidget(self.solver_label)
         solver_layout.addWidget(self.sparkline)
-        solver_layout.addWidget(self.solver_strip, 1)
+        solver_layout.addStretch(1)      # took over from the deleted per-segment strip
 
-        # ── overall bar + spinner ───────────────────────────────────────────
+        # -- the one overall bar + spinner ------------------------------------
         self.overall = QProgressBar()
         self.overall.setRange(0, 0)              # indeterminate until something reports a percentage
         self.overall.setTextVisible(True)        # show the top-level % right on the bar
@@ -225,14 +218,25 @@ class ProgressPane(QWidget):
         overall_layout.addWidget(self.overall, 1)
         overall_layout.addWidget(self.spinner)
 
+        # -- the caption: which stage the bar is measuring ---------------------
+        self.caption = QLabel()
+        self.caption.setTextFormat(Qt.PlainText)
+        # Ignored horizontally, exactly as the deleted _BarRow's label was: QLabel.setText() calls
+        # updateGeometry() unconditionally, so an unpinned label re-lays-out the whole right-hand pane
+        # on every pump tick, visibly jittering the figure/log splitter. It also lets the prior sweeps'
+        # very long mutating desc CLIP instead of widening the pane. Left in place (never hidden) when
+        # empty, so the pane's height does not change as stages come and go.
+        self.caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 2, 0, 2)
         self._layout.setSpacing(2)
         self._layout.addWidget(solver_line)
         self._layout.addWidget(overall_line)
+        self._layout.addWidget(self.caption)
 
-        # Drives the spinner AND the two timeouts -- staleness has to be noticed precisely when no
-        # events are arriving, so it cannot be evaluated from set_rows() alone.
+        # Drives the spinner, the solver rate AND the two timeouts -- staleness has to be noticed
+        # precisely when no events are arriving, so it cannot be evaluated from set_rows() alone.
         self._timer = QTimer(self)
         self._timer.setInterval(_SPIN_MS)
         self._timer.timeout.connect(self._tick)
@@ -240,7 +244,7 @@ class ProgressPane(QWidget):
         self._reset_solver()
         self.setVisible(False)
 
-    # ── lifecycle ────────────────────────────────────────────────────────────
+    # -- lifecycle -------------------------------------------------------------
     def begin(self) -> None:
         self.end()
         self.heartbeat()
@@ -248,77 +252,72 @@ class ProgressPane(QWidget):
         self._timer.start()
 
     def end(self) -> None:
-        """Authoritative teardown. Deletes every row regardless of whether its bar reported a close,
-        so a row leaked by a crashed worker cannot survive into the next dispatch."""
+        """Authoritative teardown. Clears the whole surface regardless of whether any bar reported a
+        close, so nothing leaked by a crashed worker can survive into the next dispatch."""
         self._timer.stop()
-        for row in self._rows.values():
-            self._layout.removeWidget(row)
-            row.deleteLater()
-        self._rows.clear()
+        self._rows = ()
         self.overall.setRange(0, 0)
+        self.overall.setToolTip("")
+        self.caption.setText("")
         self.spinner.setText("")
+        self.spinner.setToolTip("")
         self._reset_solver()
         self.setVisible(False)
 
     def heartbeat(self) -> None:
-        """Mark 'the run produced output just now'. Called on every rows snapshot AND on every batch of
-        log lines -- a run that is printing but not drawing bars is still alive."""
+        """Mark 'the run produced output just now'. Called on every rows snapshot, on every batch of
+        log lines, and on any tick where the solver's step counter advanced -- a run that is computing
+        but not printing is still alive."""
         self._beat_at = time.monotonic()
 
-    # ── the worker's rows signal lands here ──────────────────────────────────
+    # -- the worker's rows signal lands here -----------------------------------
     def set_rows(self, snapshot) -> None:
-        """`snapshot` is the pump's full set of live rows (a tuple[RowState]), already sorted."""
+        """`snapshot` is the pump's full set of live rows (a tuple[RowState]), already sorted.
+
+        The solver bar is dropped here and nowhere else: it is the one bar whose total (tens of
+        thousands) and depth would otherwise decide the overall bar (trap S3). Its rate does not come
+        from this snapshot -- see the module docstring.
+        """
         self.heartbeat()
+        self._rows = tuple(s for s in snapshot if not s.is_solver)
+        self._retarget(self._rows)
 
-        solver = next((s for s in snapshot if s.is_solver), None)
-        rows = [s for s in snapshot if not s.is_solver]
-
-        seen = set()
-        for state in rows:
-            seen.add(state.key)
-            row = self._rows.get(state.key)
-            if row is None:
-                row = _BarRow(self)
-                self._rows[state.key] = row
-                self._layout.addWidget(row)
-            row.update_from(state)
-
-        for key in [k for k in self._rows if k not in seen]:
-            row = self._rows.pop(key)
-            self._layout.removeWidget(row)
-            row.deleteLater()
-
-        self._update_solver(solver)
-        self._retarget(rows)
-
-    # ── the solver line ──────────────────────────────────────────────────────
+    # -- the solver line -------------------------------------------------------
     def _reset_solver(self) -> None:
         self._rate = None
         self._rate_at = 0.0
-        self.solver_strip.setRange(0, 100)
-        self.solver_strip.setValue(0)
-        self.solver_strip.setVisible(False)
+        # Re-baseline the counter, so steps burned by a PREVIOUS run are never attributed to this one.
+        # The counter itself is monotonic and process-wide and must not be reset (core/progress.py).
+        self._steps = progress.SOLVER.steps
+        self._steps_at = time.monotonic()
         self.sparkline.clear()
         self._paint_solver()
 
-    def _update_solver(self, solver) -> None:
-        if solver is None:
-            self.solver_strip.setVisible(False)      # no solver running (e.g. NN training, Reduction)
-        else:
-            self.solver_strip.setVisible(True)
-            if solver.pct is None:
-                self.solver_strip.setRange(0, 0)
-            else:
-                self.solver_strip.setRange(0, 100)
-                self.solver_strip.setValue(solver.pct)
-            if solver.rate is not None:              # None on the opening frame of every bar
-                self._rate, self._rate_at = solver.rate, time.monotonic()
+    def _sample_solver(self) -> None:
+        """Difference the solver's step counter over this 100 ms tick and smooth it into a rate.
+
+        Runs on the GUI thread; the counter is written on the worker thread. One writer, so no update
+        can be lost, and a stale read just moves those steps into the next sample (core/progress.py).
+        """
+        now = time.monotonic()
+        steps = progress.SOLVER.steps
+        dn, dt = steps - self._steps, now - self._steps_at
+        self._steps, self._steps_at = steps, now
+
+        if dn > 0 and dt > 0:
+            inst = dn / dt
+            self._rate = inst if self._rate is None else \
+                (1.0 - _RATE_SMOOTH) * self._rate + _RATE_SMOOTH * inst
+            self._rate_at = now
+            self.heartbeat()               # a moving counter is evidence of life, printing or not
+        elif self._rate is not None and now - self._rate_at > SOLVER_IDLE_S:
+            self._rate = None              # the solver stopped: holding the last number would lie
+
+        self.sparkline.push(self._rate)
         self._paint_solver()
 
     def _paint_solver(self) -> None:
         rate = self._rate
-        if rate is not None and time.monotonic() - self._rate_at > SOLVER_IDLE_S:
-            rate = None                              # held sample has gone stale: the solver stopped
         self.solver_label.setText(f"Solver Performance: {plus_meter(rate)}  ({format_rate(rate)})")
         if rate is None:
             self.solver_label.setToolTip("The SDE solver is not running right now.")
@@ -326,8 +325,11 @@ class ProgressPane(QWidget):
             self.solver_label.setToolTip(
                 f"SDE solver: {rate:,.0f} integration steps/sec.\nOne '+' per order of magnitude.")
 
-    # ── the spinner + stall detection ────────────────────────────────────────
+    # -- the spinner + stall detection -----------------------------------------
     def _tick(self) -> None:
+        # BEFORE the stall check, and that order matters: a moving step counter heartbeats, so a run
+        # that is integrating hard while printing nothing cannot be declared wedged.
+        self._sample_solver()
         idle = time.monotonic() - self._beat_at
         if idle > STALL_S:
             # Freeze the spinner rather than animate it. A spinner that keeps twirling on a wedged run
@@ -335,38 +337,60 @@ class ProgressPane(QWidget):
             stall = f"⏳ no output for {int(idle)}s"
             self.spinner.setText(stall)
             self.spinner.setToolTip(stall)      # the width is pinned now, so long text can clip
-            self.sparkline.push(None)                # and drain the trend line: nothing is happening
             return
         self._frame = (self._frame + 1) % len(_SPINNER)
         self.spinner.setText(_SPINNER[self._frame])
-        self._paint_solver()                         # re-evaluate the solver's own idle timeout
-        self._sample_rate()                          # feed the sparkline on the same 100ms cadence
 
-    def _sample_rate(self) -> None:
-        """Feed the sparkline the current HELD solver rate -- None once it has gone stale, i.e. a gap."""
-        rate = self._rate
-        if rate is not None and time.monotonic() - self._rate_at > SOLVER_IDLE_S:
-            rate = None
-        self.sparkline.push(rate)
-
+    # -- the one bar, and the caption under it ---------------------------------
     def _retarget(self, rows) -> None:
-        """Drive the overall bar from the DEEPEST live row that reports an informative percentage.
+        """Drive the overall bar from the non-degenerate bar with the LARGEST total.
 
-        `rows` EXCLUDES the solver bar, and must: the solver has a total in the tens of thousands and is
-        the deepest bar there is, so it would win this election every time and drag the overall bar
-        through a full 0->100% sweep every second or two. The overall bar's job is the top-level count.
+        `rows` EXCLUDES the solver bar, and must (trap S3).
 
-        Nor the outermost, and nor a sticky first-seen "driver" -- both of those peg the bar:
-          * the pos-0 bar ("Training neural posterior", pipeline.train_nn) wraps
-            range(TRAINING_NUM_ROUNDS) and that is 1 (config.TRAINING_NUM_ROUNDS), so it reads 0% for the
-            entire multi-hour build -- hence RowState.informative excludes total<=1 bars;
-          * sbi's neural-network training emits no tqdm bar at all (only a printed epoch counter), so
-            a driver latched onto "Generating training data" would sit at 100% through the longest
-            phase, which reads as finished or hung.
+        Largest-total, not deepest and not outermost:
+          * DEEPEST is what this used to do, and it is one config flip away from being wrong -- the
+            per-time-segment bar (core/Simulator/simulator.py) wraps segs in {1,2,3}, so with
+            config.QUIET_SEGMENT_BAR False it is both deeper and far coarser than "Generating
+            training data", and would sweep the overall bar 0->100% every couple of seconds. Largest
+            total is immune to that whole class. In every nest actually observed the two agree.
+          * OUTERMOST pegs the bar: the pos-0 bar ("Training neural posterior", pipeline.train_nn)
+            wraps range(TRAINING_NUM_ROUNDS) and that is 1 (config.TRAINING_NUM_ROUNDS), so it reads
+            0% for the entire multi-hour build -- hence RowState.informative excludes total<=1.
+          * A STICKY first-seen driver also pegs it: sbi's neural-network training emits no tqdm bar
+            at all (only a printed epoch counter), so a driver latched onto "Generating training
+            data" would sit at 100% through the longest phase, reading as finished or hung.
+
+        Ties on total break on depth, so the reading is at least stable rather than arbitrary.
         """
-        live = sorted((s for s in rows if s.informative), key=lambda s: s.row, reverse=True)
-        if not live:
+        driver = max((s for s in rows if s.informative),
+                     key=lambda s: (s.total, s.row), default=None)
+        if driver is None:
             self.overall.setRange(0, 0)
         else:
             self.overall.setRange(0, 100)
-            self.overall.setValue(live[0].pct)
+            self.overall.setValue(driver.pct)
+        self._paint_caption(driver, rows)
+        self._paint_detail(rows)
+
+    def _paint_caption(self, driver, rows) -> None:
+        """Name the stage the bar is measuring -- or, when nothing reports a percentage, the deepest
+        thing that is still saying something.
+
+        ⚠ The fallback is load-bearing, not a nicety: see the caption warning in the module docstring.
+        `total != 1` drops the degenerate `Training neural posterior -- 0/1` bar, which leaves sbi's
+        printed epoch counter (an overwrite-mode row, pct and total both None) as the only candidate
+        during neural-network training -- which is precisely what should be on screen for those hours.
+        """
+        if driver is not None:
+            self.caption.setText(f"{driver.desc}  —  {driver.stats}" if driver.stats else driver.desc)
+            return
+        speaking = [s for s in rows if (s.total or 0) != 1 and s.desc]
+        self.caption.setText(max(speaking, key=lambda s: s.row).desc if speaking else "")
+
+    def _paint_detail(self, rows) -> None:
+        """The full live nest, on the overall bar's tooltip -- the detail this pane stopped rendering
+        as rows, kept one hover away rather than deleted. setToolTip stores a string and triggers no
+        relayout, so it is safe to refresh on every snapshot."""
+        detail = "\n".join(
+            f"{'    ' * s.row}{s.desc}{('  —  ' + s.stats) if s.stats else ''}" for s in rows)
+        self.overall.setToolTip(detail or "Nothing is reporting progress right now.")

@@ -59,6 +59,13 @@ _RATE = re.compile(r"(?P<n>\d+(?:\.\d+)?)(?P<unit>it/s|s/it)")
 # the phase and the panel (during a posterior build it sits under two other bars; during FDT Campaign 1
 # it is the only bar there is). This prefix is unique across the repo -- core/Solvers/sdeint.py is its
 # sole producer.
+#
+# WHAT THIS IS FOR HAS CHANGED. It used to identify the bar whose rendered `it/s` was scraped for the
+# GUI's Solver Performance meter; that number now comes from core.progress.SOLVER, because a bar
+# shorter than its own mininterval never paints a rate (see progress_pane's module docstring). The
+# prefix survives purely to EXCLUDE this bar from the overall-bar election -- trap S3 -- and that use
+# is if anything more load-bearing now: the election is by largest total, and the solver's is in the
+# tens of thousands.
 _SOLVER_PREFIX = f"{SOLVER_BAR_DESC} (batch="
 
 
@@ -73,6 +80,7 @@ class RowState:
     pct: int | None     # None => indeterminate (total=None, or a bare status line)
     total: int | None   # the bar's total; 1 means the bar is degenerate and carries no information
     rate: float | None  # ITERATIONS PER SECOND (already inverted if tqdm reported s/it); None if unknown
+                        # -- part of a faithful frame parse; NOT the Solver Performance meter's source
     stats: str          # "1234/5000 [00:12<01:03, 59.4it/s]"
     raw: str            # the whole frame, ANSI-stripped
 
@@ -85,8 +93,13 @@ class RowState:
 
     @property
     def is_solver(self) -> bool:
-        """The SDE solver's per-step bar. It never becomes a progress row -- a posterior build creates
-        10k-30k of them, one per time segment -- it drives the Solver Performance meter instead."""
+        """The SDE solver's per-step bar, which the pane must never let drive the overall bar.
+
+        It used to also mean "this is the row the Solver Performance meter reads". It no longer does:
+        the meter differences core.progress.SOLVER instead, because scraping a rendered bar cannot
+        work for a call shorter than that bar's mininterval. This predicate is now purely an
+        exclusion (trap S3).
+        """
         return self.desc.startswith(_SOLVER_PREFIX)
 
 
@@ -104,7 +117,11 @@ def parse_rate(stats: str) -> float | None:
     """Iterations per second from a tqdm stats field, or None if the bar has not measured one yet.
 
     tqdm flips to `s/it` below 1 it/s (tqdm/std.py:557), so " 2.50s/it" means 0.4 it/s -- NOT 2.5. Read
-    naively, a crawling solver would report as a fast one.
+    naively, a crawling bar would report as a fast one.
+
+    KEPT ON PURPOSE even though the Solver Performance meter stopped reading it: parse_bar's contract
+    is a FAITHFUL parse of a tqdm frame, this is one regex against a string already in hand, and the
+    s/it inversion is knowledge that cost a bug to learn (trap S4).
     """
     m = _RATE.search(stats)
     if not m:

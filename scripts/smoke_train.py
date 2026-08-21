@@ -181,7 +181,7 @@ def main():
     # rotation and nowhere else.
     #
     # ⚠ CKPT_DIR WITHOUT PRIOR IS A SILENT NO-OP, and this is the whole reason PRIOR exists here.
-    # orchestrator._training_identity includes prior_fingerprint, and _gmm_fingerprint's own docstring
+    # orchestrator.training_identity includes prior_fingerprint, and _gmm_fingerprint's own docstring
     # says two runs over the SAME BOX produce different fits. So two runs that each BUILD a prior
     # resolve to two DIFFERENT directories under one CKPT_DIR: run 2 never resumes, reports
     # "N other checkpoint(s) exist and do NOT match this run: ... differs in prior_fingerprint", and

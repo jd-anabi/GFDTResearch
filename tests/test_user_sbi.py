@@ -2046,7 +2046,8 @@ def test_checkpoint_identity_digest_is_stable_and_field_sensitive():
     a = _ckpt_ident()
     assert tc.identity_digest(a) == tc.identity_digest(dict(reversed(list(a.items()))))
     assert tc.identity_digest(a) == tc.identity_digest(_ckpt_ident(t_scale_bounds=[1.0, 40.0]))
-    for key, val in (("run_size", 8), ("chi_k_pad", 6), ("model", "HOPF"), ("chi_mode", False)):
+    for key, val in (("run_size", 8), ("n_runs", 123), ("chi_k_pad", 6), ("model", "HOPF"),
+                     ("chi_mode", False)):
         assert tc.identity_digest(a) != tc.identity_digest(_ckpt_ident(**{key: val})), key
     assert len(tc.identity_digest(a)) == 12
 
@@ -2074,14 +2075,87 @@ def test_a_rebuilt_prior_routes_to_a_different_checkpoint():
         return torch.distributions.MixtureSameFamily(mix, comp)
 
     a, b = _gmm(1), _gmm(2)
-    ia = orchestrator._training_identity(cfg, a, 2048, 5000)
-    ib = orchestrator._training_identity(cfg, b, 2048, 5000)
+    ia = orchestrator.training_identity(cfg, a, 2048, 5000)
+    ib = orchestrator.training_identity(cfg, b, 2048, 5000)
     assert ia["prior_fingerprint"] and ia["prior_fingerprint"] != ib["prior_fingerprint"]
     assert tc.resolve_dir(ia) != tc.resolve_dir(ib), \
         "a rebuilt prior resolved to the SAME checkpoint directory; a resume would mix two priors"
-    assert tc.resolve_dir(ia) == tc.resolve_dir(orchestrator._training_identity(cfg, a, 2048, 5000)), \
+    assert tc.resolve_dir(ia) == tc.resolve_dir(orchestrator.training_identity(cfg, a, 2048, 5000)), \
         "the same prior must resolve to the same directory, or a resume can never find its rows"
 
+
+
+def test_the_training_budget_routes_to_a_different_checkpoint():
+    """THE HAZARD THAT MAKES THE GUI's BUDGET FIELDS DANGEROUS, pinned.
+
+    `build_posterior`'s `num_runs` / `run_size_cap` are now user-reachable from the Posterior tab, and
+    BOTH land in the checkpoint identity, which is digested into the checkpoint's DIRECTORY NAME. So
+    nudging either does not adjust a running job -- it silently routes to a directory that does not
+    exist yet and starts from zero, with no error anywhere. The Posterior tab states this inline
+    (PosteriorPanel._budget_checkpoint) rather than in a tooltip; this is the premise it rests on.
+    """
+    from core import cli as _cli, registry as _reg
+    from core.SBI import training_checkpoint as tc
+    m = "NADROWSKI"
+    cfg = _cli.make_sim_config(m, VALID_LABELS[VALID_MODELS.index(m)], _reg.state_dep_drift(m),
+                               str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
+    torch.manual_seed(0)
+    mix = torch.distributions.Categorical(probs=torch.rand(3))
+    comp = torch.distributions.MultivariateNormal(torch.randn(3, 13),
+                                                  torch.eye(13).expand(3, 13, 13))
+    prior = torch.distributions.MixtureSameFamily(mix, comp)
+
+    base = tc.resolve_dir(orchestrator.training_identity(cfg, prior, 2048, 5000))
+    narrower = tc.resolve_dir(orchestrator.training_identity(cfg, prior, 1024, 5000))
+    fewer = tc.resolve_dir(orchestrator.training_identity(cfg, prior, 2048, 2500))
+
+    assert base != narrower, "halving the batch width kept the SAME checkpoint directory"
+    assert base != fewer, "halving the batch count kept the SAME checkpoint directory"
+    assert narrower != fewer
+    assert base == tc.resolve_dir(orchestrator.training_identity(cfg, prior, 2048, 5000)), \
+        "the same budget must resolve to the same directory, or nothing could ever resume"
+
+
+def test_build_posterior_takes_the_budget_as_arguments_because_the_constants_are_snapshotted():
+    """orchestrator does `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE`, so both are bound
+    at IMPORT. A caller that "configures" a run by writing config.TRAINING_NUM_RUNS = 200 changes
+    nothing and gets 5000 batches with no warning -- days of simulation, silently.
+
+    This is why the budget is a pair of parameters. The signature check is the cheap half; the second
+    assertion is the one that would catch someone "simplifying" it back to reading the module.
+    """
+    import inspect
+    sig = inspect.signature(orchestrator.build_posterior).parameters
+    for name in ("num_runs", "run_size_cap"):
+        assert name in sig, f"build_posterior lost its {name} parameter"
+        assert sig[name].default is None, f"{name} must default to None (= follow the config constant)"
+        assert sig[name].kind is inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
+
+    src = inspect.getsource(orchestrator.build_posterior)
+    body = src[src.index('"""', src.index('"""') + 3):]      # past the docstring
+    for frozen in ("TRAINING_NUM_RUNS if num_runs is None", "TRAINING_RUN_SIZE if run_size_cap is None"):
+        assert frozen in body, \
+            f"build_posterior no longer resolves the budget from its arguments ({frozen!r} missing)"
+
+
+def test_peak_sim_elements_is_the_formula_the_memory_planner_actually_uses():
+    """The GUI shows a peak-memory estimate, and it must not carry its own copy of the cost model --
+    a second copy drifts the first time either is tuned, and a display that reassures you about a
+    number the planner does not use is worse than no display. So `_max_sim_batch` was refactored onto
+    the public `peak_sim_elements`; this pins that they are still one formula."""
+    from core.SBI import pipeline as pl
+
+    n_fine, steady, n_vars, n_ch, n_out = 283_000, 500, 3, 1, 1
+    seg = min(n_fine, config.CHUNK_LEN)
+    n_keep = n_out * max(0, n_fine - steady)
+    by_hand = n_vars * n_fine + n_ch * n_fine + max(n_vars * seg, n_keep)
+
+    assert pl.peak_sim_elements(1, n_fine, steady, n_vars, n_ch, n_out) == by_hand
+    assert pl.sim_keep_elements(n_fine, steady, n_out) == n_keep
+    # Linear in the batch, which is the whole reason splitting the batch is the lever.
+    assert pl.peak_sim_elements(2048, n_fine, steady, n_vars, n_ch, n_out) == by_hand * 2048
+    # The post-transient copy is what `steady_idx` removes; a config with no transient keeps more.
+    assert pl.sim_keep_elements(n_fine, 0, n_out) > pl.sim_keep_elements(n_fine, steady, n_out)
 
 def test_a_mismatched_sibling_checkpoint_is_reported_by_name():
     """The message that stands between the user and a silent restart from zero.

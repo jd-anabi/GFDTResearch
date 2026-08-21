@@ -37,6 +37,19 @@ def set_bool(qs: QSettings, key: str, value: bool) -> None:
     qs.setValue(key, "1" if value else "0")
 
 
+def get_int(qs: QSettings, key: str, default: int) -> int:
+    """QSettings hands back a STRING on Windows (the INI/registry backends are untyped), so an int
+    written as 5000 reads back as "5000" and int() has to be explicit. A missing or unparseable key
+    falls back to `default` rather than 0 -- 0 is a meaningful value for TRAINING_RUN_SIZE."""
+    raw = qs.value(key, None)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def get_bool(qs: QSettings, key: str, default: bool) -> bool:
     v = qs.value(key, None)
     if v is None:

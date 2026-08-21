@@ -5,45 +5,81 @@ import torch
 from tqdm import tqdm
 
 from core import config
+from core.progress import SOLVER
 
 
-def _step_iter(n: int, batch_size: int):
-    """tqdm wrapper for the per-step loop with overhead-minimizing settings.
+def _bar_kwargs(n: int, batch_size: int) -> dict:
+    """The solver bar's settings, shared by both constructions so they cannot drift apart.
 
-    `miniters` controls how often tqdm checks for a display refresh.
-    With ~1% of total per check, the per-iteration cost is just a counter
-    increment, which is essentially free even at 2.4M iterations.
+    `miniters` controls how often tqdm checks for a display refresh. At ~1% of total per check the
+    per-iteration cost is a counter increment, essentially free even at 2.4M iterations.
 
-    This bar runs in the GUI too, not just the CLI: its rendered `it/s` is what drives the GUI's
-    "Solver Performance" meter, and its percentage is the only thing that moves during a training
-    iteration (which takes ~10s, so the top-level bar looks frozen between ticks). The GUI finds it by
-    its desc -- hence config.SOLVER_BAR_DESC rather than a literal -- and shows it in a dedicated widget
-    rather than as a progress row. See core/gui/widgets/progress_pane.py.
+    ⚠ `mininterval` IS 0.1 (tqdm's own default) AND MUST NOT GO BACK UP TO 1.0. It was 1.0, with a
+    docstring explaining that a top-level iteration takes ~10 s. Since CUDA graphs landed (§8.3) a
+    100k-step call takes ~0.7 s -- SHORTER than a 1.0 s mininterval -- so tqdm painted the "?it/s"
+    opening frame and never a rate at all: measured 123 chars of stderr with no rate, against 670
+    chars containing `14152.92it/s` with graphs off. The CLI was left watching a bar that never
+    reports a speed. `miniters` gates refreshes as well and BOTH conditions must be met, but at
+    max(1000, n // 100) it is not the binding one -- 1000 steps is ~14 ms at the graphed rate, far
+    inside 100 ms -- which is why lowering mininterval alone is sufficient. AFTER, on the same call
+    (RTX 5070 Ti, batch 2048, T=100k, 0.811 s, 123 349 steps/s): 678 chars carrying 7 rate frames,
+    the first `128420.87it/s`. Pinned by
+    `test_the_solver_bar_paints_a_rate_even_when_the_call_is_under_a_second`, which asserts the
+    counterfactual too -- put mininterval back to 1.0 and that test fails rather than going quiet.
     """
-    return tqdm(
-        range(n - 1),
+    return dict(
         desc=f"{config.SOLVER_BAR_DESC} (batch={batch_size})",
         leave=False,
-        mininterval=1.0,
+        mininterval=0.1,
         miniters=max(1000, n // 100),
     )
 
 
 def _step_bar(n: int, batch_size: int):
-    """The same bar as :func:`_step_iter`, but driven manually via ``.update()``.
+    """The solver's per-step bar, driven manually via ``.update()``.
 
-    The graphed path advances the time loop a CHUNK at a time, so it cannot wrap an iterable. Same
-    desc and settings on purpose -- the GUI finds this bar by ``config.SOLVER_BAR_DESC`` and renders
-    its it/s as the "Solver Performance" meter, so a graphed run must advance it by the chunk size or
-    the meter reads 1/CHUNK of the truth.
+    The graphed path advances the time loop a CHUNK at a time, so it cannot wrap an iterable -- use
+    :func:`_advance`, never ``bar.update()`` alone, or the step counter and the bar disagree.
+
+    THE GUI NO LONGER READS THIS BAR'S TEXT. It used to: the "Solver Performance" meter was scraped
+    from the rendered ``it/s``, which is exactly the coupling the speedup above broke. The rate now
+    comes from ``core.progress.SOLVER``. What the GUI still does with this bar is EXCLUDE it -- by
+    ``config.SOLVER_BAR_DESC`` -- from the election that drives the overall bar, since its total is
+    in the tens of thousands and it would win every time (trap S3).
+
+    It also stays ENABLED under the GUI, deliberately, rather than being quieted the way
+    ``config.QUIET_SEGMENT_BAR`` quiets the segment bar: its redraws are the cooperative cancel's
+    most frequent checkpoint (trap C) and what feeds the stall detector's heartbeat through a long
+    batch. See core/gui/widgets/progress_pane.py.
     """
-    return tqdm(
-        total=n - 1,
-        desc=f"{config.SOLVER_BAR_DESC} (batch={batch_size})",
-        leave=False,
-        mininterval=1.0,
-        miniters=max(1000, n // 100),
-    )
+    return tqdm(total=n - 1, **_bar_kwargs(n, batch_size))
+
+
+def _step_iter(n: int, batch_size: int):
+    """The same bar as :func:`_step_bar`, as an ITERABLE over step indices, publishing as it goes.
+
+    A generator rather than the bare tqdm object, so the count is published once here instead of in
+    three separate caller loop bodies. Cost is one generator resume plus one integer add per step --
+    ~50 ns against a MEASURED 54.87 us/step for the eager loop this path serves, i.e. under 0.1%.
+
+    ⚠ ITERATE this; never hold it to call ``.close()``. The bar's close is tqdm's own ``finally``
+    inside ``__iter__``, and that is what trap C1's cancel-unwind relies on. Every call site is
+    ``for i in _step_iter(...)``, which unwinds correctly: a GeneratorExit here propagates into that
+    inner ``for``, so tqdm's finally still runs.
+    """
+    for i in tqdm(range(n - 1), **_bar_kwargs(n, batch_size)):
+        SOLVER.add(1)
+        yield i
+
+
+def _advance(bar, k: int) -> None:
+    """Advance the graphed path's bar AND the step counter by the same k.
+
+    Kept together on purpose: they are two views of one quantity, and a caller that updates only one
+    is a silent bug -- a graphed run that ticked once per replay would read 1/50th of the truth.
+    """
+    bar.update(k)
+    SOLVER.add(k)
 
 
 # --- CUDA Graph step capture ---------------------------------------------------------------------
@@ -227,7 +263,7 @@ class Solver:
                         f_s.copy_(sde.force[:, :, lo:lo + chunk])
                         g.replay()
                         xs[lo + 1:lo + 1 + chunk, :, :].copy_(out_s)
-                        bar.update(chunk)
+                        _advance(bar, chunk)
                     # Tail: the last n_steps % chunk steps, eager, continuing from the graph's state.
                     x = ent["x"].clone()
                     dW_buf = torch.empty((batch_size, d), dtype=x0.dtype, device=x0.device)
@@ -235,7 +271,7 @@ class Solver:
                         dW_buf.normal_()
                         x = step(x, sde.force[:, :, i], dW_buf, *params, dt, sqrt_dt)
                         xs[i + 1, :, :] = x
-                        bar.update(1)
+                        _advance(bar, 1)
                 finally:
                     bar.close()
                 return xs

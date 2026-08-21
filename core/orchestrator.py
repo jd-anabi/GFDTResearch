@@ -398,8 +398,12 @@ def _log_params_for(cfg: SimConfig):
     return list(spec.log_params)
 
 
-def _training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dict:
+def training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dict:
     """The config fields a training-data checkpoint must agree with before it can be resumed (C-11).
+
+    PUBLIC (it was `_training_identity`) because the GUI's Posterior tab computes it to tell the user,
+    before they press Train, whether their current Batches / rows-per-batch settings resume an
+    existing checkpoint or silently start a new run -- §9.6's private-name-across-boundaries rule.
 
     Deliberately the SAME key names save_posterior_artifacts writes into the .rot.pt sidecar, plus the
     training geometry the sidecar has no reason to carry. One vocabulary for "which run is this",
@@ -655,6 +659,7 @@ def build_posterior(
     choice: str | None,
     train_new: bool,
     *, save: bool = True, save_name: str | None = None, fig_sink=None,
+    num_runs: int | None = None, run_size_cap: int | None = None,
 ) -> tuple[TransformedPosterior, dict | None]:
     """
     Load an existing latent DirectPosterior from disk and wrap with T, or train a new one
@@ -666,7 +671,33 @@ def build_posterior(
     :param save_name: Name to save under; when None (and save=True) the CLI prompt is used.
     :param fig_sink: Optional (title, fig) -> None display callback for the training-loss curve
                      (a GUI embeds it); None keeps the CLI behavior (loss saved to PNG, not shown).
+    :param num_runs: Training BATCHES to simulate; None (the default) = config.TRAINING_NUM_RUNS,
+                     which is the CLI's behaviour and what every script and test gets.
+    :param run_size_cap: CEILING on simulations per batch, 0 = follow the hardware default; None =
+                     config.TRAINING_RUN_SIZE.
+
+    ⚠ WHY THESE ARE PARAMETERS AND NOT "JUST SET THE CONFIG CONSTANT". This module does
+    `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE`, which SNAPSHOTS both at import -- so a
+    caller writing `config.TRAINING_NUM_RUNS = 2000` is a silent no-op and the run uses 5000 anyway,
+    with nothing to say otherwise. (`scripts/smoke_train.py` gets this right by assigning to
+    `orchestrator.TRAINING_NUM_RUNS`; a GUI mutating a module global per run would also leak across
+    runs.) Passing them keeps the CLI byte-identical and makes the override explicit and testable.
+
+    ⚠ AND THEY ARE NOT INTERCHANGEABLE BUDGET KNOBS. Each batch shares ONE Sobol (t_scale_k, T_k)
+    pair, overridden for every row in it -- so `num_runs` is the (t_scale, T) DIVERSITY count and the
+    run size is rows per operating point. 5000x2048 and 10000x1024 have equal totals and different
+    statistics (trap X5 states the same thing for calibration). Batch WIDTH is also nearly free in
+    wall-clock -- the solver is kernel-launch-bound; measured 7.37 s at 2048 against 7.74 s at 1024 --
+    so narrowing it does not speed anything up, it trades training rows for peak VRAM about 1:1.
     """
+    # Resolved before anything reads them: both are part of the checkpoint identity below.
+    n_runs = TRAINING_NUM_RUNS if num_runs is None else int(num_runs)
+    size_cap = TRAINING_RUN_SIZE if run_size_cap is None else int(run_size_cap)
+    if n_runs < 1:
+        raise ValueError(f"num_runs must be at least 1, got {n_runs}")
+    if size_cap < 0:
+        raise ValueError(
+            f"run_size_cap must be >= 0 (0 = follow the hardware default), got {size_cap}")
     # Above BOTH branches, and the load branch is the subtle half. _assert_mode_matches compares the
     # posterior against cfg -- so a STALE cfg loading the posterior trained under that same stale cfg
     # agrees with itself and says nothing, while every inference it serves is at a retired band. This
@@ -758,11 +789,15 @@ def build_posterior(
     # silent, and the printed row count is also the check that TRAINING_NUM_RUNS was moved to match.
     # Resolved HERE, above the rotation, because the checkpoint's identity includes it.
     run_size = cfg.hw.batch_size
-    if TRAINING_RUN_SIZE and TRAINING_RUN_SIZE < run_size:
-        print(f"Training batch capped at {TRAINING_RUN_SIZE} (hardware default {run_size}) — "
-              f"{TRAINING_NUM_RUNS} batches x {TRAINING_RUN_SIZE} = "
-              f"{TRAINING_NUM_RUNS * TRAINING_RUN_SIZE:,} training rows.")
-        run_size = TRAINING_RUN_SIZE
+    if size_cap and size_cap < run_size:
+        print(f"Training batch capped at {size_cap} (hardware default {run_size}) — "
+              f"{n_runs} batches x {size_cap} = {n_runs * size_cap:,} training rows.")
+        run_size = size_cap
+    if n_runs != TRAINING_NUM_RUNS:
+        # Announced for the same reason the cap is: a batch count that changes the shape (and the
+        # (t_scale, T) diversity) of a multi-day run is not allowed to be silent.
+        print(f"Training batch COUNT overridden: {n_runs} batches (config default "
+              f"{TRAINING_NUM_RUNS}) — {n_runs * run_size:,} training rows.")
 
     # --- training-data checkpoint (C-11): resolved BEFORE the rotation, because a resume REUSES V ---
     # This ordering is the whole reason the resume works with rotation ON, which is how the retrain is
@@ -774,7 +809,7 @@ def build_posterior(
     # pre-training cost.
     ckpt_dir = ckpt_resumed = None
     if TRAINING_CHECKPOINT_EVERY and train_new:
-        ident = _training_identity(cfg, prior, run_size, TRAINING_NUM_RUNS)
+        ident = training_identity(cfg, prior, run_size, n_runs)
         ckpt_dir = training_checkpoint.resolve_dir(ident)
         _st = training_checkpoint.peek(ckpt_dir)
         # A COMPLETE checkpoint counts too, and deliberately so. Its rows are already expressed in the
@@ -797,7 +832,7 @@ def build_posterior(
             V = V.to(device=cfg.hw.device, dtype=cfg.hw.dtype)
         _done = _st["batches_done"]
         print(f"Reusing the Fisher rotation stored with the training checkpoint "
-              f"({_done}/{TRAINING_NUM_RUNS} batches"
+              f"({_done}/{n_runs} batches"
               f"{' — COMPLETE, so generation will be skipped' if _st.get('complete') else ''}) — NOT "
               f"recomputing it: the rotation's operating points are not reproducible across "
               f"processes, so a fresh V would put the reused rows in a different coordinate than the "
@@ -820,7 +855,7 @@ def build_posterior(
         "prior": train_prior,                         # <-- latent (rotated if REPARAM_ROTATE)
         "t": cfg.t,
         "run_size": run_size,
-        "num_runs": TRAINING_NUM_RUNS,
+        "num_runs": n_runs,
         "steady_idx": cfg.steady_idx,
         "dt_nd_min": cfg.dt_nd_min,
         "dt_exp": cfg.dt_exp,

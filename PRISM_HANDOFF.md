@@ -67,13 +67,13 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `tests/test_gui_progress.py` | 79 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3) |
+| `tests/test_gui_progress.py` | 89 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5) |
 | `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
-| `tests/test_user_sbi.py` | 60 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
+| `tests/test_user_sbi.py` | 63 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 14 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **220** | |
+| **Total** | **233** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -115,8 +115,8 @@ core/
                   make_reduction_config / make_param_sweep_config), _parse_cell, _SWEEP_PRESETS,
                   UnitParseError.
   config.py       Constants + the SimConfig/FDTConfig dataclasses. detect_device()/cpu_device(),
-                  paths, VALID_MODELS/VALID_LABELS, TRAINING_*, CHI_*, QUIET_SEGMENT_BAR,
-                  SOLVER_BAR_DESC, memory_budget_elements().
+                  paths, VALID_MODELS/VALID_LABELS, TRAINING_*, CHI_*, SOLVER_CUDA_GRAPHS,
+                  QUIET_SEGMENT_BAR, SOLVER_BAR_DESC, memory_budget_elements().
   orchestrator.py The 5 stage functions: generate_observations -> build_prior -> build_posterior ->
                   validate_calibration -> infer_and_visualize. Plus save_*_artifacts and _emit/fig_sink.
   registry.py     Runtime model registry (ModelSpec, register, load_user_models, is_user_model,
@@ -125,7 +125,11 @@ core/
                   build_user_force_tensor, and n_force_channels (the shared channel rule).
   Models/         nadrowski_model, hopf_model, bp_model(+_steady), user_model (sympy parse + torch).
   Simulator/      Simulator ABC + per-model subclasses + UserSimulator. SimulationError lives here.
-  Solvers/sdeint.py  Euler-Maruyama (eager + torch.compile fast path) and an unused implicit solver.
+  progress.py     A monotonic count of completed SDE steps, published by the solver and sampled
+                  by whichever front-end wants a rate. Qt-free, torch-free (§10.5).
+  Solvers/sdeint.py  Euler-Maruyama: an eager loop, and a TorchScript step replayed from a CUDA
+                  graph (§8.3). The `torch.compile fast path` and the `unused implicit solver`
+                  this line used to name never existed / were deleted (§7.7).
   SBI/            pipeline (gen_obs/gen_stats/gen_training_data/train_nn/gen_chi_raw+gen_chi_block),
                   statistics (the 41 features), chi (chi(omega) math + the probe-set PACKER),
                   chi_encoder (ChiSetEncoder: the permutation-invariant probe-set encoder),
@@ -166,7 +170,8 @@ core/gui/
   screens/      nav_shell, home_screen, section_screen, inference_screen (owns SbiSession +
                 refresh_gates), settings_screen, model_builder_screen.
   panels/       base_panel (BasePanel: controls column | results column; dispatch()),
-                inference_tabs (the FIVE inference tabs), fdt_panel, reduction_panel,
+                inference_tabs (the FIVE inference tabs; Posterior also owns the TRAINING
+                BUDGET — batches x rows-per-batch — see §6 row 5), fdt_panel, reduction_panel,
                 crossval_panel, simulate_panel + simulate_runner + simulate_export.
   widgets/      artifact_picker, figure_stack, figure_window, log_pane, progress_pane,
                 live_hair_bundle, labeled_inputs, help_badge, param_grid, source_toggle, anim.
@@ -1279,28 +1284,63 @@ up-move of n*.
   prior sweeps call both on every iteration.
 - **P6. Rows are keyed by tqdm `pos`, NOT by desc.** The prior sweeps rewrite desc with a live counter
   every iteration; a desc-keyed map would mint a row per iteration — the original bug, reborn.
-- **P7. The overall bar tracks the DEEPEST live row whose total > 1.** Not the outermost (the pos-0
-  "Training neural posterior" bar wraps `range(1)` and would read 0% for the whole build), and not a
-  sticky first-seen driver (sbi's NN training emits no tqdm bar at all, only a printed epoch counter).
+- **P7. The overall bar tracks the live row with the LARGEST total, among those whose total > 1.**
+  Not the outermost (the pos-0 "Training neural posterior" bar wraps `range(1)` and would read 0%
+  for the whole build), and not a sticky first-seen driver (sbi's NN training emits no tqdm bar at
+  all, only a printed epoch counter). ⚠ **It was DEEPEST until 2026-08-21** and that was one config
+  flip from being wrong: `Running time segments` wraps segs in {1,2,3}, so it is both deeper and far
+  coarser than `Generating training data` and would sweep the bar 0→100 % every couple of seconds —
+  `QUIET_SEGMENT_BAR` was papering over the election rule. On every nest actually observed the two
+  rules agree; the test that separates them is
+  `test_the_overall_bar_follows_the_largest_non_degenerate_total` (verified non-vacuous: deepest
+  gives 66 %, largest-total gives 38 %).
+- **P9. There is exactly ONE bar and ONE caption on screen, and the caption is load-bearing.** The
+  full nest is still parsed; it is rendered as one bar plus one line. When nothing reports a
+  percentage the caption falls back to the deepest row whose total is not 1 — which during sbi's
+  neural-network training is its printed epoch counter, and that is *hours* of a multi-day build.
+  Delete that fallback and the longest phase of the run becomes a blank indeterminate bar.
 - **P8. `close(leave=True)` at pos 0 paints the final frame then writes a bare `"\n"`** — byte-identical
   to a moveto(+1). Treat it naively and the finished bar stays in the pane at 100% and pegs the overall
   bar while the pipeline is still working. `StreamRouter._settle_closing()` resolves it on later evidence.
 
 ### S — Solver performance meter (`widgets/progress_pane.py`)
 
-A top-level iteration takes ~10 s, so the overall bar sits still and the GUI reads as frozen. The
-thing that *is* moving is the SDE solver, and its it/s is the number the user wants.
+The overall bar moves slowly, so the GUI can read as frozen. The thing that *is* moving is the SDE
+solver, and its it/s is the number the user wants.
 
-- **S1. The solver bar is found by its DESC PREFIX** (`config.SOLVER_BAR_DESC` → `"step (batch="`),
-  **never by its row.** Its tqdm `pos` is 0, 1 or 2 depending on phase and panel.
-- **S2. The solver bar must NEVER become a progress row.** A posterior build constructs 10k–30k of
-  them — one per time segment — so a row would mean creating and destroying a widget every few seconds.
-- **S3. The solver bar must be EXCLUDED from `_retarget()`.** Its total is in the tens of thousands
-  and it is the deepest bar, so it would win the "deepest informative row" election every time and
-  drag the overall bar through a full 0→100% sweep every second.
-- **S4. tqdm flips to `s/it` BELOW 1 it/s**, so `" 2.50s/it"` means 0.4 it/s, not 2.5.
-  `vt.parse_rate()` inverts it — read naively, a crawling solver would show *more* plus signs the
-  slower it got.
+> ### ⚠ S0 — THE METER DOES NOT READ THE SOLVER BAR. DO NOT MAKE IT DO SO AGAIN.
+>
+> It did, until 2026-08-21: the rate was parsed out of the *rendered text* of the solver's tqdm bar.
+> That has exactly one failure mode and it fired — tqdm paints a frame carrying a rate only once
+> `mininterval` has elapsed, so a solver call **shorter than its own bar's mininterval** renders
+> `?it/s` and nothing else, forever. CUDA graphs took a 100 k-step call from ~10 s to ~0.7 s and the
+> meter read `— (idle)` for entire runs. **A 10× speedup made a progress bar too fast to render.**
+>
+> The rate now comes from **`core.progress.SOLVER`**, a monotonic step count the solver publishes and
+> the pane differences on its existing 100 ms tick. That is correct at any speed, including the next
+> speedup. Anything that reintroduces a dependency on rendered bar text reintroduces this bug.
+
+- **S1. The solver bar is still found by its DESC PREFIX** (`config.SOLVER_BAR_DESC` →
+  `"step (batch="`), **never by its row** (its tqdm `pos` is 0, 1 or 2 depending on phase and panel)
+  — but now for one purpose only: **exclusion**. See S3.
+- **S2. The solver bar must never be rendered.** Nothing is rendered as a row any more (P9), but a
+  posterior build constructs 10k–30k of these bars, one per time segment, so this stays the reason
+  any future "show me the bars" feature must special-case it.
+- **S3. The solver bar must be EXCLUDED from `_retarget()`**, and this is *more* load-bearing than it
+  was: the election is now by largest total (P7) and the solver's is in the tens of thousands, so it
+  would win outright and drag the overall bar through a full 0→100 % sweep every second.
+- **S4. `vt.parse_rate` still inverts tqdm's `s/it`** (`" 2.50s/it"` is 0.4 it/s, not 2.5 — read
+  naively a crawling bar reports as a fast one). It is **no longer load-bearing**: nothing acts on
+  `RowState.rate`. It is kept because `parse_bar`'s contract is a faithful parse of a frame and the
+  inversion is knowledge that cost a bug — not because anything reads it.
+- **S5. The solver bar stays ENABLED under the GUI**, deliberately, unlike the segment bar that
+  `config.QUIET_SEGMENT_BAR` silences — even though silencing it would delete the desc seam entirely.
+  Two things depend on it still writing: the cooperative **cancel**, whose checkpoint is
+  `_SignalStream.write()` and for which this is by far the most frequent writer (the next-most is the
+  per-batch `Generating training data` redraw, ~2 s at production geometry and longer at large
+  `T_obs`); and the **stall detector**, which fires on no output of any kind. Cost of keeping it is
+  ~600 chars per 0.7 s call. *(The pane's `_sample_solver` also heartbeats on a moving counter, so
+  the stall side is now belt-and-braces — the cancel side is not.)*
 
 ### C — Cancellation (`core/gui/streams.py`)
 
@@ -1608,6 +1648,18 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   ~435 GiB over a run. It presents as *"checkpointing got slow"*, never as a wrong answer, so no
   correctness test catches it — `test_checkpoint_shards_do_not_serialize_the_whole_accumulator`
   exists solely to pin the file SIZE.
+- **X12. `from .config import NAME` SNAPSHOTS the value at import, so writing `config.NAME = x` at
+  runtime is a SILENT no-op.** `orchestrator.py` binds `TRAINING_NUM_RUNS`, `TRAINING_RUN_SIZE` and a
+  dozen more this way, so a caller that "configures" a run by assigning to `core.config` changes
+  nothing, gets the default, and is told nothing — which for the training budget is days of
+  simulation at the wrong size. Three shapes of fix are already in the repo and they are not
+  interchangeable: read through the MODULE (`config.QUIET_SEGMENT_BAR` — for a process-wide flag),
+  carry it ON THE CONFIG (`SimConfig.chi_mode`, `reparam_rotate` — for anything a trained artifact
+  must be self-describing about), or take it as a PARAMETER defaulting to the constant
+  (`build_posterior(num_runs=…, run_size_cap=…)` — for a per-run override). Assigning to the
+  *orchestrator's* attribute (`orchestrator.TRAINING_NUM_RUNS = n`, which `scripts/smoke_train.py`
+  does) works but is process-global and leaks into the next run, so it is fine for a one-shot script
+  and wrong for a GUI.
 - **X11. On CUDA, a TorchScript step is NOT bitwise reproducible until it has warmed up.** The
   profiling executor runs a scripted function's first invocations unoptimised, then specialises and
   fuses; the fused kernel differs by ~1 ULP. **Measured: three consecutive eager runs of a fully
@@ -1650,20 +1702,23 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 ## 6. Open backlog
 
-> ### ▶ PICK UP HERE (as of 2026-08-13)
+> ### ▶ PICK UP HERE (as of 2026-08-21)
 >
 > The retrain is the priority and it is **the user's to run**, through the GUI (§4.1 step 5). It is
 > now checkpointed, so a crash costs one interval rather than the run. Everything below is small and
 > independent of it; nothing here blocks it.
 >
-> **Rows 1 and 2 are DONE (2026-08-13) — see the top Appendix A entry.** What is left needs a display
-> or a decision, and neither is something a coding session can close on its own:
+> **Rows 0, 1 and 2 are DONE** (row 0 on 2026-08-21, rows 1–2 on 2026-08-13 — see Appendix A).
+> **What is left needs a display or a decision, and neither is something a coding session can close
+> on its own** — so unless the user asks for something new, the next move is the retrain:
 >
 > | # | What | Why it is worth doing | Size |
 > |---|---|---|---|
 > | ~~1~~ | ~~**Migrate the remaining non-atomic writes.**~~ `save_posterior_artifacts` (all three writes), `save_mix_dist` (hence `save_prior_artifacts`) and `retrain_convergence.py` now go through `file_manager.atomic_torch_save` / the new `atomic_savez`. **`FDT/cross_validation` was deliberately NOT migrated** and the reason is recorded at the function: its output path is TIMESTAMPED, so there is no existing file for atomicity to protect, and staging through a temp sibling would only rename "partial file at X" to "partial file at X.tmp" while destroying the incremental readability `load_param_sweep` is built around. | ✅ **DONE 2026-08-13** |
 > | ~~2~~ | ~~**Two hardcoded plot colours.**~~ Done, and neither was what the row assumed — read the Appendix entry before "improving" either. `Reduction/plots.py`'s white **is correct and must stay** (its backdrop is viridis, not the page); the real defect was its invisible LEGEND swatch, fixed with a `text.color` halo. `FDT/plots.py` moved to `axes.edgecolor`, **not** `grid.color` — that was tried and is worse. | ✅ **DONE 2026-08-13** |
-> | 3 | **Eyeball the new GUI surfaces on a real display**: the application icon (taskbar + window), and the model builder's `_ParamRow`, which became TWO lines when it gained the box selector. | Headless tests cover the wiring, never the pixels — the standing rule in the last row of this table. Both are new since 2026-08-12 and no human has seen either. **Add to the list: the two figures above** — they were verified by rendering to PNG under both themes plus plain matplotlib, which is stronger than a headless test but still not a human looking at the app. | minutes |
+> | ~~0~~ | ~~**Rework the progress display: ONE overall bar, plus a Solver Performance rate with NO bar.**~~ Both parts done. The meter no longer parses a rendered bar at all — the solver publishes a step count (`core/progress.py`) that the pane differences on its 100 ms tick, which is correct at any speed rather than at speeds slow enough for tqdm to paint. The pane renders one bar + one caption; the nest lives on the bar's tooltip. **Read §10.5 before touching it** — two things there are not obvious: the caption's fallback is what keeps sbi's NN training visible for hours, and the solver's tqdm bar is deliberately left ENABLED under the GUI because it is the cancel's checkpoint. | ✅ **DONE 2026-08-21** |
+> | ~~5~~ | ~~**Expose the training budget.**~~ *(Asked for 2026-08-21 while §10.5 was being verified: "how many simulations per batch, and should that be user-configurable?")* The answer was **5000 batches x 2048 rows = 10,240,000 simulations**, invisible outside `config.py`. Now on the Posterior tab as **Batches** + **Max rows per batch**, with three derived lines: the simulation count, a peak-VRAM estimate read from `pipeline.peak_sim_elements`, and the checkpoint status. **Read the Appendix A entry before changing any of it** — batch width is not a speed knob, the two fields are not interchangeable, and both sit in the C-11 checkpoint identity. | ✅ **DONE 2026-08-21** |
+> | 3 | **Eyeball the new GUI surfaces on a real display**: the application icon (taskbar + window); the model builder's `_ParamRow`, which became TWO lines when it gained the box selector; **the reworked progress pane (§10.5, new 2026-08-21)** — one bar, one caption, a solver rate with no bar; and **the Posterior tab's new Training-budget group**, which is three wrapped derived lines and is the likeliest thing yet to overflow the controls column. | Headless tests cover the wiring, never the pixels — the standing rule in the last row of this table. Both are new since 2026-08-12 and no human has seen either. **Add to the list: the two figures above** — they were verified by rendering to PNG under both themes plus plain matplotlib, which is stronger than a headless test but still not a human looking at the app. | minutes |
 > | 4 | **Decide the ND log-SAMPLING question** (S-1's remaining half). | `"box": "log"` changes the coordinate the GMM is fitted in; it does **not** move prior mass, because `UserPrior._global_map` still samples uniformly in the linear box. Making the sweep geometric is a *science* decision and would have to move the built-ins too. **Not a coding task — needs the user's call first.** | — |
 >
 > Do **not** re-open: B-c, B-e, S-1's `(lo, hi)` half, C-1 through C-11, or §9.1/§9.2 — all done, and
@@ -1982,9 +2037,12 @@ materialised block of zeros (2.29 → 1.82 GiB, verified identical checksum thro
   stay patchable at call time) and not a module-level `Solver` singleton (same trap). A per-Solver
   cache would also be useless — `Solver` is constructed once per *time segment*, so it would
   recapture constantly. Pinned by `test_the_graph_cache_is_not_hung_off_the_solver_class`.
-- **The bar must be advanced by the chunk.** `_step_bar` exists for this; the GUI finds the solver
-  bar by `config.SOLVER_BAR_DESC` and renders its it/s as the Solver Performance meter, so a graphed
-  run that ticked once per replay would read 1/50th of the truth (trap S).
+- **The bar must be advanced by the chunk** — and so must the step counter. Both go through
+  `sdeint._advance(bar, k)`, which exists precisely so a caller cannot update one and forget the
+  other: a graphed run that ticked once per replay would read 1/50th of the truth. ⚠ **The GUI's
+  Solver Performance meter no longer reads this bar** (trap **S0**, 2026-08-21) — it reads
+  `core.progress.SOLVER`, because this very speedup made the bar too fast to render a rate. The
+  bar's own `it/s` still matters to the CLI, which has nothing else.
 - **Capture failure falls back to the eager loop** and disables further attempts for the process,
   with one printed line. A solver that refuses to run is worse than a slow one.
 
@@ -2272,7 +2330,312 @@ the growth policy was Qt's `FieldsStayAtSizeHint`, field minimums were 0, and bo
 
 ---
 
+### 10.5 Progress display: ONE overall bar + a Solver Performance rate with NO bar — ✅ DONE 2026-08-21
+
+**Requested 2026-08-21, shipped the same day.** What is on screen now:
+
+```
+Solver Performance: +++++  (142.4k it/s)   [sparkline]
+[███████░░░░░░░░░░░░░  38%]  ⠹
+Generating training data  —  1902/5000 [05:12<13:41]
+```
+
+One bar. One caption. A solver rate with no bar of its own. The full nest is still *parsed* — nothing
+in `core/gui/vt.py` changed — it is just rendered as one line, with the whole live set on the overall
+bar's **tooltip**, one hover away rather than deleted.
+
+#### (a) The rate: a published counter, not a parsed bar
+
+**The regression, reproduced exactly before anything was changed** — `tqdm 4.67.1`, the real bar
+settings, a synthetic 100 k-step bar paced to 0.7 s (no GPU needed):
+
+| `mininterval` | `miniters` | stderr | rates rendered |
+|---|---|---|---|
+| **1.0 (as shipped)** | 1000 | **123 chars** | **none** — only the `?it/s` opening frame |
+| 0.1 | 1000 | 601 chars | 6, e.g. `142353.52it/s` |
+| 0.1 | 100 | 601 chars | 6 |
+| 0.05 | 1000 | 1139 chars | 13 |
+
+123 chars and zero rates is byte-for-byte what was measured on the real run, so the reproduction is
+faithful. **It also settles the ⚠ this section used to raise: `miniters` is NOT the blocker.** At
+`SOLVER_GRAPH_CHUNK = 50`, 1000 steps is 20 `update()` calls ≈ 14 ms — far inside a 100 ms
+`mininterval`. Lowering `mininterval` alone is sufficient, and it *was* lowered (1.0 → 0.1, tqdm's own
+default) — **but for the CLI, which has nothing but the bar and was equally blind.**
+
+**The GUI does not read the bar at all any more**, because `mininterval` is a *time* gate and so this
+whole failure class returns for any call shorter than whatever it is set to. Instead:
+
+- **`core/progress.py`** — `SOLVER`, a monotonic count of completed steps. Qt-free, torch-free,
+  CLI-safe. One writer (the thread running the solver), many readers; never reset, because readers
+  take *differences* and a reset would present as a negative rate.
+- **`sdeint._step_iter`** publishes one step per iteration (a generator wrapping the tqdm object —
+  ~50 ns against a measured 54.87 µs/step eager, i.e. under 0.1 %); **`sdeint._advance(bar, k)`**
+  publishes the graphed path's chunk *and* advances the bar, so a caller cannot update one and forget
+  the other.
+- **`ProgressPane._sample_solver`** differences the counter on the 100 ms tick it already ran for the
+  spinner, EMA-smoothed at 0.3 (tqdm's own weight, so the number reads the way the CLI's bar does).
+
+That is correct at *any* speed, including the next speedup. `SOLVER_IDLE_S` came down 45 → **8 s**:
+45 s was sized to bridge ~1 s gaps between rate frames on ~10 s calls; with samples every 100 ms it
+only has to bridge the non-solver work *between* calls, and 45 s meant showing a stale number well
+into neural-network training. The `QProgressBar` step strip is gone — that is the "with NO bar" half.
+
+#### (b) One bar, and the caption that is not decoration
+
+> ### ⚠ THE THING THIS SECTION'S ORIGINAL SPEC MISSED
+>
+> "Render no other rows" taken literally **blacks out the longest phase of the entire run.** sbi's
+> neural-network training emits *no tqdm bar at all* — it prints `"\r"` + `Training neural network.
+> Epochs trained: N`, which `vt` turns into an overwrite-mode row with `pct is None` (trap P7, pinned
+> by `test_sbi_epoch_counter_becomes_a_progress_row_not_log_spam`). During that phase — hours of a
+> multi-day build — the only live rows are that status line and a degenerate `total=1` bar. With rows
+> deleted and no caption, the pane would show an indeterminate bar and nothing else.
+>
+> Hence `_paint_caption`'s fallback: **when nothing reports a percentage, show the deepest row whose
+> total is not 1.** Do not "simplify" it away.
+
+**The election rule changed too, and this was not cosmetic.** It was *deepest informative row*; it is
+now *largest non-degenerate `total`* (ties broken on depth). Deepest was one config flip from being
+wrong: `Running time segments` wraps `segs` in {1,2,3}, so it is both deeper and far coarser than
+`Generating training data` — `config.QUIET_SEGMENT_BAR` was papering over the election rule rather
+than merely tidying the display. The two rules agree on every nest actually observed;
+`test_the_overall_bar_follows_the_largest_non_degenerate_total` is the case that separates them, and
+was **verified non-vacuous** (deepest → 66 %, largest-total → 38 %).
+
+#### Deliberately NOT done: quieting the solver bar under the GUI
+
+It is tempting — it would delete the `SOLVER_BAR_DESC` seam outright, the way `QUIET_SEGMENT_BAR`
+deletes the segment bar. **Do not.** Two things depend on that bar still writing:
+
+- **Cancellation** (trap **C**) is cooperative and its checkpoint is `_SignalStream.write()`. During
+  training-data generation the solver bar is by far the most frequent writer; the next-most is the
+  per-batch `Generating training data` redraw, ~2 s at production geometry and longer at large
+  `T_obs`. Quieting it turns ~0.1 s cancel latency into one batch.
+- **The stall detector** fires on no output of *any* kind for `STALL_S`. *(This side is now
+  belt-and-braces — `_sample_solver` heartbeats on a moving counter — but the cancel side is not.)*
+
+Cost of keeping it: ~600 chars per 0.7 s call through the router. Negligible.
+
+`vt.parse_rate` / `RowState.rate` were **kept** although nothing acts on them now: `parse_bar`'s
+contract is a faithful parse of a tqdm frame, it is one regex against a string already in hand, and
+the `s/it` inversion is knowledge that cost a bug (trap **S4**).
+
+#### Verification
+
+`tests/test_gui_progress.py` is 79 → **83**: two solver-meter tests rewritten, four added — the CLI
+bar's rate over a sub-second call *with its counterfactual* (`mininterval=1.0` must render none, or
+the test proves nothing), the caption's fallback to the epoch counter, and the largest-total election.
+Plus an end-to-end smoke of the real solver → `redirect_streams` → pump → a real `ProgressPane` on
+CPU: **a live rate on 195 of 196 ticks (99 %)**, against 0 % before. And a cancel raised from *inside*
+the solver's step loop: it unwound in well under a second and the next `tqdm` bar did not deadlock —
+the generator `_step_iter` became sits inside trap **C1**'s unwind path, so this was run rather than
+argued. A cheap structural guard on the same property is now in the suite
+(`test_the_solver_step_iterator_closes_its_bar_when_the_consumer_raises`) — C1's own test *hangs*
+rather than failing, which is a bad way to find out.
+
+**Measured on the real graphed path (RTX 5070 Ti, batch 2048, `T = 100 000`, `CHUNK = 50`):**
+
+| | wall | steps/s | stderr | rate frames |
+|---|---|---|---|---|
+| graphs ON | 0.811 s | **123 349** | 678 chars | **7** (first `128420.87it/s`) |
+| graphs OFF | 7.912 s | 12 639 | 6059 chars | 78 |
+
+The ON row is the case that used to emit 123 chars and **zero** rate frames. Step accounting is exact
+on both paths at a geometry with a partial tail (2 full chunks + 3 leftover steps → 102 published,
+102 expected), which is what pins `_advance` across the chunked replay *and* the eager remainder.
+
+**Still owed: a human looking at it.** Headless tests cover the wiring, never the pixels — this is on
+§6 row 3's eyeball list with the app icon and `_ParamRow`.
+
+---
+
 # Appendix A — Change history
+
+## 2026-08-21 (later) — the training budget, and the answer to "how many simulations per batch?"
+
+Asked while §10.5's suites were still running. The factual answer, which was not written down
+anywhere and was reachable only by reading `config.py`:
+
+| | | |
+|---|---|---|
+| simulations per training batch | **2048** | `cfg.hw.batch_size` — `2**11` CUDA/fp32, `2**10` fp64, `2**6` CPU |
+| batches | **5000** | `config.TRAINING_NUM_RUNS` |
+| **total per training round** | **10 240 000** | and ×(1+K)≈8 solver passes per row in χ mode |
+
+`_max_sim_batch` may still SPLIT a batch's solver call against that batch's own geometry, but the
+training batch is 2048 rows either way.
+
+### Why the obvious version of this feature would have been a trap
+
+The request was "expose both, with a memory warning in the tooltip". A tooltip is the weakest
+available guard for these two, for three reasons that are all measured or in the code already:
+
+- **Batch width is not a memory-vs-SPEED knob, it is a memory-vs-ROWS knob.** `config.py`'s own note
+  records 7.37 s at 2048 against **7.74 s at 1024** on this card — the *smaller* batch is slightly
+  *slower*, because the solver is kernel-launch-bound. "Lower this if you run out of memory" silently
+  halves the training set at unchanged wall-clock.
+- **The two fields are not interchangeable budget knobs, they are statistics.** Each batch shares ONE
+  Sobol `(t_scale_k, T_k)` pair, overridden for every row — so batch COUNT is the operating-point
+  diversity and width is replication per point. 5000×2048 and 10000×1024 have equal totals and
+  different training sets. Trap **X5** already says exactly this for calibration.
+- **⚠ Both sit inside the C-11 checkpoint identity, which is digested into the checkpoint's DIRECTORY
+  NAME.** Nudge either and a resumable multi-day run resolves to a directory that does not exist:
+  no error, just a run that starts from zero. That is not tooltip material.
+
+### So: a read-out first, an escape hatch second, and a hard inline status
+
+The Posterior tab gained **Batches** and **Max rows per batch (0 = auto)** plus three derived lines
+that update as you type:
+
+1. `10,240,000 simulations = 5,000 batches x 2,048 rows`, and the sentence that batch count is the
+   `(t_scale, T)` diversity — so the trade is on screen, not in a tooltip nobody opens.
+2. A peak-VRAM estimate at **the worst geometry the Sobol pre-filter admits** (`n_fine ≤ min(N_ND_MAX,
+   len(t))`), because that is the case that OOMs — the median is ~40 k and the p99 ~283 k, and both
+   2026-08-10 and 2026-08-11 died in the tail. It reads `pipeline.peak_sim_elements` and
+   `sim_memory_budget_elements` rather than restating the formula, so it cannot drift from the
+   planner. It also says the budget is an **upper bound**, since the free-VRAM reading overstates by
+   roughly the size of the desktop.
+3. Checkpoint status: resumes / starts a new run, and when it is a new run,
+   `training_checkpoint.describe_siblings` names **the field that differs**.
+
+> **A measurement the read-out produced immediately, and it is worth knowing before the retrain:**
+> at the default 2048 rows the worst admissible geometry needs **~11.44 GiB** against a planner
+> budget of **~12.48 GiB** on an idle card. That is a ~1 GiB margin against a number that is itself an
+> over-estimate of free VRAM — which is a much sharper way of saying what §4.1 says about closing
+> browsers, and it is now visible before you press Train rather than inferable after an OOM.
+
+### The wiring detail that would have made the whole feature a no-op
+
+`orchestrator.py` does `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE` — **snapshotted at
+import**. A panel that "applied" the user's numbers by assigning to `core.config` would change
+nothing, run 5000×2048 anyway, and say nothing. So the budget is a pair of **keyword-only parameters**
+on `build_posterior`, defaulting to `None` = the constants, which keeps the CLI and every script and
+test byte-identical. Written up as trap **X12**, because the same shape is one import away in a dozen
+other places.
+
+### What was refactored rather than duplicated
+
+- `pipeline.peak_sim_elements` / `sim_keep_elements` / `sim_memory_budget_elements` are extracted
+  **public** from `_max_sim_batch`, which now calls them. A second copy of the cost model in the GUI
+  would drift the first time either was tuned, and a display that reassures you about a number the
+  planner does not use is worse than no display.
+- `orchestrator._training_identity` → **`training_identity`** (§9.6's private-name-across-boundaries
+  rule): the GUI needs it to answer "will this resume?".
+- `settings.get_int`, because QSettings hands back strings on Windows and `TRAINING_RUN_SIZE`'s
+  meaningful value is `0` — so a bare `int(qs.value(...) or 0)` would silently swallow a missing key.
+
+### Verification
+
+`test_gui_progress.py` 83 → **89**, `test_user_sbi.py` 60 → **63**. The wiring test asserts both
+halves — the values arrive as kwargs *and* the config constants are untouched — and was checked
+against **two deliberate mutations**: deleting the kwargs, and "applying" the budget by writing
+config. Both were caught, and the second also broke a neighbouring test, which is itself a neat
+demonstration of why writing the global is wrong. Defaults are the config constants, so an untouched
+GUI is byte-identical to today's behaviour.
+
+**Owed: the eyeball.** Three wrapped derived lines in the controls column is the most likely thing
+yet to overflow it (§10.2's L4/L13 class); no human has seen it.
+
+---
+
+## 2026-08-21 — one progress bar, and a solver meter that the next speedup cannot break
+
+Backlog row 0 (§10.5), both parts. The user asked for ONE overall bar plus a Solver Performance rate
+with no bar of its own; part (a) was a live regression that had to be fixed to get there at all.
+
+### The regression, and the measurement that told us which knob it was
+
+The Solver Performance meter had been reading `— (idle)` for whole runs since CUDA graphs landed.
+Nothing was broken in the solver: the meter was **parsed out of the rendered text of the solver's
+tqdm bar**, and a solver call had become *shorter than that bar's own `mininterval=1.0`*, so tqdm
+never painted a frame carrying a rate. **A 10× speedup made a progress bar too fast to render.**
+
+§10.5 flagged an uncertainty worth settling before touching anything — `miniters` gates refreshes
+too, so lowering only `mininterval` might not be enough. Reproduced on the real settings with a
+synthetic bar paced to 0.7 s, no GPU:
+
+| | stderr | rates |
+|---|---|---|
+| `mininterval=1.0, miniters=1000` (as shipped) | **123 chars** | **0** |
+| `mininterval=0.1, miniters=1000` | 601 chars | 6 |
+| `mininterval=0.1, miniters=100` | 601 chars | 6 |
+
+123 chars / zero rates is byte-identical to what was measured on the real run, so the reproduction is
+trustworthy — and **`miniters` is not the blocker**: 1000 steps is 20 chunked `update()` calls ≈ 14 ms,
+far inside 100 ms. One knob, not two.
+
+### The one-line fix was made anyway — for the CLI, which nobody had noticed was blind
+
+`mininterval` went 1.0 → 0.1 (tqdm's own default). Not for the GUI, which no longer reads the bar,
+but because **`python -m core` has nothing else**: a CLI user watching a graphed run was seeing an
+opening frame and no speed, and §1.1 makes the CLI first-class. Cost is ~10 refreshes/s against a
+6.65 µs/step loop.
+
+### But the durable fix is that the GUI stopped reading a rendered bar at all
+
+`mininterval` is a *time* gate, so lowering it shrinks the broken window without closing it — any
+call shorter than 0.1 s still reports nothing, and the next speedup re-opens it wider. So the solver
+now **publishes**: `core/progress.py` holds a monotonic step count, `_step_iter` bumps it per step
+and `_advance(bar, k)` bumps it per graphed chunk (and advances the bar in the same call, so the two
+cannot drift), and `ProgressPane` differences it on the 100 ms tick it already ran for the spinner.
+Correct at any speed. `SOLVER_IDLE_S` came down 45 → 8 s to match, and the step-progress strip was
+deleted — the "NO bar" the request asked for.
+
+### ⚠ The spec's own instruction would have blacked out the longest phase of the run
+
+§10.5 said "render no other rows". Taken literally that is wrong, and not subtly: **sbi's
+neural-network training emits no tqdm bar at all.** It prints an epoch counter, which `vt` classifies
+as an overwrite-mode row with `pct is None`; the only other live row in that phase is the degenerate
+`Training neural posterior — 0/1`. Delete rows and add no caption and *hours* of a multi-day build
+show an indeterminate bar and nothing else. The caption's fallback — deepest row whose `total != 1` —
+exists for exactly that, and is now pinned by a test that names the reason.
+
+### A second thing found on the way in: `QUIET_SEGMENT_BAR` was hiding a bad election rule
+
+The overall bar tracked the DEEPEST informative row. That is one config flip from wrong: `Running
+time segments` wraps segs in {1,2,3}, so it is both deeper and far coarser than `Generating training
+data` and would sweep the bar 0→100 % every couple of seconds. `QUIET_SEGMENT_BAR` was added to tidy
+the display and was silently load-bearing for correctness. The rule is now **largest non-degenerate
+total**, which is immune to that whole class. The two agree on every nest observed, so the test that
+separates them was checked for vacuity explicitly: deepest gives 66 %, largest-total gives 38 %.
+
+### Deliberately NOT done, and the reason is cancellation
+
+Quieting the solver's tqdm bar under the GUI would have retired the `SOLVER_BAR_DESC` seam entirely.
+It was rejected: the cancel is cooperative and its checkpoint is `_SignalStream.write()`, and during
+training-data generation that bar is by far the most frequent writer. Quieting it would turn ~0.1 s
+cancel latency into one training batch (~2 s at production geometry, longer at large `T_obs`). The
+desc seam therefore survives — but *only* as an exclusion predicate for the overall-bar election
+(trap S3), never again as a rate source (trap **S0**, new).
+
+### What was actually verified, and what is still owed
+
+- `test_gui_progress.py` 79 → **83**; the other five suites re-run clean.
+- The new CLI-bar test carries its own **counterfactual** (`mininterval=1.0` must render *no* rate),
+  so it cannot quietly go vacuous if someone puts the value back.
+- End-to-end on CPU — the real `sdeint` solver through `redirect_streams` through the pump into a
+  real `ProgressPane`: **a live rate on 195 of 196 ticks (99 %)**, against 0 % before; the overall bar
+  tracked `Generating training data` 0→83 %; zero bar frames leaked into the log pane.
+- **A cancel raised from inside the solver's step loop**, because `_step_iter` became a generator and
+  that puts a frame in trap **C1**'s unwind path: it unwound in well under a second, and the next
+  `tqdm` bar did not deadlock (C1's pinning test *hangs* rather than failing, so this was run, not
+  reasoned about).
+- **On real CUDA** (RTX 5070 Ti, batch 2048, `T = 100 000`): the graphed path now emits **678 chars
+  and 7 rate frames** where it emitted 123 chars and none — 0.811 s, **123 349 steps/s**, first frame
+  `128420.87it/s`; eager for comparison, 7.912 s and 12 639 steps/s. Step accounting is exact on both
+  paths at a geometry with a partial tail (2 full chunks + a 3-step remainder), which is the case that
+  pins `_advance`.
+- **Owed: a human looking at it.** Headless tests cover the wiring, never the pixels (§10.3) — this
+  joins §6 row 3's eyeball list, and it is the only thing about this change that is unverified.
+
+### Two stale facts corrected in passing
+
+§2's architecture map described `Solvers/sdeint.py` as "eager + torch.compile fast path and an unused
+implicit solver". Neither half was true: the torch.compile path never existed (§8.3) and
+`implicit_euler` was deleted in §7.7. Both were sitting in the one section a newcomer is told to read
+first.
+
+---
 
 ## 2026-08-20 (later) — the solver was 8× slower than it needed to be, and the docstring said otherwise
 
@@ -2400,6 +2763,21 @@ comparable anyway.
 > bar?"* A threshold assembled from a handful of unseeded runs is a **distribution**, not a
 > tolerance, and quoting a binomial SE over correlated units understates it by the square root of
 > the cluster size.
+
+### One regression the speedup caused, found by looking at the GUI during the retrain — ✅ FIXED 2026-08-21
+
+**The Solver Performance meter now reads `— (idle)` for the whole run.** Nothing is broken in the
+solver; the meter is scraped from the *rendered text of a tqdm bar*, and a solver call is now shorter
+than that bar's own `mininterval=1.0`, so tqdm never paints a frame carrying a rate. Measured on one
+100 k-step call: graphs OFF emits 670 chars of stderr containing `14152.92it/s`; graphs ON emits 123
+chars containing **no rate at all**, just the `?it/s` opening frame.
+
+The plumbing had anticipated *some* short bars — `vt.py` documents `?it/s` as *"any bar shorter than
+its mininterval"* and `progress_pane.SOLVER_IDLE_S` holds the last rate across gaps — but a hold needs
+one rate to hold, and there are now none. **A 10× speedup made a progress bar too fast to render.**
+Fixed the next day, together with the requested one-bar rework — **§10.5**, and the entry above this
+one. The meter no longer reads a rendered bar at all; the solver publishes a step count instead, so
+the failure class (a call shorter than its own bar's mininterval) is closed rather than narrowed.
 
 ### Also landed, both bit-identical
 

@@ -294,6 +294,43 @@ def _is_oom(err: BaseException) -> bool:
     return False
 
 
+def sim_keep_elements(n_fine: int, steady_idx: int, n_out: int) -> int:
+    """Elements ONE simulated row keeps until gen_obs returns: the post-transient output copy."""
+    return n_out * max(0, n_fine - steady_idx)
+
+
+def peak_sim_elements(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n_ch: int,
+                      n_out: int) -> int:
+    """Device elements a simulation batch holds at its PEAK, for one geometry.
+
+    PUBLIC because a front-end that wants to show a user what a batch costs must read the same
+    formula the planner does. A second copy in the GUI would drift from `_max_sim_batch` the first
+    time either is tuned, and a display that reassures you about a number the planner does not use is
+    worse than no display.
+
+    The (n_vars, T) solution buffer and the (n_ch, T) drive are live throughout. The solver's
+    (seg, n_vars) buffer and the (n_out, T - steady_idx) copy are NOT concurrent with each other --
+    the copy is taken after the last segment is released -- so the peak takes their max, not their
+    sum. Summing over-counts by ~20% at the training geometry.
+    """
+    seg = min(n_fine, CHUNK_LEN)
+    return (n_vars * n_fine + n_ch * n_fine
+            + max(n_vars * seg, sim_keep_elements(n_fine, steady_idx, n_out))) * batch_size
+
+
+def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
+    """The element budget `_max_sim_batch` actually plans against -- free-memory reading, the 0.85
+    headroom fraction, and the LEARNED cap, all folded in.
+
+    Public for the same reason as `peak_sim_elements`: a front-end showing "will this fit?" must
+    compare against the planner's budget, not against a raw `mem_get_info` reading. ⚠ That reading
+    still overstates free VRAM on Windows by roughly the size of the desktop (measured 15037 MiB
+    against nvidia-smi's 5814), which is why the learned cap exists -- so treat anything derived from
+    this as an UPPER bound on what is really available.
+    """
+    return min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION), _budget_cap())
+
+
 def _max_sim_batch(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n_ch: int,
                    n_out: int, dtype: torch.dtype, device: torch.device) -> int:
     """
@@ -313,13 +350,11 @@ def _max_sim_batch(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n
     """
     if device.type != "cuda" or batch_size <= 1:
         return batch_size
-    seg = min(n_fine, CHUNK_LEN)
-    n_keep = n_out * max(0, n_fine - steady_idx)                  # per sample, held until we return
-    per_chunk_sample = n_vars * n_fine + n_ch * n_fine + max(n_vars * seg, n_keep)
+    n_keep = sim_keep_elements(n_fine, steady_idx, n_out)         # per sample, held until we return
+    per_chunk_sample = peak_sim_elements(1, n_fine, steady_idx, n_vars, n_ch, n_out)
     if per_chunk_sample <= 0:
         return batch_size
-    budget = min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION),
-                 _budget_cap())
+    budget = sim_memory_budget_elements(device, dtype)
     if per_chunk_sample * batch_size <= budget:
         return batch_size            # the whole batch fits; splitting would only cost wall-clock
     # It does not fit. Now the previous chunks' results ARE extra, so reserve the full output.
