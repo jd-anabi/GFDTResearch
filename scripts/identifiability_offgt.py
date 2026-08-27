@@ -95,7 +95,7 @@ def _raw(nd, res, force, m, crn):
     xsc = res[cfg.rescale_idx["x_scale"]].double()
     xof = res[cfg.rescale_idx["x_offset"]].double() if "x_offset" in cfg.rescale_idx else 0.0
     xf_d, xs_d = xsc * xf.double() + xof, xsc * xs.double() + xof
-    feats = pipeline.gen_stats(xs_d, xf_d, cfg.dt_exp, fv[:, amp_i].expand(m).double(),
+    feats = pipeline.gen_stats_features(xs_d, xf_d, cfg.dt_exp, fv[:, amp_i].expand(m).double(),
                                fv[:, freq_i].expand(m).double(), fv[:, phase_i].expand(m).double(),
                                device=device).numpy()
     return feats, xf_d, xs_d

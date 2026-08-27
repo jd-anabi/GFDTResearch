@@ -13,6 +13,9 @@ THE BUG THESE LOCK DOWN
 Run:  python -m pytest tests/test_gui_progress.py -v
       (or just: python tests/test_gui_progress.py)
 """
+import ast
+import inspect
+import textwrap
 import os
 import sys
 import time
@@ -1469,6 +1472,100 @@ def test_inference_tab_gates_follow_the_session():
     assert enabled() == [True, True, True, True, True]
 
 
+def test_tsnpe_tab_is_gated_and_never_proposes_from_the_posterior():
+    """The TSNPE tab needs a posterior, its prior AND an observation on disk -- and its round must go
+    through orchestrator.build_posterior with a TRUNCATION, never by fitting the posterior.
+
+    The second half is the one worth a test: proposing from the posterior instead of the truncated
+    prior is TEMPERING, it contracts credible intervals with no new information, and SBC comes out
+    flat anyway because it validates the flow against the proposal it was trained on. Nothing on the
+    Validate tab would catch it, so the wiring is pinned here and the maths in
+    tests/test_conditioning_repair.py.
+    """
+    from core.gui.screens.inference_screen import InferenceScreen
+    from core.gui.session import SbiSession
+    from core.gui.panels import inference_tabs
+
+    _app()
+    inf = InferenceScreen()
+    assert inf.tabs.count() == 6 and inf.tabs.tabText(5) == "TSNPE"
+
+    inf.session = SbiSession(cfg=object(), posterior=object()); inf.refresh_gates()
+    assert not inf.tabs.isTabEnabled(5), "TSNPE must not open on a posterior alone"
+    inf.session.inf_prior = object(); inf.refresh_gates()
+    assert inf.tabs.isTabEnabled(5), "TSNPE opens once a posterior and its prior exist"
+
+    # The observation gate, driven through the picker's own accessor rather than through the real
+    # Resources/Observations directory. Clearing the combo does NOT work: refresh_local_gates calls
+    # obs_picker.refresh(), which repopulates it from disk -- so the assertion passed only while that
+    # directory happened to be empty, and any suite run that had exercised infer_and_visualize left a
+    # record behind and flipped it. A gate test must not depend on what an earlier test wrote.
+    panel = inf.tsnpe_panel
+    panel.obs_picker.key = lambda: ""                    # nothing recorded yet
+    panel.refresh_local_gates()
+    assert not panel.btn_round.isEnabled(), "a round must be impossible without an observation"
+    panel.obs_picker.key = lambda: "obs_20260101T000000_deadbeefdeadbeef.pt"
+    panel.refresh_local_gates()
+    assert panel.btn_round.isEnabled(), "with a posterior, its prior and an observation, a round is allowed"
+
+    # The runner's contract: it hands build_posterior a truncation region and nothing else refits.
+    # Checked against the CODE, with the docstring stripped -- that docstring necessarily contains the
+    # word "proposal" while explaining what must not happen, and a naive text search on the whole
+    # source flags the very comment that documents the rule.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(inference_tabs._run_tsnpe_round)))
+    fn = tree.body[0]
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant) and isinstance(fn.body[0].value.value, str)):
+        fn.body = fn.body[1:]
+    code = ast.unparse(tree)
+    assert "build_truncation_region" in code and "truncation=region" in code,         "the TSNPE runner does not build a truncation region and pass it to build_posterior"
+    for banned in ("set_default_x", "proposal"):
+        assert banned not in code, (
+            f"the TSNPE runner's CODE references '{banned}' -- it must sample the truncated PRIOR, "
+            f"never the posterior; that is tempering, and SBC cannot detect it")
+
+
+def test_a_tsnpe_posterior_cannot_be_saved_as_amortized():
+    """⚠ SECTION 11.6 GUARDRAIL 2, at the seam where it is easiest to lose.
+
+    The GUI trains with save=False and saves LATER from a button, so the truncation region has to
+    survive on the session or the deferred save writes the artifact marked `amortized: True` --
+    indistinguishable, in the same ArtifactPicker, from a genuinely amortized posterior. That is the
+    class of confusion the retired-band posterior already cost a five-day run for.
+
+    Three things, and the third is the one that is easy to miss: the round INSTALLS the region, the
+    save PASSES it, and training an ordinary posterior afterwards CLEARS it.
+    """
+    from core.gui.screens.inference_screen import InferenceScreen
+    from core.gui.session import SbiSession
+    from core.gui.panels import inference_tabs
+
+    _app()
+    inf = InferenceScreen()
+    inf.session = SbiSession(cfg=object(), inf_prior=object())
+    panel = inf.tsnpe_panel
+
+    region = object()
+    panel._on_round(((object(), {"loss": []}), region, "deadbeefdeadbeef"))
+    assert inf.session.truncation is region, "the round did not install its truncation region"
+    assert inf.session.x_obs_digest == "deadbeefdeadbeef"
+    assert inf.session.posterior is not None, "the round's posterior never reached the session"
+
+    # the deferred save must forward both
+    captured = {}
+    pp = inf.posterior_panel
+    pp.dispatch = lambda fn, *a, **k: captured.update(args=a, kwargs=k)
+    pp.post_name.setText("some_name")
+    inf.session.posterior_latent = object()
+    pp._save_posterior()
+    assert captured.get("kwargs", {}).get("truncation") is region,         "save_posterior_artifacts was called WITHOUT the truncation -- it would be marked amortized"
+    assert captured["kwargs"].get("x_obs_digest") == "deadbeefdeadbeef"
+
+    # and an ordinary train afterwards must CLEAR it, or the mislabelling runs the other way
+    pp._on_posterior((object(), {"loss": []}))
+    assert inf.session.truncation is None and inf.session.x_obs_digest is None,         "an amortized posterior inherited the previous round's truncation"
+
+
 def test_posterior_from_scratch_is_gated_on_a_prior():
     from core.gui.screens.inference_screen import InferenceScreen
     from core.gui.session import SbiSession
@@ -1719,13 +1816,104 @@ def test_overlay_alignment_and_best_fit_rankings():
     assert int(o[0]) == 1 and float(d[1]) < 1e-9
 
     # phase-invariant summaries are well-formed
-    freqs, lo, med, hi = overlay.psd_band(cand, dt)
+    freqs, lo, med, hi, dropped = overlay.psd_band(cand, dt)
     assert bool((lo <= hi).all()) and abs(float(freqs[med.argmax()]) - f) < 2.0
-    centres, mean, clo, chi_ = overlay.cycle_average(gt.unsqueeze(0), dt, f)
+    centres, mean, clo, chi_, c_dropped = overlay.cycle_average(gt.unsqueeze(0), dt, f)
+    assert dropped == 0 and c_dropped == 0, "clean traces must drop nothing"
     good = torch.isfinite(mean)
     assert int(good.sum()) > 0.8 * len(mean)
     assert 1.5 < float(mean[good].max() - mean[good].min()) < 2.5, "should recover the unit amplitude"
     assert overlay.cycle_window(n, dt, f, 15) == 2000
+
+
+
+def test_a_divergent_draw_does_not_erase_the_whole_psd_band():
+    """THE 2026-08-25 FAILURE, pinned.
+
+    The power-spectrum figure came back as a bare observation line: no band, no median, no message.
+    Cause: a broad posterior samples parameter sets that do not integrate stably, `|rfft|**2` of such a
+    trace overflows to inf, and `torch.quantile` propagates one non-finite entry across every column --
+    so ONE bad draw in a thousand silently erased the band for all of them.
+
+    It went unnoticed for so long because the two sibling figures survive it: the overlay band takes
+    only the 50 best draws, and cycle_average confines the damage to a single phase bin. So the
+    symptom looked like a plotting bug in one figure rather than a property of the posterior.
+    """
+    import math
+    import torch
+    from core.SBI import overlay
+
+    n, dt, f = 4096, 1.0 / 500.0, 12.0
+    t = torch.arange(n, dtype=torch.float64) * dt
+    good = torch.stack([torch.sin(2 * math.pi * f * t) * a for a in (0.9, 1.0, 1.1, 1.05, 0.95)])
+
+    clean_freqs, clean_lo, clean_med, clean_hi, clean_drop = overlay.psd_band(good, dt)
+    assert clean_drop == 0 and torch.isfinite(clean_med).all()
+
+    for label, bad_row in (("inf", torch.full((n,), float("inf"), dtype=torch.float64)),
+                           ("nan", torch.full((n,), float("nan"), dtype=torch.float64)),
+                           ("overflow", torch.sin(2 * math.pi * f * t) * 1e300)):
+        traces = torch.cat([good, bad_row.unsqueeze(0)], dim=0)
+        freqs, lo, med, hi, dropped = overlay.psd_band(traces, dt)
+        assert dropped == 1, f"{label}: expected 1 dropped draw, got {dropped}"
+        assert torch.isfinite(med).all(), f"{label}: one bad draw still poisoned the median"
+        assert torch.isfinite(lo).all() and torch.isfinite(hi).all(), f"{label}: band not finite"
+        assert bool((lo <= hi).all())
+        # and the surviving band is the clean one, not some rescued average of the wreckage
+        assert torch.allclose(med, clean_med), f"{label}: the good draws' band changed"
+
+
+def test_the_psd_band_reports_when_nothing_survives():
+    """All-bad input must produce NaNs and a count, not an exception and not a silent empty plot."""
+    import torch
+    from core.SBI import overlay
+
+    traces = torch.full((4, 1024), float("nan"), dtype=torch.float64)
+    freqs, lo, med, hi, dropped = overlay.psd_band(traces, 1.0 / 500.0)
+    assert dropped == 4
+    assert not torch.isfinite(med).any() and len(med) == len(freqs)
+
+
+def test_the_cycle_average_masks_non_finite_samples_instead_of_binning_them():
+    """A NaN phase goes through `.long()` as a garbage integer that `clamp` parks in bin 0, so an
+    unmasked divergent draw silently corrupts one end of the cycle -- which reads as a real feature."""
+    import math
+    import torch
+    from core.SBI import overlay
+
+    n, dt, f = 4096, 1.0 / 500.0, 12.0
+    t = torch.arange(n, dtype=torch.float64) * dt
+    good = torch.sin(2 * math.pi * f * t).unsqueeze(0)
+
+    _, m_clean, _, _, d_clean = overlay.cycle_average(good, dt, f)
+    assert d_clean == 0
+
+    dirty = torch.cat([good, torch.full((1, n), float("nan"), dtype=torch.float64)], dim=0)
+    _, m_dirty, lo_d, hi_d, d_dirty = overlay.cycle_average(dirty, dt, f)
+    assert d_dirty == n, f"expected the whole bad row masked, got {d_dirty}"
+    live = torch.isfinite(m_clean)
+    assert torch.allclose(m_dirty[live], m_clean[live]), "the good row's cycle changed"
+    assert torch.isfinite(m_dirty[live]).all(), "bin 0 was poisoned by the NaN row"
+
+
+def test_an_empty_predictive_band_is_annotated_on_the_psd_figure():
+    """An absent band must not be mistakable for a rendering glitch -- which is exactly what happened.
+    When nothing finite survives, the figure has to say so in the axes."""
+    import numpy as np
+    from core.Helpers import visualizers
+
+    _app()
+    freqs = np.linspace(0.1, 100, 64)
+    nan = np.full(64, np.nan)
+    fig = visualizers.plot_psd_overlay(freqs, np.ones(64), nan, nan, nan, n_dropped=7)
+    texts = [t.get_text() for t in fig.axes[0].texts]
+    assert any("no finite" in t for t in texts), f"no explanation drawn: {texts}"
+    assert any("7" in t for t in texts), f"the dropped count is not on the figure: {texts}"
+
+    # and with a healthy band there must be no such annotation
+    ok = visualizers.plot_psd_overlay(freqs, np.ones(64), np.ones(64) * .5, np.ones(64),
+                                      np.ones(64) * 2)
+    assert not [t.get_text() for t in ok.axes[0].texts], "annotated a perfectly good band"
 
 
 def test_overlay_figures_render_and_are_picklable():
@@ -2186,6 +2374,87 @@ def _fake_appearance(dark):
             self.theme_changed.emit(d)
 
     return _FakeAppearance(dark)
+
+
+def test_a_theme_flip_between_build_and_save_cannot_split_a_figure():
+    """THE 2026-08-25 RENDERING FAILURE, pinned, with its own counterfactual.
+
+    matplotlib bakes artist colours at BUILD time but reads `savefig.facecolor` at SAVE time, and
+    mpl_theme rewrites rcParams GLOBALLY on every appearance change. A multi-day run straddling one
+    flip therefore saved dark axes onto a light page with `text.color` still light -- every tick
+    label, axis label, title and table cell at ~1.06:1 contrast, i.e. invisible. 14 of 15 figures.
+    """
+    import io as _io
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image
+    from core.gui import mpl_theme
+    from core.Helpers import visualizers
+
+    _app()
+    with _rcparams_guard():
+        mpl_theme.apply_mpl_theme(True)                 # build under DARK
+        fig, ax = plt.subplots()
+        ax.plot([0, 1], [0, 1])
+        ax.set_xlabel("x")
+        try:
+            mpl_theme.apply_mpl_theme(False)            # ...then the theme flips to LIGHT
+
+            def corner_luminance(save):
+                buf = _io.BytesIO()
+                save(buf)
+                buf.seek(0)
+                return float(np.array(Image.open(buf).convert("RGB")).astype(int)[:6, :6].mean())
+
+            pinned = corner_luminance(
+                lambda b: visualizers.save_figure(fig, b, format="png", dpi=50))
+            unpinned = corner_luminance(
+                lambda b: fig.savefig(b, format="png", dpi=50))
+        finally:
+            plt.close(fig)
+
+    assert pinned < 120, \
+        f"save_figure put dark artists on a light page after a theme flip (corner {pinned:.0f})"
+    assert unpinned > 200, \
+        f"the counterfactual did not reproduce the bug (corner {unpinned:.0f}); this test proves nothing"
+
+
+def test_the_parameter_table_is_readable_against_its_own_cells():
+    """The best-fit parameter table came back completely blank. Transparent cells show the FIGURE
+    background while the text is `text.color`, and those two only contrast while the theme is
+    self-consistent -- so the 13 numbers you most want to read are the first thing to vanish."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import to_rgb
+    from core.gui import mpl_theme
+    from core.Helpers import visualizers
+
+    def relative_luminance(c):
+        r, g, b = (v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in to_rgb(c))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    _app()
+    for dark in (True, False):
+        with _rcparams_guard():
+            mpl_theme.apply_mpl_theme(dark)
+            t = np.linspace(0, 1, 32)
+            fig = visualizers.plot_best_fit_overlay(
+                t, np.sin(t), np.sin(t) * 1.02,
+                param_labels=[f"p{i}" for i in range(13)], param_values=list(range(13)))
+            try:
+                tables = [c for a in fig.axes for c in a.tables]
+                assert tables, "the parameter table is gone"
+                cells = list(tables[0].get_celld().values())
+                for cell in cells:
+                    bg = cell.get_facecolor()
+                    assert bg[3] > 0.5, "a transparent cell: the text falls back to the FIGURE colour"
+                    l1 = relative_luminance(bg[:3])
+                    l2 = relative_luminance(cell.get_text().get_color())
+                    ratio = (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+                    assert ratio >= 3.0, \
+                        f"dark={dark}: table text at {ratio:.2f}:1 against its cell (was 1.06:1)"
+            finally:
+                plt.close(fig)
 
 
 def test_apply_mpl_theme_sets_design_tokens():

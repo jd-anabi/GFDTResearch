@@ -137,15 +137,50 @@ def psd(traces: torch.Tensor, dt: float, nperseg: int = None) -> tuple:
     return freqs, power
 
 
+# torch.quantile refuses an input above 2**24 elements. A posterior-predictive PSD is
+# (draws, nfreq) and clears that at ~1000 draws x 16k bins, so the band this module exists to draw is
+# exactly the shape that trips it -- and it raises rather than degrading, which costs the whole figure.
+_QUANTILE_MAX_ELEMS = 1 << 24
+
+
+def _column_quantile(x: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """``torch.quantile(x, q, dim=0)``, chunked over columns to stay under its size limit."""
+    n_rows = max(1, x.shape[0])
+    max_cols = max(1, _QUANTILE_MAX_ELEMS // n_rows)
+    if x.shape[1] <= max_cols:
+        return torch.quantile(x, q, dim=0)
+    return torch.cat([torch.quantile(x[:, i:i + max_cols], q, dim=0)
+                      for i in range(0, x.shape[1], max_cols)], dim=1)
+
+
 def psd_band(traces: torch.Tensor, dt: float, lo_pct: float = 5.0, hi_pct: float = 95.0) -> tuple:
     """Median + percentile band of the posterior-predictive PSD. Phase-invariant by construction.
 
-    :return: (freqs, lo, median, hi), each (nfreq,).
+    ⚠ NON-FINITE ROWS ARE DROPPED, AND THE COUNT IS RETURNED SO THE CALLER CAN SAY SO. This is not
+    defensive coding for its own sake -- it is the fix for a figure that came back as a bare
+    observation line with no band and no median, and said nothing about why. A broad posterior samples
+    parameter sets that do not produce a stable oscillator; ``|rfft|**2`` of such a trace overflows to
+    ``inf``, and ``torch.quantile`` propagates a single non-finite entry across the WHOLE column set,
+    so one bad draw in a thousand silently erases the entire band. The two sibling figures survived it
+    (the overlay band takes only the 50 best draws, and cycle_average confines the damage to one phase
+    bin), which is precisely why the failure looked like a plotting bug rather than a data one.
+
+    Reporting the count matters as much as dropping the rows: "the band is missing" is a bug report,
+    "17 of 1000 draws were non-finite" is a finding about the posterior.
+
+    :return: (freqs, lo, median, hi, n_dropped). lo/median/hi are all-NaN if nothing finite remains.
     """
     freqs, power = psd(traces, dt)
+    ok = torch.isfinite(power).all(dim=-1)
+    n_dropped = int((~ok).sum())
+    if n_dropped:
+        power = power[ok]
+    if power.shape[0] == 0:
+        nan = torch.full_like(freqs, float("nan"))
+        return freqs, nan, nan, nan, n_dropped
     q = torch.tensor([lo_pct / 100.0, 0.5, hi_pct / 100.0], dtype=torch.float64)
-    band = torch.quantile(power, q, dim=0)
-    return freqs, band[0], band[1], band[2]
+    band = _column_quantile(power, q)
+    return freqs, band[0], band[1], band[2], n_dropped
 
 
 def _analytic_phase(x: torch.Tensor, dt: float, f_center: float, bp_lo: float = 0.5,
@@ -186,16 +221,30 @@ def cycle_average(traces: torch.Tensor, dt: float, f_center: float, n_bins: int 
     the result is the mean cycle shape: the asymmetric spike of a hair-bundle oscillation survives, while
     the arbitrary absolute phase does not.
 
-    :return: (phase_bin_centres in [0, 2pi), mean, lo, hi), each (n_bins,). Empty bins are NaN.
+    ⚠ NON-FINITE SAMPLES ARE MASKED OUT BEFORE BINNING, and the count is returned. Without this a
+    single divergent draw poisons a bin rather than being excluded: a NaN phase goes through
+    ``.long()`` as an implementation-defined garbage integer, which ``clamp`` then parks in bin 0 --
+    so the damage is silent, confined to one end of the curve, and easy to read as a real feature.
+    Same root cause as the dropped rows in :func:`psd_band`; see the note there.
+
+    Bit-identical to the previous implementation whenever everything is finite: the mask is then
+    all-True and boolean indexing flattens in the same row-major order the old ``reshape(-1)`` did, so
+    each bin still sums its samples in the original sequence.
+
+    :return: (phase_bin_centres in [0, 2pi), mean, lo, hi, n_dropped), the first four (n_bins,).
+             Empty bins are NaN.
     """
     phase = _analytic_phase(traces, dt, f_center)                     # (B, n) in (-pi, pi]
     x = (traces - traces.mean(dim=-1, keepdim=True)).to(torch.float64)
-    idx = (((phase + math.pi) / (2 * math.pi)) * n_bins).long().clamp(0, n_bins - 1)
+    finite = torch.isfinite(phase) & torch.isfinite(x)
+    n_dropped = int((~finite).sum())
+    flat_x = x[finite]
+    flat_i = ((((phase[finite].to(torch.float64) + math.pi) / (2 * math.pi)) * n_bins)
+              .long().clamp(0, n_bins - 1))
     centres = (torch.arange(n_bins, dtype=torch.float64) + 0.5) * (2 * math.pi / n_bins)
     mean = torch.full((n_bins,), float("nan"), dtype=torch.float64)
     lo = torch.full((n_bins,), float("nan"), dtype=torch.float64)
     hi = torch.full((n_bins,), float("nan"), dtype=torch.float64)
-    flat_i, flat_x = idx.reshape(-1), x.reshape(-1)
     # ONE stable sort, then slice per bin. The old form evaluated `flat_x[flat_i == b]` inside the
     # loop -- a full boolean pass plus a gather over ALL B*n elements for EVERY bin, i.e. 48 complete
     # sweeps (~2.9 billion comparisons at 1000 draws x 60k samples) to produce one diagnostic figure.
@@ -213,7 +262,7 @@ def cycle_average(traces: torch.Tensor, dt: float, f_center: float, n_bins: int 
             mean[b] = vals.mean()
             lo[b] = torch.quantile(vals, lo_pct / 100.0)
             hi[b] = torch.quantile(vals, hi_pct / 100.0)
-    return centres, mean, lo, hi
+    return centres, mean, lo, hi, n_dropped
 
 
 def cycle_window(n_total: int, dt: float, f_peak: float, n_cycles: int) -> int:

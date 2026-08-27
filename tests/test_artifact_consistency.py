@@ -35,7 +35,7 @@ from core import cli, config, orchestrator, registry
 from core.config import BOUNDS_PATH, CELL_PATH, POSTERIOR_PATH, PRIOR_PATH, VALID_LABELS, VALID_MODELS
 from core.Helpers import file_manager
 from core.SBI import reparam
-from core.SBI.statistics import FEATURE_LABELS
+from core.SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
 
 _NAD = "nadrowski"
 _LABELS = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
@@ -213,7 +213,7 @@ def _sidecar(cfg, **over):
         # DERIVED, never literals. These were `input_dim=42, forcing_dim=12` -- 12 being 3K at K=4
         # under the retired layout-1 grid, stale since the probe set landed and silently wrong ever
         # since. Deriving them from the same helpers the writer uses is what keeps a fixture honest.
-        input_dim=len(FEATURE_LABELS) + 1, forcing_dim=orchestrator.expected_forcing_dim(cfg),
+        input_dim=SUMMARY_WIDTH + 1, forcing_dim=orchestrator.expected_forcing_dim(cfg),
         chi_layout=config.CHI_LAYOUT, chi_k_pad=cfg.chi_k_pad, chi_elem_w=config.CHI_ELEM_W,
         chi_max_cycles=float(cfg.chi_max_cycles),
         chi_f0=cfg.chi_f0, chi_freq_bounds=tuple(cfg.chi_freq_bounds), param_keys=keys,
@@ -329,6 +329,35 @@ def _failing(real):
         raise _WriteFailed("disk full")
     return _boom
 
+
+
+def test_the_sidecar_records_the_fisher_eigenvalues_beside_V():
+    """The rotation is saved so a later reader can say WHICH directions the run constrained. Without
+    the eigenvalues it can only say which is worst, never by how much -- and the gap between "3x" and
+    "1e6" is the gap between "uneven" and "nine of thirteen parameters are prior".
+
+    The None case is asserted too, and deliberately: the key must be PRESENT-and-None when the
+    rotation came from a resumed checkpoint (which stores V but not them), so a reader can tell "not
+    recorded" from "this artifact predates the field".
+    """
+    cfg = _cfg(chi_mode=True, chi_n_freqs=4)
+    name = "_ptest_evals"
+    pt, rot = POSTERIOR_PATH / f"{name}.pt", POSTERIOR_PATH / f"{name}.rot.pt"
+    evals = torch.tensor([9.0, 3.0, 0.5], dtype=torch.float64)
+    try:
+        orchestrator.save_posterior_artifacts(name, {"generation": 1}, torch.eye(3), None, cfg,
+                                              fisher_eigenvalues=evals)
+        d = torch.load(str(rot), weights_only=False)
+        assert "fisher_eigenvalues" in d, "the sidecar dropped the eigenvalues"
+        assert torch.allclose(d["fisher_eigenvalues"], evals)
+
+        orchestrator.save_posterior_artifacts(name, {"generation": 2}, None, None, cfg)
+        d2 = torch.load(str(rot), weights_only=False)
+        assert "fisher_eigenvalues" in d2 and d2["fisher_eigenvalues"] is None, \
+            "an un-rotated run must record the field as None, not omit it"
+    finally:
+        for q in (pt, rot):
+            q.unlink(missing_ok=True)
 
 def test_a_torn_posterior_write_leaves_the_previous_artifact_intact():
     """The posterior and its .rot.pt sidecar are the product of a multi-day run, and the GUI's Save

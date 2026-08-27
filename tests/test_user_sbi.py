@@ -29,7 +29,7 @@ from core import config, registry, orchestrator, cli, forcing    # noqa: E402
 from core.Helpers import model_store                             # noqa: E402
 from core.SBI import chi as chi_mod, pipeline as pipeline_mod    # noqa: E402
 from core.SBI.Priors.user_prior import UserPrior                 # noqa: E402
-from core.SBI.statistics import FEATURE_LABELS                   # noqa: E402
+from core.SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH    # noqa: E402
 from core.config import VALID_MODELS, VALID_LABELS               # noqa: E402
 
 _N_GROUP_G = 11
@@ -45,6 +45,11 @@ _N_SPONT = len(FEATURE_LABELS) - _N_GROUP_G   # 30
 # stay green while testing nothing. Tests that want checkpointing pass an explicit `checkpoint=` dict
 # with a tmpdir, which is unaffected by this.
 orchestrator.TRAINING_CHECKPOINT_EVERY = 0
+
+# Observation records OFF for the same reason (section 11.6 guardrail 1). The full-pipeline tests
+# call infer_and_visualize, which records the observation it ran against -- correct for a real run,
+# and litter here. Nothing else in the suite writes into Resources/; keep it that way.
+orchestrator.PERSIST_OBSERVATIONS = False
 
 # Snapshot of the checkpoint directories that existed BEFORE this suite ran, so the guard below can
 # tell "the suite created one" from "the user has a real retrain checkpoint on disk". Checking for
@@ -97,7 +102,7 @@ def test_no_forcing_user_model_full_sbi_pipeline():
                                                     save=False, fig_sink=sink)
 
         x_dim, obs_stats, t_dim = orchestrator.generate_observations(cfg)
-        assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1    # [S | log(T)], no forcing block
+        assert obs_stats.shape[-1] == SUMMARY_WIDTH + 1    # [S | log(T)], no forcing block
         assert torch.allclose(obs_stats[0, _N_SPONT:_N_SPONT + _N_GROUP_G], torch.zeros(_N_GROUP_G))
         assert torch.isfinite(obs_stats).all()
 
@@ -108,7 +113,7 @@ def test_no_forcing_user_model_full_sbi_pipeline():
         # passive experimental path: a single unforced recording, no drive / force units
         obs_stats_e, obs_data_e, t_dim_e = orchestrator.build_experiment_obs_spontaneous(
             cfg, x_dim[0].clone(), 1.0)
-        assert obs_stats_e.shape[-1] == len(FEATURE_LABELS) + 1
+        assert obs_stats_e.shape[-1] == SUMMARY_WIDTH + 1
         assert torch.allclose(obs_stats_e[0, _N_SPONT:_N_SPONT + _N_GROUP_G], torch.zeros(_N_GROUP_G))
         orchestrator.infer_and_visualize(cfg, posterior, obs_stats_e, obs_data_e, t_dim_e,
                                          show_truth=False, fig_sink=sink)
@@ -134,7 +139,7 @@ def test_builtin_forcing_path_unperturbed():
     assert cfg.has_forcing is True
     _, obs_stats, _ = orchestrator.generate_observations(cfg)
     n_forcing = len(cfg.force_params_dict)
-    assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + n_forcing
+    assert obs_stats.shape[-1] == SUMMARY_WIDTH + 1 + n_forcing
     assert not torch.allclose(obs_stats[0, _N_SPONT:_N_SPONT + _N_GROUP_G], torch.zeros(_N_GROUP_G))
     assert torch.isfinite(obs_stats).all()
 
@@ -247,7 +252,7 @@ def test_observation_modes_and_conditioning_widths():
     ignored, not fatal) and that mode 1 carries no f_scale."""
     labels = VALID_LABELS[VALID_MODELS.index("NADROWSKI")]
     saved_mode, saved_k = config.CHI_MODE, config.CHI_N_FREQS
-    S = len(FEATURE_LABELS)
+    S = SUMMARY_WIDTH
     try:
         config.CHI_N_FREQS = 3
 
@@ -397,7 +402,7 @@ def test_chi_mode_observation_width():
         cfg.hw = config.cpu_device()
         cfg.T_obs = 1000.0                                        # ms units -> 1 s of data
         _, obs_stats, _ = orchestrator.generate_observations(cfg)
-        assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg)
+        assert obs_stats.shape[-1] == SUMMARY_WIDTH + 1 + orchestrator.expected_forcing_dim(cfg)
         assert torch.allclose(obs_stats[0, _N_SPONT:_N_SPONT + _N_GROUP_G], torch.zeros(_N_GROUP_G))
         assert torch.isfinite(obs_stats).all()
     finally:
@@ -432,7 +437,7 @@ def test_chi_mode_full_sbi_pipeline():
 
         K3 = orchestrator.expected_forcing_dim(cfg)
         x_dim, obs_stats, t_dim = orchestrator.generate_observations(cfg)
-        assert obs_stats.shape[-1] == len(FEATURE_LABELS) + 1 + K3
+        assert obs_stats.shape[-1] == SUMMARY_WIDTH + 1 + K3
         assert torch.isfinite(obs_stats).all()
 
         orchestrator.infer_and_visualize(cfg, posterior, obs_stats, x_dim, t_dim, show_truth=True,
@@ -443,7 +448,7 @@ def test_chi_mode_full_sbi_pipeline():
         forced = [x_dim[0].clone() for _ in range(config.CHI_N_FREQS)]
         obs_stats_e, obs_data_e, t_dim_e = orchestrator.build_experiment_obs_chi(
             cfg, x_dim[0].clone(), forced, 1.0, 1.0)
-        assert obs_stats_e.shape[-1] == len(FEATURE_LABELS) + 1 + K3
+        assert obs_stats_e.shape[-1] == SUMMARY_WIDTH + 1 + K3
         assert torch.isfinite(obs_stats_e).all()
         orchestrator.infer_and_visualize(cfg, posterior, obs_stats_e, obs_data_e, t_dim_e,
                                          show_truth=False, fig_sink=sink)
@@ -662,7 +667,7 @@ def test_chi_mode_drives_every_channel_the_model_reads():
         assert cfg.observation_mode == "chi" and cfg.inits_tensor.shape[-1] == 2
 
         stats = orchestrator.generate_observations(cfg)[1]
-        assert stats.shape[-1] == len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg), (
+        assert stats.shape[-1] == SUMMARY_WIDTH + 1 + orchestrator.expected_forcing_dim(cfg), (
             f"hopf chi conditioning is the wrong width: {tuple(stats.shape)}")
         assert torch.isfinite(stats).all(), "hopf chi conditioning has non-finite entries"
 
@@ -1653,7 +1658,7 @@ def test_posterior_mode_decodes_all_three_observation_modes():
             self.posterior_estimator = type("E", (), {"embedding_net": torch.nn.Sequential(net),
                                                       "condition_shape": None})()
 
-    summary_w = len(FEATURE_LABELS) + 1
+    summary_w = SUMMARY_WIDTH + 1
     k_pad = 6
     chi_dim = config.CHI_ELEM_W * k_pad
     for want_mode, fdim, want_k in (("spontaneous", 0, None), ("forced", 4, None),
@@ -2084,6 +2089,34 @@ def test_a_rebuilt_prior_routes_to_a_different_checkpoint():
         "the same prior must resolve to the same directory, or a resume can never find its rows"
 
 
+
+
+def test_fisher_eigenbasis_can_return_the_eigenvalues_its_columns_are_sorted_by():
+    """V alone is an ORDERING of directions; the eigenvalues are the SCALE, and the scale is the
+    question. "direction 12 is the least constrained" is compatible both with an experiment that
+    measures everything tolerably (spread ~3x) and with one that measures four things and returns the
+    prior for the rest (spread 1e6). They used to be computed here and thrown away, and recovering
+    them afterwards costs a full Fisher re-run -- so the 2026-08-25 posterior can be decomposed only
+    up to an ordering. See scripts/posterior_identifiability.py.
+    """
+    from core.SBI.reparam import fisher_eigenbasis
+
+    torch.manual_seed(0)
+    Q, _ = torch.linalg.qr(torch.randn(5, 5, dtype=torch.float64))
+    planted = torch.tensor([100.0, 10.0, 1.0, 0.1, 1e-9], dtype=torch.float64)
+    F = Q @ torch.diag(planted) @ Q.T
+
+    V, ev = fisher_eigenbasis(F, with_values=True)
+    assert torch.allclose(ev, planted, rtol=1e-6), f"eigenvalues not recovered: {ev}"
+    assert bool((ev[:-1] >= ev[1:]).all()), "eigenvalues are not descending"
+    for j in range(5):
+        assert torch.allclose(F @ V[:, j], ev[j] * V[:, j], atol=1e-6), \
+            f"column {j} is not the eigenvector of eigenvalue {float(ev[j])}"
+    # The near-null direction must be LAST -- every reader of V depends on that ordering.
+    assert int(ev.argmin()) == 4
+
+    # and the one-argument form is unchanged, because build_rotated_bijection and the scripts use it
+    assert torch.equal(fisher_eigenbasis(F), V)
 
 def test_the_training_budget_routes_to_a_different_checkpoint():
     """THE HAZARD THAT MAKES THE GUI's BUDGET FIELDS DANGEROUS, pinned.

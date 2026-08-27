@@ -68,7 +68,12 @@ Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_c
   N_CAL      calibration datasets for SBC/TARP                 (default 40)
   EPOCHS     max training epochs                               (default 5)
   SEED       RNG seed                                          (default 0)
-  SAVE       "1" to persist prior/posterior artifacts          (default 0 -- nothing touches disk)
+  SAVE       "1" to persist prior/posterior artifacts          (default 0)
+             ⚠ NOT "nothing touches disk", which this used to claim. The infer stage always
+             writes an observation record to Resources/Observations (section 11.6 guardrail 1):
+             an amortized posterior has no observation at SAVE time, so recording one is the
+             job of INFERENCE and is deliberately not skippable -- TSNPE keys on it. They are
+             a few KB each; delete the `obs_*` files a smoke run leaves behind.
   STAGES     comma list to run a subset, e.g. "prior,posterior"
              (default prior,posterior,validate,infer)
   CHECKPOINT "1" to exercise the C-11 training-data checkpoint into a fresh temp dir (default 0;
@@ -115,7 +120,7 @@ from matplotlib import pyplot as plt
 
 import _common
 from core import config, orchestrator
-from core.SBI.statistics import FEATURE_LABELS
+from core.SBI.statistics import FEATURE_LABELS, VALID_FLAG_LABELS, SUMMARY_WIDTH
 
 _common.enable_warnings()
 
@@ -151,9 +156,9 @@ def main():
     if cfg.chi_mode:
         print(f"[smoke] chi ceiling: <= {cfg.chi_max_cycles:g} drive cycles per probe "
               f"(floor {config.CHI_MIN_CYCLES:g})")
-    print(f"[smoke] conditioning width = {len(FEATURE_LABELS)} + 1 + "
+    print(f"[smoke] conditioning width = {len(FEATURE_LABELS)}+{len(VALID_FLAG_LABELS)} + 1 + "
           f"{orchestrator.expected_forcing_dim(cfg)} = "
-          f"{len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg)}", flush=True)
+          f"{SUMMARY_WIDTH + 1 + orchestrator.expected_forcing_dim(cfg)}", flush=True)
 
     # Shrink the pipeline by rebinding the module constants the stages read. Done here rather than by
     # threading arguments because these are exactly the knobs the long run turns up, so a smoke run
@@ -259,7 +264,7 @@ def main():
 
     def _infer():
         x_dim, obs_stats, t_dim = orchestrator.generate_observations(cfg)
-        want = len(FEATURE_LABELS) + 1 + orchestrator.expected_forcing_dim(cfg)
+        want = SUMMARY_WIDTH + 1 + orchestrator.expected_forcing_dim(cfg)
         assert obs_stats.shape[-1] == want, \
             f"observation width {obs_stats.shape[-1]} != the mode's {want}"
         assert torch.isfinite(obs_stats).all(), "the observation carries non-finite conditioning"

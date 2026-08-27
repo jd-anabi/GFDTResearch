@@ -47,6 +47,13 @@ class SbiSession:
     diagnostics: Any = None         # training diagnostics dict (loss curve etc.)
     posterior_latent: Any = None    # raw latent DirectPosterior, for deferred save
     V: Any = None                   # decorrelating rotation, for the deferred .rot.pt sidecar
+    # ⚠ WHAT THE DEFERRED SAVE MUST NOT FORGET (section 11.6 guardrail 2). A TSNPE posterior is valid
+    # only near the observation its region was drawn around. The GUI saves LATER, from a button, so
+    # if the region does not travel with the posterior it will be written to disk marked
+    # `amortized: True` -- indistinguishable from a real amortized artifact in the same picker, which
+    # is exactly the class of confusion that cost a five-day run once already.
+    truncation: Any = None          # SBI.truncate.TruncationRegion, or None for an amortized run
+    x_obs_digest: Any = None        # the observation that region was drawn around
 
     def reset_downstream(self, from_stage: str) -> None:
         """Invalidate artifacts that depend on an earlier stage when it is re-run."""
@@ -56,3 +63,4 @@ class SbiSession:
             self.inf_prior = self.force_prior = None
         if i <= order.index("posterior"):
             self.posterior = self.diagnostics = self.posterior_latent = self.V = None
+            self.truncation = self.x_obs_digest = None

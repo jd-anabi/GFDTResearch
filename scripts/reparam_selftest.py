@@ -75,7 +75,7 @@ def sim_feats(theta_row, m):
     torch.manual_seed(2); xs = s(torch.zeros_like(force))
     xsc = res[cfg.rescale_idx["x_scale"]].double()
     xof = res[cfg.rescale_idx["x_offset"]].double() if "x_offset" in cfg.rescale_idx else 0.0
-    return pipeline.gen_stats(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
+    return pipeline.gen_stats_features(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
                               amp_v.expand(m).double(), freq_v.expand(m).double(),
                               phase_v.expand(m).double(), device=device).numpy()
 

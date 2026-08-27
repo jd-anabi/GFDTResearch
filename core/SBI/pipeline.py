@@ -20,7 +20,7 @@ from core import config
 from core.config import CHUNK_LEN, N_ND_MAX
 from .Priors import bp_prior, hopf_prior, nadrowski_prior
 from core.Simulator import bp_simulator, nadrowski_simulator, hopf_simulator
-from core.SBI import statistics, chi, reparam
+from core.SBI import statistics, chi, reparam, derived
 
 VALID_SIMS: dict = {"bp":        bp_simulator.BPSimulator,
                     "nadrowski": nadrowski_simulator.NadrowskiSimulator,
@@ -707,6 +707,50 @@ def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
     del sol, src
     return obs
 
+_PATHO_MAG = 1e15          # |x| beyond which a trajectory's features cannot be trusted
+
+
+def count_pathological(x: torch.Tensor, acc: dict) -> None:
+    """Tally trajectories that are non-finite, exactly constant, or of overflow magnitude.
+
+    WHY THIS EXISTS (section 11.1). One population of pathological simulations was silently damaging
+    three unrelated things at once, and NOTHING in the pipeline counted them:
+
+      * an EXACTLY CONSTANT trace makes `_group_d`'s `std.clamp(1e-12)` fire, so `z == 0`,
+        `kurt == 0`, and D3_bimodality comes back as exactly 1/1e-12 -- a flatlined simulation, not
+        an underflow;
+      * a ~1e29-magnitude trace drags A1_mean's fitted std to 4.19e11, which is what made the
+        channel invisible to the flow;
+      * divergent draws erased the posterior-predictive PSD band entirely (trap G7).
+
+    Three cheap reductions over tensors that are already resident, so this is the cheapest item in
+    section 11 and should have existed from the start.
+
+    Counted per SIMULATED trajectory, so an OOM retry that re-simulates a half-batch counts those
+    rows twice -- the row denominator is accumulated the same way, so the FRACTION stays honest even
+    though the absolute count can exceed the training set size on a heavily-retried run.
+    """
+    if x is None or x.numel() == 0:
+        return
+    acc["rows"] += int(x.shape[0])
+    # TWO REDUCTIONS AND NOTHING ELSE. The obvious spelling -- isfinite(x).all(-1), nan_to_num(x),
+    # safe.abs() -- allocates three tensors the size of the trajectory block, which at the production
+    # shape is 2048 x 60000 float32 = 492 MB EACH, on a card that has already died of OOM twice
+    # (traps X6/X7). amax/amin PROPAGATE NaN and +-inf, so the row-level (rows,) reductions below
+    # answer all three questions exactly: verified equal to isfinite(x).all(-1) on NaN, +inf, -inf,
+    # constant and ordinary rows.
+    mx, mn = x.amax(dim=-1), x.amin(dim=-1)
+    finite = torch.isfinite(mx) & torch.isfinite(mn)
+    acc["nonfinite"] += int((~finite).sum())
+    # A non-finite row is counted ONLY as non-finite -- otherwise an all-NaN batch reports a flatline
+    # population that is not there. The two remaining categories DO overlap on purpose: an all-1e29
+    # row is genuinely both constant and overflow.
+    # amax == amin, not std == 0: a 1e29-magnitude row squares to inf inside a variance, so a
+    # std-based test would answer the overflow case rather than the constant one.
+    acc["constant"] += int(((mx == mn) & finite).sum())
+    acc["overflow"] += int(((torch.maximum(mx.abs(), mn.abs()) > _PATHO_MAG) & finite).sum())
+
+
 def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.Tensor,
               drive_amp, drive_freq, drive_phase,
               band_halfwidth: int = 2, bp_lo: float = 0.5, bp_hi: float = 1.5, slow_env_frac: float = 0.15,
@@ -738,7 +782,10 @@ def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.T
         it to the full feature width. ``x_forced``/``drive_*`` may then be None -- the spontaneous run
         is reused as the (unused) forced input. Keeps the output width == len(FEATURE_LABELS).
 
-    :return: A tensor containing the computed statistical features. Shape: (batch size, number of statistics).
+    :return: ``[features | valid flags]``, shape (batch, statistics.SUMMARY_WIDTH) -- the
+        len(FEATURE_LABELS) features followed by the len(VALID_FLAG_LABELS) binary companion
+        channels that say which of them are real measurements rather than substituted sentinels
+        (see statistics.derive_valid_flags).
     :rtype: torch.Tensor
     """
     def _sub(v, s, e):
@@ -772,7 +819,30 @@ def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.T
         del stats, xs_sub, xf_sub, result
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-    return torch.cat(results, dim=0)
+    feats = torch.cat(results, dim=0)
+    # [features | valid flags]. Appended HERE rather than at each call site: every conditioning
+    # vector in the project is assembled as `cat([gen_stats(...), log_T, forcing-or-chi])`, in eight
+    # places across pipeline.py and orchestrator.py (training, calibration, PPC, the simulated and
+    # experimental observation paths). Widening the summary block at its single source means all
+    # eight stay in step by construction -- a flag set that reached training but not the PPC would be
+    # invisible until the two disagreed about what a row means.
+    return torch.cat([feats, statistics.derive_valid_flags(feats, dt)], dim=-1)
+
+def gen_stats_features(*args, **kwargs) -> torch.Tensor:
+    """``gen_stats`` WITHOUT the trailing valid-flag block: the 41 features and nothing else.
+
+    THE ONE NAME FOR "features, not conditioning", and every Jacobian in the project must use it.
+    A diagnostic that standardises by a locally-measured `fnoise = max(std, 1e-9)` turns a BINARY
+    channel into an amplifier the moment it steps between two operating points -- constant almost
+    everywhere (harmless) and then 1/1e-9 at the one place it moves. That is trap CHI12, and it is
+    the same defect C-9/C-10 removed `logcyc` for.
+
+    It is also simply the right width: these callers index their results against FEATURE_LABELS, and
+    the flags are not features -- they are a statement about the OBSERVATION, carrying no gradient in
+    theta at all.
+    """
+    return statistics.split_summary_block(gen_stats(*args, **kwargs))[0]
+
 
 def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_size: int, segs: int, prior_bounds: list,
               state_dep_drift: bool = False, num_iterations: int = 25, log_mask: torch.Tensor | None = None,
@@ -1094,6 +1164,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                       chi_freq_bounds: tuple | None = None, chi_k_pad: int | None = None,
                       chi_k_fixed: int | None = None, chi_max_cycles: float | None = None,
                       n_vars: int | None = None, checkpoint: dict | None = None,
+                      nd_idx: dict | None = None, k_b_cell: float | None = None,
                       dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> tuple:
     """
     Generate synthetic training data for the SBI posterior using batch-by-scale strategy.
@@ -1166,6 +1237,10 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                            without it the draw is a FRACTION of the recording, which does not bound
                            cycles at all, so a long recording walks its probes past the
                            reproducibility wall (config.CHI_MAX_CYCLES, trap CHI9).
+    :param nd_idx: ND parameter name -> column. Required only when the box declares ``T`` instead
+                   of ``f_scale`` (tier-1 physical consistency, core/SBI/derived.py); ignored
+                   otherwise, so every pre-tier-1 caller is unaffected.
+    :param k_b_cell: Boltzmann's constant in cell units (``SimConfig.k_b_cell``). Same condition.
     :param dtype: Tensor data type. Defaults to torch.float32.
     :param device: Computation device. Defaults to CPU.
     :return: Tuple of (training_data, thetas) where training_data has shape
@@ -1174,6 +1249,9 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     """
     from core import registry
     is_user = registry.is_user_model(model)
+    # The index the SIMULATOR reads. Identical to rescale_idx unless this box declares T instead
+    # of f_scale, in which case T's column is renamed -- see core/SBI/derived.py.
+    sim_ridx = derived.sim_rescale_idx(rescale_idx)
     if model.lower() not in VALID_SIMS and not is_user:
         raise ValueError(f"Invalid simulator: {model}")
 
@@ -1370,7 +1448,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # Conditioning width is [S(41) | log T | forcing-or-chi]; the exact forcing width is not
             # resolved until the first batch returns, so bound it here -- this is a disk-space sanity
             # check, not an accounting figure. +8 covers the latent targets.
-            _w = len(statistics.FEATURE_LABELS) + 1 + (
+            _w = statistics.SUMMARY_WIDTH + 1 + (
                 config.CHI_ELEM_W * chi_k_pad if chi_mode else 8)
             _need = n_runs * run_size * (_w + 8) * 4
             print(f"[checkpoint] writing to {_ck_dir} every {_ck_every} batches "
@@ -1382,6 +1460,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     f"write; free space now.", stacklevel=2)
 
     global _BATCH_TAG
+    _patho = dict.fromkeys(("rows", "nonfinite", "constant", "overflow"), 0)
+    _patho_seen = 0              # count already reported, so each line is NEW rows
     _pending_rng = None          # RNG as of the TOP of batch_k -- see the checkpoint write below
     _ck_from = _start_k          # first batch not yet committed to disk
     batch_k = _start_k           # bound up front: the except handler reads it, and an exception
@@ -1450,6 +1530,15 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             else:
                 curr_thetas_latent = curr_thetas_phys
 
+            # TIER 1 (section 11.5): the SIMULATOR runs at the DERIVED f_scale; the training
+            # TARGET keeps T. Applied after the latent is taken, and that order is the whole
+            # point -- T is the inferred parameter, so the target must record T while the
+            # simulation runs at the force scale T implies. Deriving first would train the flow
+            # to predict a quantity nobody asked about. A no-op (the same object, not a copy)
+            # for a box that declares f_scale, so nothing pre-tier-1 changes.
+            sim_thetas_rescale = derived.to_sim_rescale(
+                curr_thetas_nd, curr_thetas_rescale, rescale_idx, nd_idx, k_b_cell)
+
             # --- THE PROBE SET FOR THIS BATCH, drawn ABOVE the retry seam ---
             # K is drawn per batch and the placement is stratified-jittered, so the encoder is trained
             # ACROSS probe counts and frequencies rather than memorising one grid. A fixed grid would
@@ -1490,16 +1579,16 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 closure in a loop does not apply.
                 """
                 n = hi - lo
-                resc = curr_thetas_rescale[lo:hi]
+                resc = sim_thetas_rescale[lo:hi]
                 nd = curr_thetas_nd[lo:hi]
                 init_rows = inits[lo:hi]
                 # None in the chi and spontaneous branches, where there is no drive to slice.
                 fparams = None if curr_thetas_forcing is None else curr_thetas_forcing[lo:hi]
                 # Derived HERE rather than at batch level so the "this model has no x_offset" case
                 # needs no branch: slicing the SOURCE works for both, slicing the float 0.0 does not.
-                x_scale  = resc[:, rescale_idx["x_scale"]].unsqueeze(1)
-                x_offset = (resc[:, rescale_idx["x_offset"]].unsqueeze(1)
-                            if "x_offset" in rescale_idx else 0.0)
+                x_scale  = resc[:, sim_ridx["x_scale"]].unsqueeze(1)
+                x_offset = (resc[:, sim_ridx["x_offset"]].unsqueeze(1)
+                            if "x_offset" in sim_ridx else 0.0)
 
                 if chi_mode:
                     # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
@@ -1514,6 +1603,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     x_spont_dim = helpers.rescale(
                         x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
                     del x_nd_spont_fine, force0
+                    count_pathological(x_spont_dim, _patho)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
@@ -1524,7 +1614,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                         # caught. It surfaced as "Batch size: 2 cannot differ from dim 0 of parameters
                         # tensor", i.e. loudly, only because the simulator validates the two against
                         # each other; a tensor that happened to broadcast would have gone unnoticed.
-                        model, nd, resc, x_spont_dim, t_fine, init_rows, rescale_idx,
+                        model, nd, resc, x_spont_dim, t_fine, init_rows, sim_ridx,
                         n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
                         b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
                         k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
@@ -1562,6 +1652,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     x_spont_dim = helpers.rescale(
                         x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
                     del x_nd_spont_fine, force
+                    count_pathological(x_spont_dim, _patho)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
@@ -1573,7 +1664,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 else:
                     # 2. Build nondimensional force tensor at fine resolution (uses PHYSICAL rescale)
                     force = build_nondim_sin_force_tensor(
-                        fparams, t_fine, resc, forcing_idx, rescale_idx
+                        fparams, t_fine, resc, forcing_idx, sim_ridx
                     )
 
                     # 3. Simulate the FORCED run (drive on) -> Group G
@@ -1605,6 +1696,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     x_spont_dim = helpers.rescale(
                         x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
                     del x_nd_spont_fine, force
+                    count_pathological(x_spont_dim, _patho)
+                    count_pathological(x_dim, _patho)
 
                     # 5. Stats (A-F from spontaneous, G from forced) + conditioning
                     with warnings.catch_warnings():
@@ -1659,6 +1752,16 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # minute rather than the fifth hour); after that, one line per _MEM_LOG_EVERY batches.
             if batch_k == 0 or (batch_k + 1) % _MEM_LOG_EVERY == 0:
                 _log_memory(device, _BATCH_TAG)
+            # Pathological trajectories, reported the batch they appear in rather than only as a
+            # run total: they cluster in particular (t_scale, T) strata, so WHICH batch is the
+            # diagnostic. Silent while there are none, which is the normal case.
+            _bad = _patho["nonfinite"] + _patho["constant"] + _patho["overflow"]
+            if _bad > _patho_seen:
+                print(f"[patho] batch {batch_k}: {_bad - _patho_seen} new pathological "
+                      f"trajectorie(s) -- {_patho['nonfinite']} non-finite, "
+                      f"{_patho['constant']} exactly constant, {_patho['overflow']} over "
+                      f"{_PATHO_MAG:g} in magnitude, of {_patho['rows']:,} simulated", flush=True)
+                _patho_seen = _bad
 
             # --- checkpoint the completed batches [_ck_from, batch_k + 1) ---
             # _pending_rng is this batch's OPENING state, so the write records batches [0, k+1) with
@@ -1696,6 +1799,12 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
         # than no tag at all.
         _BATCH_TAG = ""
 
+    if _patho["rows"]:
+        _bad = _patho["nonfinite"] + _patho["constant"] + _patho["overflow"]
+        print(f"[patho] run total: {_bad:,} pathological of {_patho['rows']:,} simulated "
+              f"trajectories ({100.0 * _bad / _patho['rows']:.4f}%) -- "
+              f"{_patho['nonfinite']:,} non-finite, {_patho['constant']:,} exactly constant, "
+              f"{_patho['overflow']:,} over {_PATHO_MAG:g}", flush=True)
     if x_buf is None:                       # n_runs == 0: nothing was generated, and nothing to size from
         return torch.empty((0, 0)), torch.empty((0, 0))
     if _ck_dir is not None:
@@ -1711,6 +1820,49 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
               f"posterior is saved; keeping it lets you retrain the flow without re-simulating.",
               flush=True)
     return x_buf, th_buf
+
+def winsorize_summary_block(data: torch.Tensor, n_summary: int,
+                            pct: tuple[float, float] = None) -> torch.Tensor:
+    """Clip each SUMMARY column to its own [lo, hi] percentile. Returns a new tensor.
+
+    ⚠ THE CHI BLOCK IS NEVER TOUCHED, and that is a correctness requirement rather than a scoping
+    convenience. A padded probe slot is exactly 0.0 in all six channels and is required to stay
+    BITWISE inert (section 3.6, pinned by tests/test_chi_set_encoder.py). Under chi the mask column
+    is ~0.28 zeros, so its 0.1th percentile is 0.0 and clipping would be a no-op there -- but
+    `logmag`, `cos` and `sin` are dense over live probes, so THEIR 0.1th percentile is non-zero and
+    clipping would push every pad off 0.0 and turn it into a phantom probe. That is the exact defect
+    the packer's `nan_to_num` removal fixed once already.
+
+    log(T) rides in the summary block and is clipped with it; that is harmless (it is bounded by
+    t_min_exp/t_max_exp by construction, so its percentiles are inside its own range).
+    """
+    lo_p, hi_p = config.WINSOR_PCT if pct is None else pct
+    s = data[:, :n_summary]
+    q = torch.tensor([lo_p, hi_p], dtype=torch.float32)
+    lo = torch.empty(n_summary, dtype=data.dtype)
+    hi = torch.empty(n_summary, dtype=data.dtype)
+    for c in range(n_summary):
+        # Sort-based, for the same reason EmbeddedNet fits its knots that way: torch.quantile carries
+        # a 2**24-element input ceiling that 10.24M rows sit just under today.
+        col = s[:, c].to(torch.float32).sort().values
+        n = col.numel()
+        idx = (q * (n - 1)).round().long().clamp(0, max(n - 1, 0))
+        lo[c], hi[c] = col[idx[0]].to(data.dtype), col[idx[1]].to(data.dtype)
+    # IN PLACE, and at the production shape that is the difference between a 5 GiB step and a 12 GiB
+    # one. `data` here is 10.24M x 122 float32 = 5.0 GiB; building a clipped COPY of the summary
+    # block and then torch.cat-ing it back would hold the original, the copy and the concatenation
+    # alive together -- reinstating exactly the host peak gen_training_data's preallocated
+    # accumulators were introduced to remove, at exactly the same point in the run (right before
+    # append_simulations, at the end of a multi-day generation). `data` is owned by train_nn and is
+    # not aliased by the caller, so mutating it is safe; the same tensor is returned for readability.
+    n_moved = int(((s < lo) | (s > hi)).sum())
+    s.clamp_(min=lo, max=hi)
+    if n_moved:
+        print(f"[winsor] clipped {n_moved:,} of {s.numel():,} summary elements "
+              f"({100.0 * n_moved / max(s.numel(), 1):.3f}%) to their per-column "
+              f"{lo_p:.1%}/{hi_p:.1%} percentiles", flush=True)
+    return data
+
 
 def train_nn(training_params: dict, model: str, prior: torch.distributions.Distribution, embedding_net: torch.nn.Module,
              forcing_prior: torch.distributions.Distribution, nd_dim: int, forcing_idx: dict, rescale_idx: dict,
@@ -1808,6 +1960,8 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
             chi_max_cycles=training_params.get("chi_max_cycles", None),
             n_vars=training_params.get("n_vars", None),
             checkpoint=training_params.get("checkpoint", None),
+            nd_idx=training_params.get("nd_idx", None),
+            k_b_cell=training_params.get("k_b_cell", None),
             dtype=training_params["dtype"], device=training_params["device"],
         )
 
@@ -1819,9 +1973,24 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
         # never fire; it exists so that if the transform stack ever changes, the failure arrives as a
         # message naming the offending columns instead of as a silently poisoned multi-hour run.
         nan_mask = torch.isfinite(data).all(dim=1)
-        safe_magnitude_mask = (torch.abs(data) < 1e15).all(dim=1)
         theta_finite_mask = torch.isfinite(thetas).all(dim=1)
-        valid_idx = nan_mask & safe_magnitude_mask & theta_finite_mask
+        # WINSORISATION REPLACES THE OLD `abs(data) < 1e15` ROW FILTER (section 11.3 item 1.3), and
+        # the change of instrument is the point. A row filter answers one bad channel by discarding
+        # that row's other 113 good values, and at a 1e15 threshold it caught 10 rows in 10.24M while
+        # A1_mean still reached -1.7e29 -- three decades of outlier sat under the threshold, and that
+        # is what dragged A1_mean's fitted std to 4.19e11 and made the channel invisible to the flow.
+        # Clipping each COLUMN at its own 0.1/99.9 percentile removes the leverage without removing
+        # any row, and it protects sbi's own z-scoring on the non-chi paths too, which is why it is
+        # not conditioned on who owns the standardisation.
+        n_sum = getattr(embedding_net, "input_dim", None)
+        if n_sum is None:
+            # An embedding net that does not declare its summary width (a stub, a hand-built net in a
+            # test) gets the pre-2026-08-26 behaviour exactly: there is no safe column split to clip
+            # on, and guessing one could clip the chi block. See the block comment on
+            # winsorize_summary_block.
+            valid_idx = nan_mask & (torch.abs(data) < 1e15).all(dim=1) & theta_finite_mask
+        else:
+            valid_idx = nan_mask & theta_finite_mask
         n_bad_theta = int((~theta_finite_mask).sum())
         if n_bad_theta:
             bad_cols = torch.nonzero(~torch.isfinite(thetas).all(dim=0)).flatten().tolist()
@@ -1840,6 +2009,9 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
         if not bool(valid_idx.all()):
             thetas = thetas[valid_idx]
             data = data[valid_idx]
+
+        if n_sum is not None:
+            data = winsorize_summary_block(data, n_sum)
 
         # Fit OUR standardizers, once, on the post-filter data. posterior_nn was already called (it is
         # constructed before any data exists), so this has to happen here -- before append_simulations,

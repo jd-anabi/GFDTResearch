@@ -107,6 +107,11 @@ PLOT_PATH    = _ROOT / "Plots"
 # *.rot.pt, so a checkpoint shard under Posteriors/ would appear in the dropdown as a loadable
 # posterior and fail an isinstance assert on selection.
 CHECKPOINT_PATH = _ROOT / "Checkpoints"
+# Observations persisted at INFERENCE time (section 11.6 guardrail 1). Amortized NPE has no
+# observation when it is SAVED -- which is why `default_x` is None on posterior_08232026 and why
+# the posterior behind those figures cannot be re-sampled from the artifacts alone. TSNPE needs
+# one, so it is recorded where it first exists: at inference.
+OBSERVATION_PATH = _ROOT / "Observations"
 MODELS_PATH  = _ROOT / "Models"      # user-defined model definitions (see core/registry.py)
 
 # === PARAMETER LABELS (for plotting) ===
@@ -305,6 +310,23 @@ REPARAM_LOG_PARAMS = []   # ALL-LINEAR box (the keeper posterior_07012026's coor
                           # f_scale is a RESCALE param, so toggling it here does NOT rebuild the ND prior:
                           # nd_log_mask stays all-False, and the existing linear ND prior
                           # (prior_forcing_no_forcing.pt) + posterior_07012026 already match this box.
+
+# === CONDITIONING REPAIR (PRISM_HANDOFF section 11.3) ============================================
+# Knots in the per-channel rank-Gaussian standardizer EmbeddedNet fits over the summary block.
+# The transform IS the (knot, probit) pair, so this is its resolution: 1024 knots put the finest
+# quantile step at ~0.1%, which resolves every point mass measured on the 10.24M-row cache (the
+# smallest flagged one is E2_log_h2 at 2.8%) with two decades of margin, for 42x1024 floats.
+RANK_GAUSS_KNOTS = 1024
+
+# Per-column winsorisation of the SUMMARY BLOCK before the flow sees it, replacing train_nn's global
+# `abs(data) < 1e15` ROW filter. A row filter is the wrong instrument: one pathological channel threw
+# away all 114 of that row's values, and at 1e15 it caught 10 rows in 10.24M while A1_mean still
+# reached -1.7e29 -- three decades of outlier under the threshold, which is what dragged its fitted
+# std to 4.19e11.
+#   ⚠ THE SUMMARY BLOCK ONLY, NEVER THE CHI BLOCK. A pad slot is exactly 0.0 in all six channels and
+#   is required to be BITWISE inert (section 3.6, with a test). Clipping a probe column whose 0.1th
+#   percentile is non-zero would move that 0.0 and silently turn every pad into a phantom probe.
+WINSOR_PCT = (0.001, 0.999)
 
 # === MULTI-FREQUENCY SUSCEPTIBILITY chi(omega) MODE (breaks the information ceiling) ===
 # When CHI_MODE is on, the forced conditioning is a K-frequency susceptibility CURVE chi(omega)
@@ -818,6 +840,52 @@ class SimConfig:
     def rescale_idx(self) -> dict[str, int]:
         """Maps rescale param names to column indices, e.g. {"x_offset": 0, "x_scale": 1, ...}."""
         return {name: i for i, name in enumerate(self.rescale_params.keys())}
+
+    @property
+    def nd_idx(self) -> dict[str, int]:
+        """Maps ND param names to column indices. The counterpart to rescale_idx/forcing_idx, added
+        for the tier-1 constraint, which needs ``n`` and ``beta`` BY NAME -- a bounds file's ORDER is
+        the source of truth for columns, so only its names are safe to reference."""
+        return {name: i for i, name in enumerate(self.params_dict.keys())}
+
+    @property
+    def sim_rescale_idx(self) -> dict[str, int]:
+        """The rescale index the SIMULATOR sees. Identical to ``rescale_idx`` unless this box declares
+        ``T`` instead of ``f_scale``, in which case T's column is renamed to f_scale -- see
+        core/SBI/derived.py, which owns that rule."""
+        from core.SBI import derived
+        return derived.sim_rescale_idx(self.rescale_idx)
+
+    @property
+    def tier1_args(self) -> tuple:
+        """``(nd_idx, k_b_cell)`` for a tier-1 box; ``(None, None)`` for every other config.
+
+        ⚠ LAZY ON PURPOSE, and it was NOT lazy first time round. ``k_b_cell`` needs a FORCE unit in
+        the units file and raises without one -- and Python evaluates call arguments eagerly, so
+        writing ``to_sim_rescale(..., cfg.nd_idx, cfg.k_b_cell)`` blew up on every config with no
+        force token, even though that function returns early for exactly those. It surfaced as
+        `test_no_forcing_user_model_full_sbi_pipeline` dying inside the Fisher rotation with
+        "No unit with dimensionality [mass] * [length] / [time] ** 2 found in the units file."
+
+        So: every caller passes ``*cfg.tier1_args`` and nothing evaluates the constant unless the box
+        actually declares T.
+        """
+        from core.SBI import derived
+        if not derived.uses_derived_f_scale(self.rescale_idx):
+            return None, None
+        return self.nd_idx, self.k_b_cell
+
+    @property
+    def k_b_cell(self) -> float:
+        """Boltzmann's constant in CELL units: (cell force) x (cell length) per kelvin.
+
+        Derived from the units file rather than hard-coded, for the same reason ``freq_si_to_cell``
+        is: a constant baked for nm/pN silently mis-scales a cell declared in um/nN by nine orders of
+        magnitude. For the nm/ms/pN/kHz master cell this is 1.380649e-2 pN*nm/K, so k_B*T at 300 K is
+        4.14 pN*nm -- the number to sanity-check a derived f_scale against.
+        """
+        return (K_B * self.get_unit_conversion_factor("N")
+                * self.get_unit_conversion_factor("m"))
 
     def get_unit_conversion_factor(self, si_unit: str) -> float:
         """

@@ -4,6 +4,30 @@ import torch
 from core import config
 
 
+def _probit(p: torch.Tensor) -> torch.Tensor:
+    """Phi^-1, the standard-normal quantile function."""
+    return torch.erfinv(2.0 * p - 1.0) * (2.0 ** 0.5)
+
+
+def _column_quantiles(col: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    """``torch.quantile``'s linear interpolation, without its 2**24-element input ceiling.
+
+    Deliberately sort-based rather than a call to ``torch.quantile``: at the production shape a
+    column is 10.24M rows, which is UNDER that ceiling today and would silently stop fitting the
+    moment TRAINING_NUM_RUNS or the batch width grew. One sort per channel is ~40 MB and runs once
+    per training run, so there is nothing to buy by being clever here.
+    """
+    s = col.detach().reshape(-1).to(torch.float32).sort().values
+    n = s.numel()
+    if n == 1:
+        return s.expand(p.numel()).clone()
+    pos = p.to(s.dtype) * (n - 1)
+    lo = pos.floor().long().clamp(0, n - 1)
+    hi = pos.ceil().long().clamp(0, n - 1)
+    w = pos - lo.to(s.dtype)
+    return s[lo] + w * (s[hi] - s[lo])
+
+
 class EmbeddedNet(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, layer_dims: tuple,
                  forcing_dim: int = 0, forcing_layer_dims: tuple = None,
@@ -32,7 +56,33 @@ class EmbeddedNet(nn.Module):
         scaled differently, destroying the invariance the encoder exists to provide -- and the
         near-constant mask column becomes a ~1e7 amplifier under sbi's 1e-7 min-std clamp. So chi
         trains with ``z_score_x="none"`` and standardizes here instead: per-channel inside the
-        encoder, and per-column for the summary block, both fitted over real data only.
+        encoder, and RANK-GAUSSIANISED for the summary block, both fitted over real data only.
+
+        WHY RANK-GAUSSIANISATION AND NOT MEAN/STD (section 11.3 item 1.1). The affine this replaces
+        was measured on the 2026-08-25 retrain's own artifact: ``A1_mean`` was fitted at
+        std = 4.19e11 against a physical range of ~1e3, and ``D3_bimodality`` at std = 4.42e8
+        against a range of (0, 1]. Both were driven there by a handful of pathological trajectories
+        -- ~1e29-magnitude traces for A1, exactly-constant ones for D3 (which make ``_group_d``'s
+        clamp fire and return exactly 1/1e-12). The consequence is that sweeping either channel
+        across its ENTIRE physical range moved the embedding by 1.8e-7 / 8.9e-8, against ~1.4 for a
+        healthy channel: less than one float32 ulp, i.e. the flow could not see two of its own
+        conditioning channels at all.
+
+        Rank-Gaussianisation fixes that by construction and buys three more things:
+
+        * it is MONOTONE and invertible, so no information is lost;
+        * being invariant to any monotone transform, it settles the log-versus-linear question for
+          every channel at once (see REPARAM_LOG_PARAMS' history);
+        * a sentinel point mass becomes a point mass at a KNOWN quantile the flow can key on, rather
+          than a scale factor -- which matters because a large fraction of several ``_logp`` channels
+          sits on exactly ``log(1e-12)``.
+
+        LOADING AN OLDER POSTERIOR. A posterior trained before this change is a pickled
+        DirectPosterior holding an EmbeddedNet whose buffers are ``sum_mean``/``sum_std``.
+        Unpickling restores THOSE buffers into an instance of THIS class, so ``forward`` dispatches
+        on which buffers are present rather than assuming the new ones. Without that branch every
+        pre-2026-08-26 artifact becomes unloadable -- including ``posterior_08232026``, which is the
+        baseline every section 11 gate is measured against.
         """
         super().__init__()
 
@@ -72,8 +122,14 @@ class EmbeddedNet(nn.Module):
                 self.chi_k_pad = chi_k_pad
                 self.chi_layout = config.CHI_LAYOUT
                 # Summary-block standardization, ours because z_score_x is "none" under chi.
-                self.register_buffer("sum_mean", torch.zeros(input_dim))
-                self.register_buffer("sum_std", torch.ones(input_dim))
+                # rg_knots[c] is channel c's empirical quantile function sampled at the mid-point
+                # levels below; rg_z is the shared probit of those levels. Monotone piecewise-linear
+                # between them, so the pair IS the transform -- there is no fitted scale to go wrong.
+                q = int(config.RANK_GAUSS_KNOTS)
+                p = (torch.arange(q, dtype=torch.float64) + 0.5) / q
+                self.register_buffer("rg_knots", torch.zeros(input_dim, q))
+                self.register_buffer("rg_z", _probit(p).to(torch.float32))
+                self.register_buffer("rg_keep", torch.zeros(input_dim, dtype=torch.uint8))
             else:
                 self.forcing_net = nn.Sequential(
                     nn.Linear(forcing_dim, forcing_layer_dims[0]),
@@ -96,20 +152,79 @@ class EmbeddedNet(nn.Module):
             # No forcing: just project summary output to final dimension
             self.output_net = nn.Linear(layer_dims[1], output_dim)
 
+    # --- summary-block standardization ------------------------------------------------------
+    @staticmethod
+    def rank_gaussianize(x: torch.Tensor, knots: torch.Tensor, z: torch.Tensor,
+                         keep: torch.Tensor) -> torch.Tensor:
+        """(B, C) -> (B, C), monotone per channel. Public (and static) so the tests and the ablation
+        script can exercise the transform without a trained net.
+
+        THE TIE RULE IS THE PART THAT MATTERS. A channel with a large sentinel mass produces a long
+        run of IDENTICAL knots, and a query landing on that value must map to the MID-RANK of the
+        run. Taking whichever end ``searchsorted`` happens to return would put the whole point mass
+        at one edge of its own rank interval, so the sign of the resulting jump would depend on a
+        float comparison rather than on the data. The tie branch is applied LAST, so a value equal to
+        the first or last knot is resolved as a tie rather than by the out-of-range clamps.
+        """
+        q = knots.shape[1]
+        xt = x.transpose(0, 1).contiguous()                              # (C, B)
+        lo = torch.searchsorted(knots, xt, right=False)                  # first knot >= x
+        hi = torch.searchsorted(knots, xt, right=True)                   # first knot >  x
+
+        j = lo.clamp(1, q - 1)
+        x0 = torch.gather(knots, 1, j - 1)
+        x1 = torch.gather(knots, 1, j)
+        z0, z1 = z[j - 1], z[j]
+        w = ((xt - x0) / (x1 - x0).clamp(min=1e-30)).clamp(0.0, 1.0)
+        out = z0 + w * (z1 - z0)
+
+        # Outside the fitted range: clamp to the extreme knot rather than extrapolating a probit.
+        out = torch.where(lo == 0, z[0].expand_as(out), out)
+        out = torch.where(lo >= q, z[q - 1].expand_as(out), out)
+        # Exactly ON a knot (or a run of them): the mid-rank of that run. LAST, see the docstring.
+        mid = 0.5 * (z[lo.clamp(max=q - 1)] + z[(hi - 1).clamp(min=0)])
+        out = torch.where(hi > lo, mid, out)
+
+        out = out.transpose(0, 1)
+        return torch.where(keep.to(torch.bool), out, torch.zeros_like(out))
+
     @torch.no_grad()
     def fit_standardization(self, x: torch.Tensor) -> None:
         """Fit both standardizers from the post-filter training tensor. chi set mode only."""
         if not self.owns_standardization:
             return
         s = x[:, :self.input_dim]
-        mu, sd = s.mean(0), s.std(0)
-        # Pass a near-constant column THROUGH rather than dividing by ~0. sbi's equivalent clamps at
-        # min_std=1e-7, which turns such a column into a ~1e7 amplifier of its own rounding -- and
-        # under chi, Group G's 11 columns are identically zero by construction.
-        keep = sd > 1e-6
-        self.sum_mean.copy_(torch.where(keep, mu, torch.zeros_like(mu)))
-        self.sum_std.copy_(torch.where(keep, sd, torch.ones_like(sd)))
+        # Pass a near-constant column THROUGH rather than ranking it. sbi's affine equivalent clamps
+        # at min_std=1e-7, which turns such a column into a ~1e7 amplifier of its own rounding --
+        # and under chi, Group G's 11 columns are identically zero BY CONSTRUCTION. Ranking a
+        # constant is undefined in-distribution and actively harmful out of it: an observation whose
+        # dead channel is not exactly the training constant would clamp to +-z_max and inject a
+        # full-scale signal from a channel that carries nothing.
+        keep = s.std(0) > 1e-6
+        q = self.rg_knots.shape[1]
+        p = (torch.arange(q, dtype=torch.float64) + 0.5) / q
+        for c in range(self.input_dim):
+            if bool(keep[c]):
+                self.rg_knots[c] = _column_quantiles(s[:, c], p).to(self.rg_knots.dtype)
+        self.rg_keep.copy_(keep.to(torch.uint8))
         self.forcing_net.fit(x[:, self.input_dim:])
+
+    def standardize_summary(self, s: torch.Tensor) -> torch.Tensor:
+        """The summary block's standardizer, whichever this instance carries.
+
+        A pre-2026-08-26 artifact unpickles with ``sum_mean``/``sum_std`` and no rank buffers; it
+        keeps the affine it was trained under, because re-standardising a trained flow's input is
+        not a fix, it is a different network. Anything else is a net that was never fitted.
+        """
+        if "rg_knots" in self._buffers:
+            return self.rank_gaussianize(s, self.rg_knots, self.rg_z, self.rg_keep)
+        if "sum_mean" in self._buffers:                     # legacy affine, see the class docstring
+            return (s - self._buffers["sum_mean"]) / self._buffers["sum_std"]
+        raise RuntimeError(
+            "EmbeddedNet.standardize_summary(): this instance carries neither the rank-Gaussian "
+            "buffers nor the legacy sum_mean/sum_std pair, so the summary block has no standardizer "
+            "at all. A net built by build_embedding_net always has one; this is a hand-constructed "
+            "or partially-unpickled module.")
 
     @property
     def standardization_fitted(self) -> bool:
@@ -120,7 +235,7 @@ class EmbeddedNet(nn.Module):
             s = x[:, :self.input_dim]
             f = x[:, self.input_dim:]
             if self.owns_standardization:
-                s = (s - self.sum_mean) / self.sum_std
+                s = self.standardize_summary(s)
             return self.merge_net(torch.cat([
                 self.summary_net(s),
                 self.forcing_net(f)

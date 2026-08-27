@@ -40,7 +40,12 @@ def _png_fig_sink(figure_signal):
             fig_pickle = None
         buf = io.BytesIO()
         try:
-            fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+            # save_figure, not fig.savefig: it pins the saved background to the theme the figure was
+            # BUILT in. rcParams is global and mpl_theme rewrites it on every appearance change, so a
+            # run that straddles a theme flip otherwise saves dark artists onto a light page with
+            # light text -- unreadable. See visualizers.save_figure.
+            from core.Helpers.visualizers import save_figure
+            save_figure(fig, buf, format="png", dpi=110, bbox_inches="tight")
         finally:
             plt.close(fig)
         figure_signal.emit(title, buf.getvalue(), fig_pickle)

@@ -296,16 +296,26 @@ class OrthogonalTransform(Transform):
         return torch.zeros(x.shape[:-1], dtype=x.dtype, device=x.device)
 
 
-def fisher_eigenbasis(F: torch.Tensor) -> torch.Tensor:
+def fisher_eigenbasis(F: torch.Tensor, with_values: bool = False):
     """
     Eigenvectors V (columns) of a symmetric Fisher matrix F, descending by eigenvalue.
     The map w = V^T z sends the (Laplace) posterior covariance F^{-1} to a diagonal in w,
     i.e. decorrelates the flow's coordinates. F is computed from SIMULATIONS (the standardized
     feature-Jacobian J: F = J^T J) — no trained posterior is needed.
+
+    ``with_values=True`` also returns the eigenvalues, descending, aligned with V's columns.
+
+    ⚠ THE EIGENVALUES ARE THE HALF THAT MAKES V INTERPRETABLE, and they used to be thrown away here.
+    V alone gives an ORDERING — "direction 12 is the least constrained" — but not a SCALE, and the
+    scale is the whole question: a spread of 3x across the 13 directions means the experiment measures
+    everything tolerably, while 1e6 means it measures four things and the rest are prior. Recovering
+    them after the fact costs a full Fisher re-run (the dominant pre-training cost), so they are now
+    carried out of here and into the posterior's sidecar.
     """
     F = 0.5 * (F + F.transpose(-1, -2))
     evals, evecs = torch.linalg.eigh(F)
-    return evecs[:, torch.argsort(evals, descending=True)]
+    order = torch.argsort(evals, descending=True)
+    return (evecs[:, order], evals[order]) if with_values else evecs[:, order]
 
 
 def build_rotated_bijection(box_transform: ComposeTransform, V: torch.Tensor) -> ComposeTransform:
@@ -378,6 +388,11 @@ def posterior_mode(posterior_latent, sidecar: dict | None = None) -> tuple[str, 
             raise ValueError("Cannot determine this posterior's observation mode: it has no sidecar, "
                              "no embedding net carrying forcing_dim, and no condition_shape.")
         from core.SBI.statistics import FEATURE_LABELS
+        # DELIBERATELY the LEGACY 41+1 width, not statistics.SUMMARY_WIDTH. Tier 3 is reached
+        # only by an artifact with no sidecar AND no embedded forcing_dim, i.e. a pre-reparam
+        # posterior -- and every one of those was trained before the valid-flag block widened
+        # the summary block to 49. Using the current width here would mis-decode exactly the
+        # artifacts this branch exists for. (The docstring above anticipated this day.)
         fdim = int(cond[-1]) - (len(FEATURE_LABELS) + 1)
         warnings.warn(
             f"Posterior has no sidecar and no embedded forcing_dim; inferring forcing_dim={fdim} "

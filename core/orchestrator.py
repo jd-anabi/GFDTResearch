@@ -21,7 +21,8 @@ from torch.distributions import Distribution, MixtureSameFamily
 from tqdm import tqdm
 
 from .config import (
-    SimConfig, PRIOR_PATH, POSTERIOR_PATH, PLOT_PATH, T_MIN_EXP_S, T_MAX_EXP_S,
+    SimConfig, PRIOR_PATH, POSTERIOR_PATH, PLOT_PATH, OBSERVATION_PATH,
+    T_MIN_EXP_S, T_MAX_EXP_S,
     CHUNK_LEN, N_ND_MAX, PPC_BIN_SIZE, SBC_N_CAL, STABILITY_SWEEP_ND_UNITS, TRAINING_NUM_RUNS,
     PRIOR_SWEEP_ITERATIONS, PRIOR_SWEEP_BATCH, TRAINING_RUN_SIZE, TRAINING_CHECKPOINT_EVERY,
     DENSITY_ESTIMATOR, NSF_HIDDEN_FEATURES, NSF_NUM_TRANSFORMS, NSF_NUM_BINS,
@@ -31,7 +32,9 @@ from .config import (
 )
 from . import cli, config, forcing
 from .Helpers import helpers, visualizers, file_manager, labels
-from .SBI import embedded_network, pipeline, analysis, decorrelate, chi, overlay, training_checkpoint
+from .SBI import (embedded_network, pipeline, analysis, decorrelate, chi, derived, overlay,
+                  truncate,
+                  statistics, training_checkpoint)
 from .SBI.Priors import sbi_prior_wrapper
 from .SBI.reparam import (
     build_inferred_bijection, TransformedPosterior, build_rescale_bijection,
@@ -143,6 +146,13 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
     # Ground-truth rescale and forcing params as (1, n) tensors
     forcing_gt = torch.tensor([[val for val, _ in cfg.force_params_dict.values()]], dtype=cfg.hw.dtype, device=cfg.hw.device)
     rescale_gt = torch.tensor([[val for val, _ in cfg.rescale_params.values()]], dtype=cfg.hw.dtype, device=cfg.hw.device)
+    # TIER 1 (section 11.5): substitute the DERIVED f_scale into T's column before anything
+    # simulates. A no-op for a box that declares f_scale. `sim_rescale_idx` is what the force
+    # builders and gen_chi_raw must then be given -- handed the INFERRED index they would not
+    # find 'f_scale', would fall into the Hopf-style x_scale/t_scale branch, and would drive
+    # at a silently wrong amplitude.
+    rescale_gt = derived.to_sim_rescale(cfg.params_tensor, rescale_gt, cfg.rescale_idx,
+                                       *cfg.tier1_args)
 
     # Ground-truth t_scale for this observation
     t_scale_gt = rescale_gt[:, cfg.rescale_idx["t_scale"]].item()
@@ -206,7 +216,8 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
         return x_fine[:, ::subsample_factor][:, :N_obs]
 
     if cfg.has_forcing and not cfg.chi_mode:
-        force = pipeline.build_nondim_sin_force_tensor(forcing_gt, t_fine, rescale_gt, cfg.forcing_idx, cfg.rescale_idx)
+        force = pipeline.build_nondim_sin_force_tensor(forcing_gt, t_fine, rescale_gt,
+                                                      cfg.forcing_idx, cfg.sim_rescale_idx)
         x_nd = _spont_run(force)                                 # forced run -> Group G
         x_nd_spont = _spont_run(torch.zeros_like(force))         # spontaneous -> Groups A-F
         x_dim = helpers.rescale(x_nd, x_scale, x_offset)
@@ -239,7 +250,7 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
         obs_mults = chi.chi_multipliers_for(cfg)
         chi_block, _chi_mask = pipeline.gen_chi_block(
             cfg.model, cfg.params_tensor, rescale_gt, x_spont_dim, t_fine, cfg.inits_tensor,
-            cfg.rescale_idx, n_segs_gt, cfg.steady_idx, subsample_factor, N_obs, cfg.dt_exp,
+            cfg.sim_rescale_idx, n_segs_gt, cfg.steady_idx, subsample_factor, N_obs, cfg.dt_exp,
             obs_mults, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
             max_cycles=cfg.chi_max_cycles,
             state_dep_drift=cfg.state_dep_drift, dtype=cfg.hw.dtype, device=cfg.hw.device)
@@ -442,6 +453,13 @@ def training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dict
         "t_scale_bounds": list(cfg.t_scale_bounds),
         "n_grid": int(cfg.t.shape[0]),
         "spontaneous_only": not cfg.has_forcing,
+        # The FEATURE SET, not just its width. A checkpoint stores conditioning ROWS, so a run
+        # whose summary block means something different must not resume onto them -- and width
+        # alone would not catch a reordered or substituted flag set of equal length. Naming the
+        # flags makes the digest change when the feature set does, which is what orphans the
+        # pre-flag checkpoints and sends scripts/migrate_checkpoint_flags.py to a NEW directory
+        # rather than splicing rows that mean two different things.
+        "summary_flags": list(statistics.VALID_FLAG_LABELS),
         "chi_mode": bool(cfg.chi_mode),
         "chi_layout": config.CHI_LAYOUT if cfg.chi_mode else None,
         "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
@@ -453,6 +471,40 @@ def training_identity(cfg: SimConfig, prior, run_size: int, n_runs: int) -> dict
         "dtype": str(cfg.hw.dtype),
     }
 
+
+def _assert_amortization_understood(choice: str) -> None:
+    """Refuse a TRUNCATED (non-amortized) posterior unless the caller opted into one.
+
+    SECTION 11.6 GUARDRAIL 2. A truncated posterior is valid only near the observation its region was
+    drawn around: outside that region the flow saw ZERO training rows, so it does not return the
+    prior there, it returns whatever the flow extrapolates -- confidently. Amortized and truncated
+    artifacts sit side by side in one ArtifactPicker, with nothing in the filename to tell them
+    apart, which is precisely how the retired-band posterior cost a five-day run.
+
+    A missing or amortized sidecar passes silently, so every existing artifact is unaffected.
+    """
+    side = read_sidecar(choice, POSTERIOR_PATH, map_location="cpu")
+    if not side or side.get("amortized", True):
+        return
+    tr = side.get("truncation") or {}
+    dims = tr.get("dims", [])
+    raise ValueError(
+        f"Posterior '{choice}' is NOT AMORTIZED: it was trained by TSNPE on a prior truncated to a "
+        f"{tr.get('level', '?')}-HPD region along Fisher direction(s) {dims}, drawn around the "
+        f"observation with digest {side.get('x_obs_digest')}. It is only valid for observations in "
+        f"that region -- outside it the flow has never seen a training row and will extrapolate "
+        f"confidently rather than return the prior. Use it from the TSNPE tab, which checks the "
+        f"observation against that digest, or pick an amortized posterior for general inference.")
+
+
+# Whether infer_and_visualize records the observation it ran against (section 11.6 guardrail 1).
+# A MODULE global so the suites can rebind it, exactly as they rebind TRAINING_CHECKPOINT_EVERY and
+# for the same reason: the full-pipeline tests call infer_and_visualize, and left on they scatter a
+# record into Resources/Observations on every run. Nothing else in the suite writes into Resources,
+# and that property is worth keeping. It is NOT a user-facing switch -- a real inference always
+# records, because TSNPE keys on the digest and an amortized posterior has no observation at save
+# time.
+PERSIST_OBSERVATIONS = True
 
 CHI_OVERRIDE_ENV = "PRISM_CHI_OVERRIDE"
 
@@ -660,6 +712,7 @@ def build_posterior(
     train_new: bool,
     *, save: bool = True, save_name: str | None = None, fig_sink=None,
     num_runs: int | None = None, run_size_cap: int | None = None,
+    truncation=None, x_obs_digest: str | None = None,
 ) -> tuple[TransformedPosterior, dict | None]:
     """
     Load an existing latent DirectPosterior from disk and wrap with T, or train a new one
@@ -675,6 +728,11 @@ def build_posterior(
                      which is the CLI's behaviour and what every script and test gets.
     :param run_size_cap: CEILING on simulations per batch, 0 = follow the hardware default; None =
                      config.TRAINING_RUN_SIZE.
+    :param truncation: a ``SBI.truncate.TruncationRegion`` to restrict the PRIOR to (TSNPE round 2+).
+                     None = ordinary amortized NPE. The resulting artifact is marked NON-AMORTIZED in
+                     its sidecar and the load path refuses it for general inference.
+    :param x_obs_digest: the observation the region was drawn around (``observation_digest``), so the
+                     artifact records what it is valid near.
 
     ⚠ WHY THESE ARE PARAMETERS AND NOT "JUST SET THE CONFIG CONSTANT". This module does
     `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE`, which SNAPSHOTS both at import -- so a
@@ -690,6 +748,20 @@ def build_posterior(
     wall-clock -- the solver is kernel-launch-bound; measured 7.37 s at 2048 against 7.74 s at 1024 --
     so narrowing it does not speed anything up, it trades training rows for peak VRAM about 1:1.
     """
+    # Tier 1 (section 11.5): announce the DERIVED force scale before the first simulation, for the
+    # same reason the chi banner exists -- a training distribution that changed silently is what cost
+    # the 2026-08-19 run. Reports rather than refuses: whether ~1e4 pN is reasonable is a judgement
+    # about the preparation, not something a threshold in this file should decide.
+    if derived.uses_derived_f_scale(cfg.rescale_idx):
+        try:
+            _s = prior.sample((4096,)).to("cpu")
+            print(derived.describe_derived_f_scale(
+                _s[:, :len(cfg.params_dict)], _s[:, len(cfg.params_dict):],
+                cfg.rescale_idx, cfg.nd_idx, cfg.k_b_cell,
+                chi_f0=cfg.chi_f0 if cfg.chi_mode else None), flush=True)
+        except Exception as _e:                  # noqa: BLE001 -- a banner must never stop a run
+            print(f"[tier1] could not describe the derived f_scale: {_e}", flush=True)
+
     # Resolved before anything reads them: both are part of the checkpoint identity below.
     n_runs = TRAINING_NUM_RUNS if num_runs is None else int(num_runs)
     size_cap = TRAINING_RUN_SIZE if run_size_cap is None else int(run_size_cap)
@@ -719,6 +791,7 @@ def build_posterior(
         assert isinstance(posterior_latent, DirectPosterior)
         posterior_latent.device = posterior_latent._device = cfg.hw.device
         _assert_mode_matches(cfg, posterior_latent, choice)
+        _assert_amortization_understood(choice)
         # Reconstruct the exact training box (+ rotation) from the <name>.rot.pt sidecar — log-mask
         # and V are self-describing, so eval is correct regardless of the current config (single
         # source of truth shared with the offline diagnostic scripts).
@@ -820,6 +893,9 @@ def build_posterior(
             ckpt_resumed = training_checkpoint.read_header(ckpt_dir)
 
     rotate = cfg.reparam_rotate
+    # Only the freshly-computed branch below knows the eigenvalues; a resumed checkpoint carries V but
+    # not them, and an unrotated run has no Fisher at all. None is recorded honestly in the sidecar.
+    fisher_evals = None
     if ckpt_resumed is not None and rotate:
         # Rehomed onto this run's device/dtype. The checkpoint stores V on the CPU so it is portable,
         # but build_latent_fisher_rotation returns it on cfg.hw.device -- and OrthogonalTransform does
@@ -843,12 +919,32 @@ def build_posterior(
         print("Computing decorrelating Fisher rotation (REPARAM_ROTATE=True)...")
         # Average the Fisher over the prior (not just GT) so the linear rotation is valid prior-wide.
         # GT-free: the rotation anchors on the prior median with a representative drive (force_prior).
-        V = decorrelate.build_latent_fisher_rotation(
-            cfg, T, latent_prior=latent_inferred_prior, force_prior=force_prior)
+        V, fisher_evals = decorrelate.build_latent_fisher_rotation(
+            cfg, T, latent_prior=latent_inferred_prior, force_prior=force_prior, with_values=True)
+        # The eigenvalues ride into the sidecar with V. Without them the saved rotation only says
+        # WHICH direction is least constrained, never BY HOW MUCH -- and recovering them afterwards
+        # costs a full Fisher re-run. See scripts/identifiability.py.
+        _spread = float(fisher_evals[0] / fisher_evals[-1]) if float(fisher_evals[-1]) > 0 else float("inf")
+        print(f"[fisher] eigenvalue spread (best/worst direction): {_spread:.3g}", flush=True)
         T_train = build_rotated_bijection(T, V)
         train_prior = RotatedLatentPrior(latent_inferred_prior, V)
     else:
         V, T_train, train_prior = None, T, latent_inferred_prior
+
+    # ── TSNPE (section 11.6) ──────────────────────────────────────────────────────────────────────
+    # ⚠ THE PROPOSAL IS THE TRUNCATED PRIOR, NEVER THE POSTERIOR. Wrapped around `train_prior`, which
+    # is the ROTATED latent prior when the rotation is on -- so the region's axes are the flow's own
+    # latent axes, i.e. V's columns, i.e. the Fisher directions. Wrapping the UNROTATED prior instead
+    # would silently truncate along physical-ish axes and cut the flat directions on noise, which is
+    # exactly what guardrail 3 exists to prevent.
+    #
+    # No proposal correction is applied, and that is correct rather than an omission: truncation is a
+    # RESTRICTION, not a reweighting, which is the property that distinguishes TSNPE from SNPE-A/B/C.
+    if truncation is not None:
+        train_prior = truncate.TruncatedLatentPrior(train_prior, truncation)
+        print(f"[tsnpe] training on the PRIOR RESTRICTED to {truncation!r}", flush=True)
+        print(f"[tsnpe] this artifact will be marked NON-AMORTIZED; it is valid only near the "
+              f"observation its region was drawn around (digest {x_obs_digest}).", flush=True)
 
     training_params = {
         "model": cfg.model,
@@ -877,6 +973,10 @@ def build_posterior(
         # bounds alone (no cell loaded) has an empty inits_dict and cfg.inits_tensor would RAISE. The
         # fallback synthesizes the same model-default inits the training loop itself uses.
         "n_vars": _observation_inits(cfg).shape[-1],
+        # Tier 1 (section 11.5). Both are None-safe downstream and are simply ignored by a box
+        # that declares f_scale, so this costs pre-tier-1 runs nothing.
+        "nd_idx": cfg.tier1_args[0],
+        "k_b_cell": cfg.tier1_args[1],
         "dtype": cfg.hw.dtype,
         "device": cfg.hw.device,
     }
@@ -898,8 +998,8 @@ def build_posterior(
     # chi-mode routes the padded probe SET through the EmbeddedNet's second pathway in place of the
     # single-frequency forcing block, as a permutation-invariant set encoder.
     forcing_dim = expected_forcing_dim(cfg)        # shared with the sidecar + the load-side mode guard
-    from .SBI.statistics import FEATURE_LABELS
-    input_dim = len(FEATURE_LABELS) + 1            # n_summary_stats + log(T); observation-independent
+    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    input_dim = SUMMARY_WIDTH + 1            # n_summary_stats + log(T); observation-independent
 
     embedded_net = build_embedding_net(cfg, input_dim, forcing_dim)
 
@@ -924,7 +1024,9 @@ def build_posterior(
 
     if save:
         name = save_name if save_name is not None else cli.prompt_save_name("posterior")
-        save_posterior_artifacts(name, posterior_latent, V, pos_diagnostics, cfg)
+        save_posterior_artifacts(name, posterior_latent, V, pos_diagnostics, cfg,
+                                 fisher_eigenvalues=fisher_evals, truncation=truncation,
+                                 x_obs_digest=x_obs_digest)
 
     # Display the training-loss curve (a GUI embeds it via the sink; the CLI historically saved it to
     # PNG without showing, so with no sink we do nothing here to preserve that behavior).
@@ -933,8 +1035,88 @@ def build_posterior(
         if fig_loss is not None:
             fig_sink("Training loss", fig_loss)
 
+    if truncation is not None and hasattr(train_prior, "acceptance_rate"):
+        # GUARDRAIL 5: the fraction of prior mass this round threw away, measured rather than
+        # assumed. Deleted support is a one-way ratchet -- no later round can recover it -- so the
+        # number belongs in the run log next to the artifact it produced.
+        _acc = train_prior.acceptance_rate
+        print(f"[tsnpe] the truncation kept {_acc:.3%} of the prior's mass "
+              f"({1 - _acc:.3%} of the support is now permanently unavailable to later rounds).",
+              flush=True)
+
     assert isinstance(posterior_latent, DirectPosterior)
     return TransformedPosterior(posterior_latent, T_train), pos_diagnostics
+
+
+def observation_digest(x_obs: torch.Tensor) -> str:
+    """Stable 16-hex digest of a conditioning vector. Same shape as _gmm_fingerprint, and exact
+    rather than tolerance-based for the same reason: this answers "is this the same observation",
+    not "are these observations similar"."""
+    b = x_obs.detach().cpu().to(torch.float64).contiguous().numpy().tobytes()
+    return hashlib.sha256(b).hexdigest()[:16]
+
+
+def save_observation(cfg: SimConfig, x_obs: torch.Tensor, *, tag: str = "") -> tuple:
+    """Persist the observation an inference was actually run against. Returns (path, digest).
+
+    SECTION 11.6 GUARDRAIL 1, and the timing is the whole point. Amortized NPE has NO observation
+    when the posterior is saved -- which is exactly why ``default_x`` is None on
+    ``posterior_08232026``, and why the posterior behind that run's figures cannot be re-sampled from
+    the artifacts alone. The fix therefore belongs at INFERENCE time, not at save time; bolting it
+    onto save_posterior_artifacts would record a None.
+
+    TSNPE then refuses to build a truncation region unless the stored digest matches the dataset
+    currently loaded -- a region drawn around one recording and applied to another deletes prior
+    support on the strength of the wrong data, and truncation is a one-way ratchet.
+    """
+    dig = observation_digest(x_obs)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    name = f"obs_{stamp}_{dig}{('_' + tag) if tag else ''}.pt"
+    path = OBSERVATION_PATH / name
+    file_manager.atomic_torch_save({
+        "x_obs": x_obs.detach().cpu(),
+        "digest": dig,
+        "mode": cfg.observation_mode,
+        "input_dim": statistics.SUMMARY_WIDTH + 1,
+        "forcing_dim": expected_forcing_dim(cfg),
+        "param_keys": list(cfg.params_dict) + list(cfg.rescale_params),
+        "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
+        "chi_n_freqs": cfg.chi_n_freqs if cfg.chi_mode else None,
+        "model": cfg.model,
+    }, path)
+    return path, dig
+
+
+def load_observation(path) -> dict:
+    """Read a record written by :func:`save_observation`."""
+    return torch.load(str(path), map_location="cpu", weights_only=False)
+
+
+def build_truncation_region(posterior, obs_record: dict, x_obs: torch.Tensor, *,
+                            n_directions: int = None, level: float = None):
+    """The TSNPE region for the NEXT round, with guardrail 1 enforced.
+
+    ⚠ REFUSES unless the observation currently loaded is BITWISE the one the stored record describes.
+    A region drawn around one recording and applied to another deletes prior support on the strength
+    of the wrong data -- and truncation is a one-way ratchet, so a later round cannot undo it. This is
+    the check that makes "persist x_obs at inference time" worth doing at all.
+
+    :param posterior: the TransformedPosterior (or DirectPosterior) to draw the region from.
+    :param obs_record: the dict from :func:`load_observation`.
+    :param x_obs: the conditioning vector currently loaded.
+    """
+    want, got = obs_record.get("digest"), observation_digest(x_obs)
+    if want != got:
+        raise ValueError(
+            f"The stored observation (digest {want}) is not the one currently loaded (digest {got}), "
+            f"so a truncation region built from it would delete prior support on the strength of a "
+            f"DIFFERENT recording -- permanently, because truncation is one-way. Re-run inference on "
+            f"this dataset first so its observation is the one on record.")
+    latent = getattr(posterior, "latent", posterior)
+    return truncate.region_from_posterior(
+        latent, x_obs,
+        n_directions=truncate.DEFAULT_N_DIRECTIONS if n_directions is None else int(n_directions),
+        level=truncate.DEFAULT_HPD if level is None else float(level))
 
 
 def save_prior_artifacts(name: str, nd_prior, cfg: SimConfig, *, fig_sink=None) -> None:
@@ -975,8 +1157,8 @@ def build_embedding_net(cfg: SimConfig, input_dim: int = None, forcing_dim: int 
     (the set encoder's geometry is independent of the pad, or no two pads could share a checkpoint);
     everything else keeps the original forcing_dim-derived sizing byte-for-byte.
     """
-    from .SBI.statistics import FEATURE_LABELS
-    input_dim = (len(FEATURE_LABELS) + 1) if input_dim is None else input_dim
+    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    input_dim = (SUMMARY_WIDTH + 1) if input_dim is None else input_dim
     forcing_dim = expected_forcing_dim(cfg) if forcing_dim is None else forcing_dim
     if cfg.chi_mode:
         return embedded_network.EmbeddedNet(
@@ -1071,8 +1253,8 @@ def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
     want_mode, want_dim = cfg.observation_mode, expected_forcing_dim(cfg)
     if mode == want_mode and forcing_dim == want_dim:
         return
-    from .SBI.statistics import FEATURE_LABELS
-    summary_w = len(FEATURE_LABELS) + 1
+    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    summary_w = SUMMARY_WIDTH + 1
     detail = f" (K={k})" if k else ""
     raise ValueError(
         f"Posterior '{choice}' was trained in {mode.upper()} mode{detail} with a forcing/chi block of "
@@ -1083,7 +1265,8 @@ def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
     )
 
 
-def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict | None, cfg: SimConfig) -> None:
+def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict | None, cfg: SimConfig,
+                            fisher_eigenvalues=None, truncation=None, x_obs_digest=None) -> None:
     """
     Persist a trained posterior and its companions: <name>.pt (raw latent DirectPosterior), the
     <name>.rot.pt reparam sidecar (rotation V + log params, when either is active), and the
@@ -1110,15 +1293,29 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     # trained in. load_eval_bijection rebuilds the box from THIS list, not from the live config, so a
     # divergence here would be invisible until the posterior evaluated in the wrong coordinate.
     log_params_used = resolved_log_params(cfg, log_params=_log_params_for(cfg))
-    from .SBI.statistics import FEATURE_LABELS
+    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
     file_manager.atomic_torch_save({
         "V": V,
+        # GUARDRAIL 2 (section 11.6). An amortized posterior serves any observation; a TRUNCATED one
+        # is valid only near the observation its region was drawn around, and outside it the flow has
+        # never seen a single training row. With both workflows live the two sit side by side in one
+        # ArtifactPicker -- the same class of confusion as the retired-band posterior that already
+        # cost a five-day run -- so the distinction is recorded rather than left to a filename.
+        "amortized": truncation is None,
+        "truncation": None if truncation is None else truncation.to_dict(),
+        "x_obs_digest": x_obs_digest,
+        # The eigenvalues V's columns were sorted by, descending. None when the rotation came from a
+        # resumed training checkpoint (which stores V but not them) or when the rotation is off.
+        # Without these the sidecar records an ORDERING of directions but no scale, and the scale is
+        # the question -- see reparam.fisher_eigenbasis and scripts/identifiability.py.
+        "fisher_eigenvalues": (fisher_eigenvalues.detach().cpu()
+                               if hasattr(fisher_eigenvalues, "detach") else fisher_eigenvalues),
         "log_params": log_params_used,
         # Observation mode + conditioning geometry -- see SBI/reparam.posterior_mode, which prefers
         # these over decoding the trained net (that decoding cannot distinguish chi at K=2 from a
         # hypothetical 6-parameter drive).
         "mode": cfg.observation_mode,
-        "input_dim": len(FEATURE_LABELS) + 1,
+        "input_dim": SUMMARY_WIDTH + 1,
         "forcing_dim": expected_forcing_dim(cfg),
         # LAYOUT is what the load path gates on. Width cannot be trusted to identify it: 6*K_PAD at
         # K_PAD=5 is exactly 30, an exact collision with the retired layout-1 3*K at K=10.
@@ -1312,6 +1509,7 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
         # CHI_K_FIXED, run per stratum -- see section 4.1 step 5.
         chi_k_fixed=None,
         n_vars=_observation_inits(cfg).shape[-1],
+        nd_idx=cfg.tier1_args[0], k_b_cell=cfg.tier1_args[1],
         dtype=dtype, device=device,
     )
     x_cal_dev = x_cal.to(device)
@@ -1364,6 +1562,22 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
               title=f"TARP (ATC={atc:.3f}, KS p={tarp_kspval:.3f})")
     _emit(fig_sink, "TARP coverage", plt.gcf())
 
+    # --- Informativeness (section 11.4) -----------------------------------------------------------
+    # Everything above measures CALIBRATION, and a posterior that simply returns the prior passes all
+    # of it. This is the scalar that says whether the run learned anything, on the calibration set
+    # just simulated, so it costs nothing extra. Reported alongside rather than instead: a run wants
+    # both numbers, and the pair is what distinguishes "honest and useful" from "honest and vacuous".
+    try:
+        info = analysis.informativeness(
+            posterior, theta_star_dev, x_cal_dev, inferred_prior,
+            param_names=list(cfg.params_dict) + list(cfg.rescale_params))
+        print(analysis.describe_informativeness(info))
+    except Exception as _e:                      # noqa: BLE001
+        # A diagnostic must never be the thing that loses a multi-day run's other results. The
+        # sample-based decomposition in particular reaches into the posterior's transform stack.
+        warnings.warn(f"informativeness could not be computed ({type(_e).__name__}: {_e}); the "
+                      f"calibration results above are unaffected.", stacklevel=2)
+
 
 # ── Step 4b: Inference visualization (requires a chosen observation) ─────────
 def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | TransformedPosterior,
@@ -1382,6 +1596,18 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     dtype = cfg.hw.dtype
     T_obs = cfg.T_obs
     inits = _observation_inits(cfg)
+
+    # GUARDRAIL 1 (section 11.6): record the observation this inference actually ran against, here,
+    # where it first exists. Written before the figures, so an interrupted or crashed inference still
+    # leaves behind the thing needed to reproduce or extend it.
+    if PERSIST_OBSERVATIONS:
+        try:
+            _obs_path, _obs_dig = save_observation(cfg, obs_stats)
+            print(f"[obs] observation persisted as {_obs_path.name} (digest {_obs_dig})", flush=True)
+        except Exception as _e:                  # noqa: BLE001 -- never lose the inference over this
+            warnings.warn(f"could not persist the observation ({type(_e).__name__}: {_e}); "
+                          f"inference continues, but TSNPE will have nothing to key on.",
+                          stacklevel=2)
 
     # Corner plot
     samples = posterior.sample((1000,), x=obs_stats.to(device))
@@ -1403,6 +1629,13 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     nd_dim = len(cfg.params_dict)
     samples_nd = samples[:, :nd_dim]
     samples_rescale = samples[:, nd_dim:]
+    # TIER 1 (section 11.5): substitute the DERIVED f_scale into T's column before anything
+    # simulates. A no-op for a box that declares f_scale. `sim_rescale_idx` is what the force
+    # builders and gen_chi_raw must then be given -- handed the INFERRED index they would not
+    # find 'f_scale', would fall into the Hopf-style x_scale/t_scale branch, and would drive
+    # at a silently wrong amplitude.
+    samples_rescale = derived.to_sim_rescale(samples_nd, samples_rescale, cfg.rescale_idx,
+                                            *cfg.tier1_args)
     n_samples = samples.shape[0]
     # Same for all samples. Prefer the length generate_observations actually resolved (post
     # cost-ceiling clip); fall back to the formula only on the experimental paths, which never call
@@ -1460,7 +1693,8 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
             # only (chi-mode's driven info is the separate K-freq chi block computed below).
             if cfg.has_forcing and not cfg.chi_mode:
                 force_bin = pipeline.build_nondim_sin_force_tensor(
-                    forcing_gt.expand(bs, -1), t_fine_bin, bin_rescale, cfg.forcing_idx, cfg.rescale_idx)
+                    forcing_gt.expand(bs, -1), t_fine_bin, bin_rescale, cfg.forcing_idx,
+                    cfg.sim_rescale_idx)
                 run_specs = ((force_bin, x_dim_sorted), (torch.zeros_like(force_bin), x_spont_sorted))
             else:
                 force_bin = torch.zeros((bs, n_force_ch, t_fine_bin.shape[0]), dtype=dtype, device=device)
@@ -1493,7 +1727,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
                     probe, absolute = obs_freqs.to(device=device, dtype=dtype), True
                 chi_block_sorted[start:end] = pipeline.gen_chi_block(
                     cfg.model, bin_nd, bin_rescale, x_spont_sorted[start:end], t_fine_bin,
-                    inits.expand(bs, -1), cfg.rescale_idx, n_segs_bin, cfg.steady_idx,
+                    inits.expand(bs, -1), cfg.sim_rescale_idx, n_segs_bin, cfg.steady_idx,
                     subsample_factors, N_points_obs, cfg.dt_exp,
                     probe, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
                     absolute_freqs=absolute, max_cycles=cfg.chi_max_cycles,
@@ -1526,7 +1760,18 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
         sim_stats = pipeline.gen_stats(x_spont, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True)
         sim_stats = torch.cat([sim_stats, log_T_obs], dim=-1)
-    results = analysis.posterior_predictive_check(obs_stats.squeeze(), sim_stats)
+    # Conditioning layout, so the zero-variance count can be split by origin rather than reported as
+    # one number. See analysis.invalid_breakdown: most of a big "invalid" count is normally empty chi
+    # probe slots, which is a fact about the run's K, not a defect.
+    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    ppc_layout = {"input_dim": SUMMARY_WIDTH + 1,
+                  "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
+                  "chi_elem_w": config.CHI_ELEM_W if cfg.chi_mode else None,
+                  "chi_n_freqs": cfg.chi_n_freqs if cfg.chi_mode else None}
+    results = analysis.posterior_predictive_check(obs_stats.squeeze(), sim_stats, layout=ppc_layout)
+    _note = analysis.describe_invalid(results.get("invalid_breakdown"))
+    if _note:
+        print(f"[ppc] {_note}", flush=True)
     fig_ppc = visualizers.plot_ppc(
         results,
         ground_truth=(cfg.ground_truth if show_truth else None),
@@ -1547,6 +1792,8 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
         theta_central = theta_central.unsqueeze(0)                       # (1, n_inferred)
         central_nd = theta_central[:, :nd_dim]
         central_rescale = theta_central[:, nd_dim:]
+        central_rescale = derived.to_sim_rescale(central_nd, central_rescale, cfg.rescale_idx,
+                                                *cfg.tier1_args)              # tier 1, as above
         t_scale_c = central_rescale[0, cfg.rescale_idx["t_scale"]].item()
         subsample_c = max(1, round((cfg.dt_exp / t_scale_c) / cfg.dt_nd_min))
         n_fine_c = min(cfg.steady_idx + N_points_obs * subsample_c, len(t))
@@ -1554,7 +1801,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
         n_segs_c = max(1, math.ceil(n_fine_c / CHUNK_LEN))
         if cfg.has_forcing and not cfg.chi_mode:
             force_c = pipeline.build_nondim_sin_force_tensor(
-                forcing_gt, t_fine_c, central_rescale, cfg.forcing_idx, cfg.rescale_idx)
+                forcing_gt, t_fine_c, central_rescale, cfg.forcing_idx, cfg.sim_rescale_idx)
         else:
             force_c = torch.zeros((1, n_force_ch, t_fine_c.shape[0]), dtype=dtype, device=device)
         x_nd_c = pipeline.gen_obs(
@@ -1664,19 +1911,29 @@ def _emit_overlay_figures(cfg, obs_data, x_samples, sim_stats, obs_stats, sample
 
         def _psd_band():
             # (4) PSD band -- phase-invariant
-            freqs, lo_p, med_p, hi_p = overlay.psd_band(traces, dt_s)
+            freqs, lo_p, med_p, hi_p, dropped = overlay.psd_band(traces, dt_s)
             _, gt_p = overlay.psd(gt.unsqueeze(0), dt_s)
+            if dropped:
+                # Into the log as well as onto the figure. A posterior broad enough to draw parameter
+                # sets whose trajectories go non-finite is a statement about the POSTERIOR, not about
+                # plotting, and it should be greppable in a run log after the fact.
+                warnings.warn(
+                    f"Power-spectrum band: {dropped} of {traces.shape[0]} posterior-predictive draws "
+                    f"had a non-finite PSD and were excluded. Non-finite trajectories mean the "
+                    f"posterior is sampling parameter sets that do not integrate stably.",
+                    stacklevel=2)
             _emit(fig_sink, "Power spectrum", visualizers.plot_psd_overlay(
-                freqs.numpy(), gt_p[0].numpy(), lo_p.numpy(), med_p.numpy(), hi_p.numpy()))
+                freqs.numpy(), gt_p[0].numpy(), lo_p.numpy(), med_p.numpy(), hi_p.numpy(),
+                n_dropped=dropped))
 
         def _cycle_avg():
             # (5) cycle-averaged waveform -- phase-invariant shape comparison
             if f_pk > 0:
-                ph, sim_m, sim_lo, sim_hi = overlay.cycle_average(traces, dt_s, f_pk)
-                _, gt_m, _, _ = overlay.cycle_average(gt.unsqueeze(0), dt_s, f_pk)
+                ph, sim_m, sim_lo, sim_hi, dropped = overlay.cycle_average(traces, dt_s, f_pk)
+                _, gt_m, _, _, _ = overlay.cycle_average(gt.unsqueeze(0), dt_s, f_pk)
                 _emit(fig_sink, "Cycle-averaged waveform", visualizers.plot_cycle_average(
                     ph.numpy(), gt_m.numpy(), sim_m.numpy(), sim_lo.numpy(), sim_hi.numpy(),
-                    ylabel=ylab))
+                    ylabel=ylab, n_dropped=dropped))
 
         _group("best fit (summary stats)", _best_fit_stats)
         _group("best fit (trace) + band", _best_fit_trace_and_band)

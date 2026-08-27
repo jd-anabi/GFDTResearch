@@ -200,7 +200,7 @@ def _raw(pvec, rescale_vec, m, crn):
                     f"gen_chi_raw's finite / positive / 0.9x-Nyquist screen. fisher_features does "
                     f"not consult `valid`, so those entries would enter the Jacobian as if measured.")
             chi_block = chi_mod.fisher_features(chi_v)
-            spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
+            spont = pipeline.gen_stats_features(xs_d, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True).numpy()
             feats = np.concatenate([spont[:, _G_MASK], chi_block.double().cpu().numpy()], axis=1)
             return feats, xs_d, xs_d
@@ -214,7 +214,7 @@ def _raw(pvec, rescale_vec, m, crn):
             torch.manual_seed(SS)
         xs = sim(torch.zeros_like(force))
         xf_d, xs_d = xsc * xf.double() + xof, xsc * xs.double() + xof   # float64 redim
-        feats = pipeline.gen_stats(xs_d, xf_d, cfg.dt_exp, amp_v.expand(m).double(),
+        feats = pipeline.gen_stats_features(xs_d, xf_d, cfg.dt_exp, amp_v.expand(m).double(),
                                    freq_v.expand(m).double(), phase_v.expand(m).double(),
                                    device=device).numpy()
         return feats, xf_d, xs_d

@@ -14,7 +14,7 @@ setTabEnabled after every stage.
 from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
 from ..panels.inference_tabs import (ConfigPanel, InferPanel, PosteriorPanel, PriorPanel,
-                                     ValidatePanel)
+                                     TSNPEPanel, ValidatePanel)
 from ..session import SbiSession
 from ..widgets.anim import crossfade_tab
 
@@ -28,7 +28,7 @@ class InferenceScreen(QWidget):
         heading.setProperty("type", "heading")     # Fluent type ramp (global QSS)
 
         self.tabs = QTabWidget()
-        # Size to the CURRENT tab. The five pages differ wildly -- Validate is one label and one
+        # Size to the CURRENT tab. The six pages differ wildly -- Validate is one label and one
         # button, Infer in chi mode is 10-25 rows -- and QTabWidget's default is to size to the
         # largest, so switching tabs visibly reflowed the whole results column and the short pages
         # carried a large dead gap.
@@ -38,9 +38,12 @@ class InferenceScreen(QWidget):
         self.posterior_panel = PosteriorPanel(self)
         self.validate_panel = ValidatePanel(self)
         self.infer_panel = InferPanel(self)
+        # TSNPE sits AFTER Infer, and the order is the workflow: a round needs an observation, and
+        # the Infer tab is what records one (section 11.6 guardrail 1).
+        self.tsnpe_panel = TSNPEPanel(self)
         for label, panel in (("Config", self.config_panel), ("Prior", self.prior_panel),
                              ("Posterior", self.posterior_panel), ("Validate", self.validate_panel),
-                             ("Infer", self.infer_panel)):
+                             ("Infer", self.infer_panel), ("TSNPE", self.tsnpe_panel)):
             self.tabs.addTab(panel, label)
 
         layout = QVBoxLayout(self)
@@ -74,7 +77,7 @@ class InferenceScreen(QWidget):
 
     def panels(self):
         return [self.config_panel, self.prior_panel, self.posterior_panel,
-                self.validate_panel, self.infer_panel]
+                self.validate_panel, self.infer_panel, self.tsnpe_panel]
 
     def new_draft(self, draft):
         """Config applied: replace the WHOLE session (a different model or unit system invalidates every
@@ -108,6 +111,11 @@ class InferenceScreen(QWidget):
         self.tabs.setTabEnabled(2, has_cfg)          # Posterior
         self.tabs.setTabEnabled(3, can_validate)     # Validate
         self.tabs.setTabEnabled(4, can_infer)        # Infer
+        # TSNPE needs what Validate needs, PLUS an observation on disk -- and the observation gate
+        # is the panel's own (refresh_local_gates), because it depends on Resources/Observations
+        # rather than on the session. Enabling the TAB on the session alone keeps the tooltip
+        # useful: "no observation yet" is a different message from "no posterior yet".
+        self.tabs.setTabEnabled(5, can_validate)     # TSNPE
 
         self.tabs.setTabToolTip(1, "" if has_draft else "Apply a model in Config first.")
         self.tabs.setTabToolTip(2, "" if has_cfg else
@@ -116,6 +124,9 @@ class InferenceScreen(QWidget):
         self.tabs.setTabToolTip(3, "" if can_validate else
                                 "Needs a posterior AND its prior — build/load a prior, then a posterior.")
         self.tabs.setTabToolTip(4, "" if can_infer else "Train or load a posterior first.")
+        self.tabs.setTabToolTip(5, "" if can_validate else
+                                "Needs a posterior AND its prior. It also needs an observation, "
+                                "which the Infer tab records when it runs.")
 
         for panel in self.panels():
             panel.refresh_local_gates()

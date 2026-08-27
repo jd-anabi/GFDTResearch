@@ -21,3 +21,6 @@ __pycache__/
 /Resources/ReductionMap/
 # Training-data checkpoints (C-11): several GiB per run, and a cache of a run rather than a result.
 /Resources/Checkpoints/
+# Observations persisted at INFERENCE time (section 11.6 guardrail 1). A record of what a particular
+# run was shown, not an input anyone edits -- and it can carry real experimental data.
+/Resources/Observations/

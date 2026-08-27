@@ -78,7 +78,7 @@ def features_at(fmax: float, m: int):
     x_forced = x_scale * sim(force) + x_offset
     x_spont = x_scale * sim(torch.zeros_like(force)) + x_offset
     stable = (torch.isfinite(x_spont).all(1) & torch.isfinite(x_forced).all(1)).float().mean().item()
-    feats = pipeline.gen_stats(x_spont, x_forced, cfg.dt_exp,
+    feats = pipeline.gen_stats_features(x_spont, x_forced, cfg.dt_exp,
                                amp_v.expand(m), freq_v.expand(m), phase_v.expand(m), device=device)
     return feats.mean(0).cpu().numpy(), stable
 
@@ -146,7 +146,7 @@ def feats_crn(pvec, xsc, xof, m):
     xs = pipeline.gen_obs(model=cfg.model, params=p, t=t_fine, inits=inits_m, force=torch.zeros_like(force),
                           n_segs=n_segs, steady_idx=cfg.steady_idx, state_dep_drift=cfg.state_dep_drift,
                           batch_size=m, dtype=dtype, device=device)[0][:, ::subsample][:, :N_obs]
-    feats = pipeline.gen_stats(xsc * xs + xof, xsc * xf + xof, cfg.dt_exp,
+    feats = pipeline.gen_stats_features(xsc * xs + xof, xsc * xf + xof, cfg.dt_exp,
                                amp_v.expand(m), freq_v.expand(m), phase_v.expand(m), device=device)
     return feats.mean(0).cpu().numpy()
 

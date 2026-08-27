@@ -486,3 +486,98 @@ class SummaryStatistics:
                 f"feature count {out.shape[-1]} != len(FEATURE_LABELS) {len(FEATURE_LABELS)}"
             )
             return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+# === VALID FLAGS (section 11.3 item 1.2) =========================================================
+# A binary companion channel for each feature whose value is a SUBSTITUTED SENTINEL rather than a
+# measurement, mirroring the mask channel ChiSetEncoder already carries for the probe block.
+# Convention matches that mask: 1 = the feature is a real measurement, 0 = it was substituted.
+#
+# WHY. Several of these features are undefined for a large minority of the prior, and the substituted
+# value is not a small number -- it is log(1e-12) = -27.63, five decades below anything real. Without
+# a flag the flow cannot tell "the peak has no measurable width" from "the peak is extremely sharp",
+# and the sentinel mass drags the channel's scale with it. Measured over the 10.24M rows of
+# Resources/Checkpoints/train_98aebd93ed17:
+#
+#     V_B1_Q            30.3% substituted     V_E1_tau_slow      8.0%
+#     V_C7_slowenv      30.0%                 V_E1_tau_fast      7.5%
+#     V_B7_secondary    14.5%                 V_E2_h3            5.5%
+#     V_C6_slowenv_tau   5.1%                 V_E2_h2            2.8%
+#
+# (V_B1_Q reads 69.7% substituted, i.e. 30.3% valid -- it is the largest by a wide margin.)
+#
+# NOT flagged, and each exclusion is measured rather than assumed:
+#   * C2_log_env_cv -- the addendum predicted 5.6% sentinel; measured 0 rows in 10.24M. Its wide std
+#     is a genuine heavy tail, not a clamp.
+#   * B2, B3, C1, A4 -- 0 or ~1e-6 fire rate. A4's point masses at 0.0 and log(2) are the DISCRETENESS
+#     of an integer lag index at short correlation times, not a substitution.
+#   * B6_log_rolloff_ratio -- 0.199%, below the 1% threshold.
+#   * Group G -- structurally constant under chi, handled by EmbeddedNet's pass-through instead.
+#
+# THERE IS ONE DERIVATION AND BOTH PATHS USE IT. The flags are derived from the FEATURE VALUES, not
+# from the internal booleans that produced them, so the source path and the cache-migration path run
+# literally the same function on the same numbers -- they cannot drift, and there is no assertion to
+# maintain because there is no second implementation to disagree with.
+VALID_FLAG_LABELS = [
+    "V_B1_Q",             # the spontaneous peak never drops to half power -> no FWHM, no Q
+    "V_B7_secondary",     # no secondary spectral peak above 5% of the main one
+    "V_C6_slowenv_tau",   # slow-envelope correlation time collapsed
+    "V_C7_slowenv",       # slow-envelope relative variance collapsed
+    "V_E1_tau_fast",      # the ACF has no fast component left at the 0.5 crossing
+    "V_E1_tau_slow",      # no slow ACF decay resolved (the log-slope hit its clamp)
+    "V_E2_h2",            # second-harmonic band power undefined
+    "V_E2_h3",            # third-harmonic band power undefined
+]
+
+SUMMARY_WIDTH = len(FEATURE_LABELS) + len(VALID_FLAG_LABELS)
+
+_FI = {name: i for i, name in enumerate(FEATURE_LABELS)}
+
+
+def derive_valid_flags(feats: torch.Tensor, dt: float | torch.Tensor) -> torch.Tensor:
+    """(B, len(FEATURE_LABELS)) -> (B, len(VALID_FLAG_LABELS)), 1.0 where the feature is REAL.
+
+    :param feats: the raw feature block, exactly as ``compute_statistics`` returns it.
+    :param dt: the sampling interval those features were computed at. REQUIRED, and deliberately not
+        defaulted: ``E1_log_tau_slow``'s sentinel is ``log(1e6 * dt)``, so a wrong dt would silently
+        flag every row valid. The other seven predicates are dt-free.
+
+    ⚠ THESE FLAGS ARE MEANINGLESS ON A PATHOLOGICAL ROW, and that is not fixable here.
+    ``compute_statistics`` ends in ``nan_to_num(out, nan=0.0, ...)``, so by the time this sees the
+    features a 0.0 may mean "genuinely zero" OR "was NaN". A fully non-finite trajectory therefore
+    arrives looking finite, and its ``_logp`` channels read 0.0 rather than the sentinel -- so their
+    flags say VALID when nothing about that row is. The defence is upstream and already exists:
+    ``pipeline.count_pathological`` counts those trajectories per batch, which is precisely why item
+    1.4 is in the same phase as this one. Read the ``[patho]`` line before trusting a flag histogram.
+    """
+    x = feats
+    sent = torch.log(torch.tensor(_EPS, dtype=x.dtype, device=x.device))
+    dt_s = _resolve_dt(dt)
+    tau_slow_max = torch.log(torch.tensor(1e6 * dt_s, dtype=x.dtype, device=x.device))
+
+    def real(name):
+        return x[:, _FI[name]] != sent
+
+    flags = [
+        real("B1_log_Q"),
+        # The pair is written together by `has_sec`, so ONE flag covers both columns. Verified over
+        # 10.24M rows: freq==0 XOR height==0 fired ZERO times.
+        (x[:, _FI["B7_log_sec_freq_ratio"]] != 0.0) | (x[:, _FI["B7_sec_height_ratio"]] != 0.0),
+        real("C6_log_slowenv_corrtime"),
+        real("C7_log_slowenv_relvar"),
+        # w_fast == 1 exactly means acf[l1] <= 0, i.e. nothing is left to fit a fast time to. Chosen
+        # over an equality on E1_log_tau_fast because that value also carries the l1 lag index, so it
+        # is only incidentally constant -- the two agreed on all 10.24M rows, and this one is the
+        # predicate that stays true if the lag clamp ever moves.
+        x[:, _FI["E1_w_fast"]] != 1.0,
+        x[:, _FI["E1_log_tau_slow"]] != tau_slow_max,
+        real("E2_log_h2"),
+        real("E2_log_h3"),
+    ]
+    return torch.stack(flags, dim=-1).to(x.dtype)
+
+
+def split_summary_block(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``[features | flags]`` -> ``(features, flags)``. The one place the split index is written."""
+    n = len(FEATURE_LABELS)
+    return s[..., :n], s[..., n:n + len(VALID_FLAG_LABELS)]

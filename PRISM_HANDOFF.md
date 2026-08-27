@@ -13,6 +13,14 @@ non-interactive diagnostic scripts.
 - **§1–§3 are the reference** a newcomer needs: how to run it, how it fits together, and the
   contracts you must not break.
 - **§4 is current state** — read this before starting any run.
+- **§11 is the informativeness programme — IMPLEMENTED 2026-08-26, NOT YET RETRAINED.** All four
+  phases are code, tests and a migrated cache; **§11.9 is the runbook for the two runs that are
+  owed.** It carries its own evidence ledger, because it began as a user-written addendum whose
+  claims were then verified against the artifacts — **§11.2 lists the four that did not survive, one
+  of them the test that addendum nominates as decisive, and a fifth correction added on 2026-08-26
+  where §11.2 itself gave the wrong REASON for a right number.** Read §11.2 before acting on it.
+  Two of its own instructions were also overtaken by measurement: the valid-flag set is **eight
+  channels, not one**, and §11.8's "edit `master.txt`" would have orphaned the cache Phase 1 needs.
 - **§5 is the trap list.** Each trap is a bug that was paid for once already. They are grouped by
   subsystem with stable prefixes (`G/P/S/C/Q/F/M/SIM/V/L/U`) so they can be cited and grepped.
 - **§6 is open work**; **§7–§10 are audit findings** (bugs, performance, code/doc organisation, GUI
@@ -67,13 +75,14 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `tests/test_gui_progress.py` | 89 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5) |
+| `tests/test_gui_progress.py` | 97 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5), and **the TSNPE tab** — its gate, and an `ast`-level check that its runner never references a proposal or `set_default_x` (§11.6) |
 | `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
-| `tests/test_user_sbi.py` | 63 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
+| `tests/test_user_sbi.py` | 64 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
-| `tests/test_artifact_consistency.py` | 14 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
+| `tests/test_artifact_consistency.py` | 15 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| **Total** | **233** | |
+| `tests/test_conditioning_repair.py` | 23 | **§11**, and pure torch in seconds like the encoder suite: rank-Gaussianisation (monotone, the mid-rank tie rule, the dead-channel pass-through, and the contaminated channel becoming visible), the valid flags (each predicate, the B7 pair sharing one flag, `tau_slow`'s dt dependence), winsorisation leaving the χ block **bitwise** untouched, the pathological-trajectory counter, **the KL scalar's zero point** (a posterior that IS the prior scores exactly 0 nats) and its per-block retry on a mixed-device product prior, tier-1's round trip through the implied temperature and its refusal without `nd_idx`/`k_b_cell`, and **the TSNPE pinning test the whole of §11.6 rests on** — that the proposal has the truncated PRIOR's width, not the posterior's and not the posterior's over √2. Also: **a legacy `sum_mean`/`sum_std` posterior still loads and evaluates**, without which every pre-2026-08-26 artifact — including the §11 baseline — is unopenable |
+| **Total** | **266** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -93,6 +102,14 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 > `test_chi_mode_full_sbi_pipeline`, which runs a whole chi pipeline on CPU — and chi calibration
 > costs `(K+1)` simulations per batch with `K` drawn up to `CHI_K_PAD`. It is not hung; check for
 > movement in the `Running time segments` bars before assuming otherwise.
+
+> ⚠ **DO NOT EDIT A SOURCE FILE WHILE A SUITE IS RUNNING** — it produces a failure that is not real
+> and costs an hour to disbelieve. Several tests assert on `inspect.getsource(...)`, which reads the
+> file **as it is now** using the line numbers the function was **loaded** with. Insert eight lines
+> above such a function mid-run and it extracts a shifted block, so
+> `test_build_posterior_takes_the_budget_as_arguments_because_the_constants_are_snapshotted` reports
+> that `build_posterior` "no longer resolves the budget from its arguments" when it plainly does.
+> Freeze the tree, then run.
 
 > **COUNT them; do not trust a number written down.** And the grep **must be unanchored**: tqdm
 > leaves a progress bar on the same line as some `PASS` lines, so `grep -c "^PASS"` silently
@@ -141,9 +158,11 @@ core/
   Reduction/      NWK->Hopf normal-form map. IRRELEVANT to SBI — do not reason about it here.
   Helpers/        file_manager, helpers, visualizers, labels, model_store.
   gui/            see §2.2
-scripts/          15 non-interactive diagnostics + _common.py (the shared SimConfig builder).
-                  Newest: smoke_train (the pre-flight five-stage run), chi_mask_audit (why chi
-                  probes get masked), chi_f0_sweep (the band/F0/T_obs/cycle-cap measurement).
+scripts/          16 non-interactive diagnostics + _common.py (the shared SimConfig builder).
+                  Newest: posterior_identifiability (what a SAVED posterior actually measured --
+                  reads the artifacts, simulates nothing; NOT identifiability_offgt, which simulates),
+                  smoke_train (the pre-flight five-stage run), chi_mask_audit (why chi probes get
+                  masked), chi_f0_sweep (the band/F0/T_obs/cycle-cap measurement).
 Resources/        Bounds/ Cells/ Units/ Models/ (inputs) + Plots/ Priors/ Posteriors/
                   CrossValidation/ Checkpoints/ (generated outputs, all gitignored).
 ```
@@ -295,18 +314,28 @@ LaTeX for matplotlib; `pretty_gui` produces Qt rich text for the GUI (which cann
 ### 3.6 Conditioning layout and the three observation modes
 
 The flow is **never fed raw traces** — it conditions on a summary vector. The layout is
-`[ S(41) | log(T_obs) | forcing-or-chi ]`: `log(T)` rides the summary pathway; the forcing/chi block
-is a separate `EmbeddedNet` pathway. **Keep this order in sync** across `generate_observations`,
-`gen_training_data`, `validate_calibration` and the experimental paths.
+`[ S(41) | VALID FLAGS(8) | log(T_obs) | forcing-or-chi ]`: the flags and `log(T)` ride the summary
+pathway; the forcing/chi block is a separate `EmbeddedNet` pathway. **Keep this order in sync**
+across `generate_observations`, `gen_training_data`, `validate_calibration` and the experimental
+paths — in practice you do not have to, because all eight assembly sites are
+`cat([gen_stats(...), log_T, forcing-or-chi])` and `gen_stats` is the single place the summary block
+is widened.
+
+**The flags say which features are MEASUREMENTS** (1) rather than substituted sentinels (0), the
+same convention as the χ probe mask. `statistics.derive_valid_flags` is the one derivation, run by
+both the live pipeline and the cache migration, so they cannot drift. Widths quoted below are the
+current ones: `statistics.SUMMARY_WIDTH` (= 49) `+ 1`. **Pre-2026-08-26 posteriors are 42 + forcing**
+and load through `EmbeddedNet`'s legacy branch; the cross-mode guard turns an old-versus-new load
+into a message rather than a shape assert.
 
 The mode is chosen by **which bounds file** is picked (does it declare a Forcing section?) plus the
 chi toggle. The three widths cannot collide, so a cross-mode posterior load fails loudly.
 
 | # | Mode | Data | Dims | Conditioning |
 |---|---|---|---|---|
-| 1 | `spontaneous` | one passive trace | 12 | 42 |
-| 2 | `forced` | passive + one forced trace | 13 | 46 |
-| 3 | `chi` | passive + **any number** of single-tone forced traces | 13 | 42 + 6·K_PAD |
+| 1 | `spontaneous` | one passive trace | 12 | 50 |
+| 2 | `forced` | passive + one forced trace | 13 | 54 |
+| 3 | `chi` | passive + **any number** of single-tone forced traces | 13 | 50 + 6·K_PAD |
 
 Mode 1 **drops `f_scale`**: it only ever divides a force, and this mode never builds a force tensor,
 so its marginal would just return the prior. Mode 3 **ignores the cell's own drive** (chi probes at
@@ -342,6 +371,11 @@ Raising it invalidates existing chi posteriors — the load path turns that into
 a shape assert hours into a run. Width alone can never identify a layout: `6·5 == 3·10 == 30`, an
 exact collision with the retired layout 1, which is why the sidecar carries `chi_layout`.
 
+The valid flags are **excluded from the Fisher feature set** (`decorrelate.stats_no_flags`), for the
+reason C-9/C-10 removed `logcyc` and `mask` is absent from `CHI_FISHER_CHANNELS`: `fnoise` is a
+DENOMINATOR floored at 1e-9, so a binary channel that steps between the ±δz arms writes ~1e9 into
+J. Trap **CHI10**'s class.
+
 The Fisher rotation works in **all three modes** — see §4.4 for the measurement that overturned the
 old chi exclusion. It builds its Jacobian over the *Fisher* channel set (4 per probe, no `u`, no
 `mask`), which is a different feature set from the conditioning block for a reason recorded there.
@@ -352,10 +386,17 @@ old chi exclusion. It builds its Jacobian over the *Fisher* channel set (4 per p
 
 ### 4.1 START HERE
 
-**Everything before 2026-08-05 is archived under `archive/2026-08-05-pre-consolidation/`, and no
-USABLE posterior currently exists** — `Resources/Posteriors/` holds only
-`08192026_posterior_RETIRED_band_0p1_to_10.pt`, which trained on the retired χ band and must not be
-used for anything (§4.1 step 5, and the top Appendix A entry). The Nadrowski inputs were
+**Everything before 2026-08-05 is archived under `archive/2026-08-05-pre-consolidation/`.**
+`08192026_posterior_RETIRED_band_0p1_to_10.pt` trained on the retired χ band and must not be used for
+anything.
+
+> ### ▶ THE RETRAIN RAN. `posterior_08232026` EXISTS, AND IT IS CHARACTERISED — SEE §4.6.
+>
+> Short version: **calibrated, converged, and uninformative in most directions.** SBC flat on all 13,
+> TARP on the diagonal, the flow cleanly converged — and PPC coverage 99.1 % at a nominal 90 %, i.e.
+> intervals far too wide. It is the same "well calibrated but uninformative" outcome as
+> `posterior_chi_08042026`, reached honestly. **§4.6 says which directions it did measure, and why the
+> obvious fixes are ruled out.** The Nadrowski inputs were
 consolidated to ONE bounds pair
 (`Bounds/nadrowski/master.txt` + `master_spont.txt`) and THREE cells (`Cells/nadrowski/master_spont`
 / `master_weak` / `master_entrained`), chosen by measurement — see `scripts/build_master_cells.py`
@@ -1230,6 +1271,84 @@ information on `f_scale` (from nothing to measurable), `t_scale` and `lam`. It d
 
 ---
 
+### 4.6 The 2026-08-25 retrain (`posterior_08232026`) — what it actually measured
+
+> **What to DO about it is §11.** This section is the characterisation; §11 is the programme, and
+> §11.2.1 reconciles the two where they appear to disagree.
+
+Trained on the corrected χ band (`chi_f0 = 0.15`, `(0.03, 0.3) × Ω₀`, `CHI_MAX_CYCLES = 20`,
+K=6 supplied into `chi_k_pad = 12`). Analysed with **`scripts/posterior_identifiability.py`**, which
+reads the `.pt` + `.rot.pt` and simulates nothing.
+
+**Calibration: excellent, and it is not the problem.** SBC rank histograms flat on all 13; SBC CDFs
+on the diagonal; TARP on the diagonal. The posterior is honest about what it does not know.
+
+**Informativeness: poor, and it is the problem.** PPC coverage **99.1 %** at nominal 90 %,
+mean |z| 0.490, max |z| 1.893, 1/114 outside. Over-dispersed: the predictions land comfortably inside
+intervals that are far too wide. The eye-test 95 % band is 2–3× the observation's envelope.
+
+> **⚠ THE LOSS CURVE RULES OUT EVERY CHEAP FIX, AND IT IS THE MOST IMPORTANT PLOT OF THE RUN.**
+> Train and validation loss track each other tightly (no overfitting) and plateau from ~epoch 90;
+> best validation −9.6814 at epoch 110, stopped at 130 on 20-epoch patience. `plot_training_loss`'s
+> own decision rule: a clean plateau well before the best epoch means the wide marginals are a
+> **data/identifiability limit, not under-fit**. **More epochs, more flow capacity and more training
+> simulations will not fix this.** Do not spend another multi-day run on any of them.
+
+#### What it measured, by direction
+
+`V`'s columns are the prior-averaged Fisher eigenvectors, best-constrained first:
+
+| | direction | dominant loadings |
+|---|---|---|
+| best | 0 | −0.67·`lam` +0.54·`tau_c` −0.34·`beta` |
+| | 4 | −0.82·`t_scale` +0.55·`f_scale` |
+| | 8 | −0.86·`x_scale` +0.49·`f_scale` |
+| | 11 | **−1.00·`k`** (everything else ≤0.03) |
+| worst | 12 | −0.79·`delta_E` +0.45·`temp` −0.35·`n` |
+
+Per-parameter share of identifiability in the worst three directions: `k` **0.999**, `delta_E` 0.767,
+`s` 0.409, `n` 0.337, `temp` 0.303 — against `beta` 0.130, `tau_c` 0.053, `lam` 0.001, and `tau` /
+`f_max` / the rescale triple at 0.000. Well measured (top-4 weight): `beta` 0.818, `tau` 0.714,
+`f_max` 0.619, `lam` 0.584. **`lam` leading the single best direction is exactly what §4.4.1
+predicted chi would buy.**
+
+> ### ⚠ THIS REVISES §4.4/§4.4.1's FRAMING OF THE CENTRAL DEGENERACY
+>
+> Those sections record the problem as the **`k`~`x_scale` alias** (|cos| 0.97, measured three times).
+> The eigenbasis says something sharper: **`k` and `x_scale` are not entangled here at all** — their
+> shared weight across all 13 directions is **0.0002**. `k` puts **99.9 %** of its weight on one
+> direction loading −0.999·`k`, alone; `x_scale` sits separately at direction 8.
+>
+> Both are true. `degeneracy_map`'s |cos| compares gradient **directions**; a Fisher eigenvalue is
+> about gradient **magnitude**. `k`'s gradient is *both* nearly parallel to `x_scale`'s *and tiny*
+> (unique handle 0.091). §4.4.1 already warns about this trap in the other direction — *"a parameter
+> with no gradient is trivially orthogonal to everything… read ‖g‖ beside `unique`"*.
+>
+> **So `k` is not degenerate so much as UNMEASURED, and that changes the remedy.** You cannot rotate,
+> reparameterise or re-prior your way out of a flat direction — only a new observable reaches it. The
+> drive here is **weak and sub-resonance**, which is close to the worst case for stiffness, since
+> stiffness dominates the response *at and above* resonance. A drive nearer Ω₀, a stronger drive, or
+> a step/force-clamp protocol are the candidates. `scripts/posterior_identifiability.py` flags this
+> class automatically ("parameters that are their OWN near-null direction").
+
+#### The conditioning was mostly padding
+
+`input_dim` 42 + `forcing_dim` 72 = 114, where 72 = 12 slots × 6. **Only 6 probes were supplied into
+12 slots**, so 36 elements are pure padding before anything is masked; the PPC's 48/114 zero-variance
+count decomposes to roughly **4 live probes out of 12**. `analysis.invalid_breakdown` now prints this
+split (`[ppc] chi probes: N live / K slots (…never filled, …masked)`) instead of one alarming
+fraction. **Raising K, or lowering `chi_k_pad` to what is actually supplied, is a cheap and untested
+lever** — untested because nothing measured it until now.
+
+> **⚠ THE SCALE IS UNKNOWN FOR THIS RUN.** The Fisher **eigenvalues were not stored** with `V`, so
+> everything above is an *ordering and loadings* analysis: direction 12 is worst and `k` is alone at
+> the bottom, but whether direction 0 is 10× or 10⁶× better constrained is not recoverable without a
+> full Fisher re-run. That gap is the difference between "mildly uneven" and "nine of thirteen
+> parameters are prior". **Fixed for every future run** — `save_posterior_artifacts` now writes
+> `fisher_eigenvalues`, and `build_posterior` prints the spread as it computes the rotation.
+
+---
+
 ## 5. Traps — *** THINGS THAT WILL BITE YOU ***
 
 Each of these cost real time once. Each has a regression test unless noted.
@@ -1254,6 +1373,29 @@ Each of these cost real time once. Each has a regression test unless noted.
   `sys.stdout` permanently.
 - **G5. `Resources/` layout is per-model subfolders** — see §3.3. Pickers are repointed when a model
   combo changes.
+- **G6. SAVE A FIGURE WITH `visualizers.save_figure`, NEVER `fig.savefig`.** matplotlib bakes artist
+  colours at **build** time but reads `savefig.facecolor` at **save** time, and
+  `gui/mpl_theme.apply_mpl_theme` rewrites rcParams **globally** on every appearance change. Anything
+  that changes theme between the two splits one figure across two palettes — and a multi-day run
+  straddles a flip easily (a manual toggle, or Windows switching light/dark on its own schedule).
+  **Measured on the 2026-08-25 retrain: dark axes (#2B2B2B) on a light page (#F3F3F3) with
+  `text.color` still light — every tick label, axis label, title and table cell at a contrast ratio of
+  1.06:1. 14 of 15 figures unreadable, and the parameter tables carrying the best-fit numbers were
+  blank.** `save_figure` pins the save to `fig.get_facecolor()`, i.e. the theme the artists were drawn
+  in. Related: a matplotlib table cell set to `facecolor="none"` shows the FIGURE background, so
+  `_param_table` now pins cells to `axes.facecolor`, which is the surface `text.color` is chosen
+  against. Pinned by `test_a_theme_flip_between_build_and_save_cannot_split_a_figure` (which carries
+  its own counterfactual) and `test_the_parameter_table_is_readable_against_its_own_cells`.
+- **G7. `torch.quantile` propagates a single non-finite entry across the WHOLE reduction, and refuses
+  an input over 2**24 elements.** Both bite the posterior-predictive diagnostics, which are
+  (draws × features) and routinely clear both thresholds. One divergent draw in a thousand turned the
+  power-spectrum figure into a bare observation line with no band, no median and no message — while
+  the two sibling figures survived (the overlay band takes only the 50 best draws; `cycle_average`
+  confines the damage to one phase bin), so it read as a plotting bug in one figure rather than as a
+  property of the posterior. `overlay.psd_band` now drops non-finite rows **and returns the count**,
+  `overlay.cycle_average` masks non-finite samples before binning, and `_column_quantile` chunks
+  around the size limit. **Report the drop, do not just survive it:** "the band is missing" is a bug
+  report, "17 of 1000 draws were non-finite" is a finding about the posterior.
 
 ### P — Progress / tqdm classification (`core/gui/vt.py`, `streams.py`)
 
@@ -1489,6 +1631,25 @@ bounds file declares which parameters are inferred and hence the observation mod
 
 ### CHI — the chi(ω) probe-set layout (2026-08-06)
 
+- **CHI11. NEVER WINSORISE, RESCALE OR CLIP THE χ BLOCK.** A padded probe slot is **exactly 0.0 in
+  all six channels** and is required to stay BITWISE inert (§3.6, pinned by `test_chi_set_encoder`).
+  Under χ the mask column is ~28 % zeros so its 0.1th percentile is 0.0 and a clip there is a no-op —
+  but `logmag`, `cos` and `sin` are dense over live probes, so THEIR 0.1th percentile is non-zero and
+  clipping would push every pad off 0.0 and turn it into a phantom probe. That is the exact defect
+  the packer's `nan_to_num` removal fixed once already. `pipeline.winsorize_summary_block` therefore
+  takes the summary width as an argument and touches nothing past it.
+- **CHI12. A NEW CONDITIONING CHANNEL REACHES THE FISHER TOO.** `decorrelate.feats` builds its
+  Jacobian by calling `gen_stats`, so anything added there is silently added to `J` — and
+  `fnoise = max(f0.std(0), 1e-9)` is a DENOMINATOR. A **binary** channel is the worst case: constant
+  across most operating points (harmless, 0/1e-9 = 0) and then stepping by 1 between the ±δz arms at
+  some others (~1e9 into J, intermittently). Same class as CHI10 and C-9/C-10. The valid flags go
+  through **`pipeline.gen_stats_features`**, which is the ONE name for "features, not conditioning" —
+  `decorrelate` and all five Jacobian-building scripts (`degeneracy_map`, `diagnose_fmax`,
+  `feature_candidate_test`, `identifiability_offgt`, `reparam_selftest`) call it. **If you add a
+  channel to `gen_stats`, every caller of `gen_stats` proper gets it**; decide deliberately which of
+  those is a conditioning vector (wants it) and which is a Jacobian (does not). The tell is whether
+  the result is `cat`-ed with `log_T`.
+
 Every one of these is silent. The suite that catches them is `tests/test_chi_set_encoder.py`, which
 runs in seconds and needs no simulation — **run it first when touching anything chi.**
 
@@ -1648,6 +1809,16 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   ~435 GiB over a run. It presents as *"checkpointing got slow"*, never as a wrong answer, so no
   correctness test catches it — `test_checkpoint_shards_do_not_serialize_the_whole_accumulator`
   exists solely to pin the file SIZE.
+- **X13. USING A FITTED POSTERIOR AS THE NEXT ROUND'S PRIOR IS TEMPERING, AND SBC WILL NOT CATCH
+  IT.** Fit a density `q_1` to round 0's posterior, use it as the prior at the SAME observation, and
+  you get `p_1 ∝ L·q_1 ∝ L²q` — and after L rounds, `L^(L+1)q`. Credible intervals contract as
+  `(L+1)^(-1/2)` **with no new information entering**: at L=4 the posterior is 2.2× narrower than the
+  data supports. **No current diagnostic sees this**, because SBC and TARP validate the flow against
+  the proposal it was trained on, so round ℓ's SBC comes out flat while the reported intervals are
+  wrong by `√(ℓ+1)` relative to the real prior. The correct form is TSNPE: **restrict the prior's
+  support, never reshape it** — `q|_A / q(A)`, so `L·q|_A ∝ L·q` on `A` and the true posterior is
+  recovered exactly, restricted. Restriction is not reweighting, which is why TSNPE needs no proposal
+  correction and SNPE-A/B/C each do. See §11.6.
 - **X12. `from .config import NAME` SNAPSHOTS the value at import, so writing `config.NAME = x` at
   runtime is a SILENT no-op.** `orchestrator.py` binds `TRAINING_NUM_RUNS`, `TRAINING_RUN_SIZE` and a
   dozen more this way, so a caller that "configures" a run by assigning to `core.config` changes
@@ -1704,9 +1875,29 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 > ### ▶ PICK UP HERE (as of 2026-08-21)
 >
-> The retrain is the priority and it is **the user's to run**, through the GUI (§4.1 step 5). It is
-> now checkpointed, so a crash costs one interval rather than the run. Everything below is small and
-> independent of it; nothing here blocks it.
+> **The retrain is DONE** (`posterior_08232026`, 2026-08-25) and characterised in **§4.6**: calibrated,
+> converged, and uninformative in most directions.
+>
+> ### ▶ §11 IS IMPLEMENTED (2026-08-26). WHAT IS LEFT IS THE TWO RUNS THAT NEED THE CARD.
+>
+> All four phases landed; **nothing has been retrained**. The Phase-1 flow-only retrain needs no
+> simulation — the cache is migrated and waiting at `Resources/Checkpoints/train_230ae7cb5fc2` — and
+> the Phase-3 retrain is a full multi-day re-simulation on `master_tier1.txt`. See §11.9 for the two
+> commands and the gates, and the top Appendix A entry for what was measured on the way.
+>
+> ### ▶ THE ORIGINAL FRAMING, KEPT BECAUSE IT EXPLAINS THE SHAPE OF THE WORK.
+>
+> Two causes are now MEASURED, not hypothesised: the flow cannot see part of its own conditioning
+> (two channels attenuated **10⁷×**, `B1_log_Q` **69.7 %** sentinel, 11 of 42 channels structurally
+> dead), and the prior spends **97.7 %** of its budget on physically inconsistent configurations.
+> **Phase 1 needs no re-simulation** — the C-11 checkpoints hold all 10.24 M conditioning vectors.
+>
+> **Read §11.2 first.** §11 began as a user-written addendum; most of it verified exactly, four
+> claims did not, and one of the failures is in the task that addendum ranks as decisive.
+>
+> §4.6 still rules out the obvious moves — the loss curve rules out more training, and `k` is FLAT
+> rather than aliased. §11.2.1 explains why fixing Phase 1 will NOT change that: the Fisher is
+> computed on a clean standardisation, so the two findings are independent.
 >
 > **Rows 0, 1 and 2 are DONE** (row 0 on 2026-08-21, rows 1–2 on 2026-08-13 — see Appendix A).
 > **What is left needs a display or a decision, and neither is something a coding session can close
@@ -2143,13 +2334,17 @@ the module raises `AttributeError` on a `list`.** Rename the local to `model_lab
 
 ### 9.3 Files that are too large
 
+> **Counts refreshed 2026-08-26** — every one of them was stale by 40–130 %, which is the same
+> defect §9.1 catalogued. The split suggestions still stand and are still deliberately undone;
+> §11 made four of these five files larger, so the case is stronger, not weaker.
+
 | File | Lines | Contents | Suggested split |
 |---|---|---|---|
-| `tests/test_gui_progress.py` | 1872 | 72 tests over **eight** unrelated subjects | `test_vt_progress.py` (restoring the name `vt.py:4` already claims exists), `test_worker_dispatch.py`, `test_settings_persistence.py`, `test_figures.py`, `test_nav_and_gating.py`, `test_simulate.py` |
-| `core/orchestrator.py` | 1270 | five stage fns + PPC + overlays + experimental paths | by stage |
-| `core/SBI/pipeline.py` | 904 | simulation, stats, training data, training | `simulate.py` / `training_data.py` / `train.py` |
-| `core/gui/panels/inference_tabs.py` | 888 | five screens + a 68-line HELP dict + four worker runners | `inference/help_text.py`, `inference/runners.py`, `inference/base.py`, then one file per tab |
-| `core/config.py` | 738 | tuning constants **and** path constants **and** the `SimConfig` dataclass with real behaviour | `config/constants.py` + `config/sim_config.py` |
+| `tests/test_gui_progress.py` | **2614** | **96** tests over **eight** unrelated subjects | `test_vt_progress.py` (restoring the name `vt.py:4` already claims exists), `test_worker_dispatch.py`, `test_settings_persistence.py`, `test_figures.py`, `test_nav_and_gating.py`, `test_simulate.py` |
+| `core/orchestrator.py` | **2211** | five stage fns + PPC + overlays + experimental paths + the observation/truncation helpers | by stage |
+| `core/SBI/pipeline.py` | **2072** | simulation, stats, training data, training | `simulate.py` / `training_data.py` / `train.py` |
+| `core/gui/panels/inference_tabs.py` | **1530** | **six** screens + the HELP dict + five worker runners + `_TrainingBudgetMixin` | `inference/help_text.py`, `inference/runners.py`, `inference/base.py`, then one file per tab |
+| `core/config.py` | **1066** | tuning constants **and** path constants **and** the `SimConfig` dataclass with real behaviour | `config/constants.py` + `config/sim_config.py` |
 
 ### 9.4 Duplication worth collapsing
 
@@ -2449,7 +2644,961 @@ on both paths at a geometry with a partial tail (2 full chunks + 3 leftover step
 
 ---
 
+## 11. The informativeness programme — ▶ IMPLEMENTED 2026-08-26, NOT YET RETRAINED
+
+> ### ▶ STATUS, and read it before re-planning any of what follows
+>
+> | phase | code | run |
+> |---|---|---|
+> | 1 — repair the feature set | ✅ landed | ⬅ **the flow-only retrain is NEXT; it needs no simulation** |
+> | 2 — the informativeness scalar | ✅ landed, reported by `validate_calibration` | runs with any validate |
+> | 3 — tier-1 prior narrowing | ✅ landed, own box `master_tier1.txt` | needs a full re-simulation |
+> | 4 — TSNPE | ✅ landed, six guardrails + the pinning test | needs a Phase-1 posterior first |
+>
+> **§11.9 has the two commands.** Three things below were changed by measurement while implementing
+> them, and each is corrected in place: the valid-flag set is **8 channels, not 1** (§11.3), §11.2's
+> correction 3 gives the **wrong reason** for a right number, and §11.8's "edit `master.txt`" would
+> have orphaned the very cache Phase 1 needs. The top Appendix A entry is the full account.
+
+
+**Where this came from.** `posterior_08232026` (§4.6) is calibrated, converged and uninformative. A
+user-written analysis, `PRISM_HANDOFF_ADDENDUM_2026-08-25.md` (kept on the Desktop), proposed a
+diagnosis and a work queue. **Every checkable claim in it was run against the real artifacts** — the
+posterior, the sidecar, and the two complete 5000×2048 C-11 training checkpoints. Most of it holds
+exactly; four things do not. §11.1 and §11.2 are that ledger, and **§11.2 must be read before acting
+on the addendum**, because one of its errors is in the test it nominates as decisive.
+
+> ### THE TWO CAUSES, BOTH NOW MEASURED
+>
+> 1. **The flow cannot see part of its own conditioning.** `A1_mean` and `D3_bimodality` are
+>    attenuated **10⁷×** by contaminated standardisation; `B1_log_Q` is **69.7 %** sentinel; 11 of 42
+>    channels are structurally dead.
+> 2. **The prior spends most of its budget on impossible configurations.** Only **2.27 %** of training
+>    rows have an implied bath temperature in 280–310 K; **33.7 %** carry zero live χ probes (mean
+>    **3.37** live of 12 slots).
+>
+> Neither is fixed by more training — §4.6's loss curve settles that.
+
+### 11.1 The ledger — what is MEASURED
+
+`Resources/Checkpoints/train_98aebd93ed17` is the checkpoint this posterior trained on. Confirmed:
+applying `train_nn`'s `abs(data) < 1e15` guard to its 10.24 M rows reproduces the stored
+`sum_mean`/`sum_std` **to every digit**. (The sibling `train_6c80f7d8037d` does not — do not mix them.)
+
+| addendum claim | verified |
+|---|---|
+| §2.1 all `sum_mean`/`sum_std` | exact to 5 s.f. |
+| §2.2 Sarle's coefficient bounded in (0,1] | correct — `statistics.py::_group_d` uses `(z**4).mean()`, the RAW 4th moment, so β₂ ≥ g₁²+1 holds. Had it used *excess* kurtosis the bound would fail; it does not |
+| §2.3 `v = σ²/μ = 1.0000e12 = 1/_EPS`, `k = 2.000` | **exactly 2 surviving rows at exactly 1e12** — predicted from σ²/μ alone with no access to the data |
+| §2.4 standardised spans ~5e-9 | measured p1–p99: `A1_mean` 3.98e-9, `D3` 1.44e-9 |
+| §3.2 `B1_log_Q` sentinel fraction 0.699 | **measured 0.697** over 1.02 M rows |
+| §3.4 exactly 11 pass-through Group-G channels | exact — and ablation confirms they are *precisely* zero |
+| §4.3 `elem_std` = [1.1513, 2.5148, 0.7096, 0.7025, 0.8398] | exact to 4 d.p. |
+| §10 989,312 estimator parameters | exact |
+| §6.2 the whole drift/diffusion table | verified line-by-line against `nadrowski_model.py`: `n`, `tau_c`, `temp` appear in **no** drift term; `tau_c` only as `tau_c/n`; `temp` only in `sqrt(2*temp/(n*beta*lam))` |
+| §5.3 implied `f_scale` range | measured (0.33, 1.18e4) vs claimed (0.29, 12018) |
+
+**The `1/_EPS` mechanism is sharper than the addendum states.** `_group_d` computes
+`z = (s-mu)/std.clamp(1e-12)`. For an **exactly constant trace** `s - mu ≡ 0`, so `z ≡ 0`, `kurt = 0`,
+the clamp fires and `bimod = 1/1e-12` exactly. Not "kurtosis underflowed" — **a flatlined simulation**.
+
+> ### ⚠ ONE PHENOMENON, THREE VICTIMS — AND NOTHING REPORTED IT
+> `D3`'s contamination is *exactly constant* traces. `A1_mean`'s is ~1e32-magnitude traces (measured
+> min −4.59e32). The 2026-08-25 missing PSD band was divergent draws. **That is one population of
+> pathological simulations, damaging three unrelated things silently.** The `n_dropped` reporting
+> added 2026-08-25 is the first thing in the pipeline that would surface any of it. A per-batch count
+> of non-finite / exactly-constant / overflow trajectories, logged during generation, is Phase 1's
+> cheapest item and should have existed from the start.
+
+### 11.2 ⚠ The corrections — READ BEFORE ACTING ON THE ADDENDUM
+
+**1. §2.5's "decisive test" is the wrong test, and as written would refute its own §2 finding.**
+The addendum's task 0.1 says to replace channel *i* with its fitted mean and expect **exactly zero**
+change from a dead channel. Measured: `A1_mean` gives **5.2e-5** and `D3` **4.6e-4** — not zero. The
+fitted mean is *itself contaminated* and sits ~10⁷ from the data, so substituting it is a LARGE move
+in standardised units. Run task 0.1 as specified and you conclude both channels are alive and discard
+the document's best finding.
+
+**The correct test is to sweep the channel across its real p1–p99 range.** Measured that way:
+
+| channel | max ‖Δ embedding‖ over its real range |
+|---|---|
+| `A1_mean` | **1.8e-7** |
+| `D3_bimodality` | **8.9e-8** |
+| `A3_log_fpeak` | 1.379 |
+| `A2_log_var` | 1.813 |
+| `B4_spec_entropy` | 1.159 |
+
+**A factor of ~10⁷.** float32 ε is 1.19e-7, so the entire physical range of `A1_mean` moves the
+embedding by less than one float32 ulp. §2's *conclusion* is right; its *test* is not.
+
+**2. §3.2's "the fits are exact, which is itself strong evidence the two-point model is right" is a
+logical error.** Two parameters solved against two moments reproduce both **by construction** —
+`p = r/(1+r)` with `r = σ²/(μ−S)²`, closed form, no residual. It is an identity, not evidence. And it
+produces one **false positive**: `C2_log_env_cv` predicted p = 0.056, **measured 0.000** — its std is
+a genuine heavy tail. The addendum's own §10 hedges this correctly; its §3.2 does not.
+
+**3. §5.2's NUMBERS are wrong and its REASON here is wrong too — corrected 2026-08-26.**
+
+> ⚠ This entry used to read *"it assumes `x_scale`/`f_scale` are log-uniform. They are not:
+> `REPARAM_LOG_PARAMS = []`, an all-linear box."* **That reason is false.** `REPARAM_LOG_PARAMS`
+> governs only the **ND** block's box coordinate. The rescale block is built by
+> `orchestrator._build_rescale_prior`, whose rule is `"scale" in name → "log-uni"`; sampling it
+> directly gives log-medians of 3.451 / 1.844 / 3.457 against a log-uniform's 3.454 / 1.844 / 3.454.
+> **They ARE log-uniform in physical space.** The measured quantiles below stand — they were taken on
+> real rows, and `derived.implied_temperature` reproduces them to 14 / 81 / 287 / 945 / 6318 K — and
+> the variance argument is untouched. But do not re-derive a survival fraction from the retracted
+> cause.
+
+Measured
+over 1.13 M real training rows, implied `T` quantiles are **14 / 80 / 286 / 939 / 6292 K**, not
+0.33 / 2.5 / 15.2 / 90 / 821. **The median is 286 K — room temperature — not 15 K.**
+**The spread claim survives and is what matters**: 5–95 % spans a factor of 450, and only **2.27 %**
+of rows fall in 280–310 K. §5 is a **variance** argument, not the bias argument it presents.
+
+**4. §5.3's 60.7 % is 74.3 %** — same linear-vs-log cause. ~26 % of draws imply an `f_scale` the
+declared box forbids. Real, less dramatic.
+
+**5. §2.3 under-credits the magnitude guard.** 12 rows exceed `D3`'s ceiling in the raw data; the
+`1e15` guard drops 10 of them, leaving exactly the 2 the reconstruction predicts.
+
+**6. §11's verification snippet will not run** — it reads `posterior_08232026_rot.pt`; the file is
+`posterior_08232026.rot.pt`.
+
+**Not checkable from this repo:** §5.1's `Nβ = f_scale·x_scale/(k_BT)` and §6.5's centre-manifold
+argument rest on journal sections (§1.2, §1.3.2, §2.6) that are not in the repository. Internally
+consistent, unverified here.
+
+### 11.2.1 How §11 and §4.6 fit together — the question the addendum raises and answers wrongly
+
+The addendum's §0 argues §4.6's "identifiability limit" verdict is invalid *because* the conditioning
+is broken. **That challenge is checkable and the answer is no.** `decorrelate.py` standardises its
+Jacobian by `fnoise = np.maximum(f0.std(0), 1e-9)` — the **single-trajectory feature noise measured
+locally at each operating point**, NOT the embedding's training-set `sum_std`. So the Fisher, `V`,
+and §4.6's entire decomposition run on a **clean** standardisation and are not artifacts of the §2 bug.
+
+Two independent facts, both true:
+
+- **§4.6 (clean features):** `k`'s gradient is genuinely tiny *relative to trajectory noise*.
+- **§11 (contaminated features):** the flow additionally cannot see `A1_mean` — which §4.4.1's payload
+  table names as `k`'s top feature by 6×.
+
+> **⇒ Fixing Phase 1 should recover real information, but it is bounded above by a Fisher gradient
+> already measured as near-zero on clean features. Expect gains in `x_scale`, `delta_E` and the
+> absolute-scale directions. Do NOT expect `k` to become well determined.** The two documents are
+> consistent once you notice they standardise differently.
+
+### 11.3 Phase 1 — repair the feature set (NO re-simulation)
+
+The checkpoint stores all 10.24 M conditioning vectors, so every item here is a pure function of
+cached data. **Retrain the flow only.** Highest evidence, lowest cost — do this first.
+
+| # | change | file |
+|---|---|---|
+| 1.1 | **Rank-Gaussianisation** replaces mean/std in `EmbeddedNet.fit_standardization`: per-channel empirical CDF → probit, stored as monotone-interpolant buffers | `core/SBI/embedded_network.py` |
+| 1.2 | **Valid flags**, mirroring the mask design `ChiSetEncoder` already uses for the probe block. ⚠ **8 channels, not 1** — see below | `core/SBI/statistics.py` |
+| 1.3 | **Per-column winsorisation** (0.1/99.9 pct) replacing `train_nn`'s global `abs(data) < 1e15` guard | `core/SBI/pipeline.py` |
+| 1.4 | **Pathological-trajectory counter** — per batch, count non-finite / exactly-constant / overflow-magnitude trajectories and log them | `core/SBI/pipeline.py` |
+
+Why rank-Gaussianisation specifically: invertible (no information lost), invariant to any monotone
+transform (**which kills the log-versus-linear question for every channel at once** — see
+`REPARAM_LOG_PARAMS`' history), outlier-immune by construction (two rows at 1e12 become two rows at
+the top rank, not a scale factor), and sentinel mass becomes a point mass at a known quantile the flow
+can key on.
+
+**1.2 needs no re-simulation *this time*.** Every predicate is an exact equality on a value the
+checkpoint already stores, so the flags are derivable from the cache. There is **one** derivation
+(`statistics.derive_valid_flags`), run by the live pipeline and by the migration alike — it derives
+from the feature VALUES rather than from the internal booleans that produced them, so the two paths
+cannot drift and there is no assertion to maintain because there is no second implementation.
+
+> ### ⚠ IT IS EIGHT CHANNELS, NOT ONE — MEASURED OVER ALL 10.24 M ROWS
+> This item was written as though `B1_log_Q` were the case. A point-mass census says otherwise, and
+> this is what sets the conditioning width to **50 + 6·K_PAD = 122**:
+>
+> | flag | substituted | | flag | substituted |
+> |---|---|---|---|---|
+> | `V_B1_Q` | **69.66 %** | | `V_E1_tau_slow` | 8.01 % |
+> | `V_C7_slowenv` | **30.04 %** | | `V_E1_tau_fast` | 7.53 % |
+> | `V_B7_secondary` | **14.49 %** | | `V_E2_h3` | 5.51 % |
+> | `V_C6_slowenv_tau` | 5.07 % | | `V_E2_h2` | 2.83 % |
+>
+> Excluded, each by measurement rather than by argument: `C2_log_env_cv` fires on **exactly 0 rows in
+> 10.24 M** (the addendum predicted 5.6 %); `B6_log_rolloff_ratio` at 0.199 % is under the 1 %
+> threshold; `B2`/`B3`/`C1` never fire; and `A4_log_acf_decay`'s point masses at `0.0` and `log 2` are
+> the **discreteness of an integer lag index**, not a substitution. Group G is constant under χ and is
+> handled by `EmbeddedNet`'s pass-through instead.
+>
+> Two pairs share one flag each — `B7`'s two columns, and `E1_log_tau_fast` with `E1_w_fast` — and
+> both pairings were checked rather than assumed: **the XOR fired zero times on 10.24 M rows.**
+>
+> **Compare in the dtype the data is stored in.** The first census cast `float32` rows to `float64`
+> before testing against `math.log(1e-12)`; the two are not equal, so every count came back
+> `0.000000` and the table read as "no problem here".
+
+> ⚠ **Use the corrected ablation test (§11.2 item 1), not the addendum's.** Sweep each channel across
+> its real p1–p99 range. Substituting the fitted mean gives a false negative on exactly the channels
+> under investigation.
+
+**Live channel count, for calibration of expectations:** of 42 conditioning channels, 11 are
+structurally dead under χ mode, 2 are numerically annihilated, and ~5 are compressed by an order of
+magnitude or worse. **The flow is conditioning on roughly 24 usable channels, not 42.**
+
+### 11.4 Phase 2 — an informativeness scalar, BEFORE anything is judged
+
+Every diagnostic in the pipeline (SBC, TARP, PPC coverage) measures **calibration**. There is no
+scalar for **informativeness**, so every change in §11 would otherwise be judged by eye on a corner
+plot. Use the expected prior-to-posterior KL, on the calibration set `validate_calibration` already
+simulates:
+
+$$I = \mathbb{E}_x\big[\log q_\phi(\theta \mid x) - \log p(\theta)\big]$$
+
+> ⚠ **It is NOT bounded below by zero.** `E[log q − log p] ≥ 0` holds only when `q` IS the true
+> posterior; an under-trained flow assigns lower density to the truth than the prior does and the
+> estimate goes negative. A 5-epoch smoke train measured **−23.1 nats**, which is the honest reading
+> for that posterior — worse than the prior. **Read the sign first.** Note also that a figure measured
+> on the checkpoint's own TRAINING rows (35.9 nats, while smoke-testing the estimator) is
+> optimistically biased and is not comparable to one from a fresh calibration set.
+
+It decomposes per parameter **and per Fisher direction**, which is what makes it the natural partner
+to `scripts/posterior_identifiability.py`. **Build it before Phase 3** — without it you cannot tell
+whether Phase 1 worked, and the masked-fraction lesson (run-level SD 6.1 pp against a binomial's
+~1.8 pp) already showed that eyeballing a difference of this size fails.
+
+`core/SBI/analysis.py`.
+
+### 11.5 Phase 3 — prior narrowing that PRESERVES amortization
+
+The user wants **both** workflows: a broad amortized posterior for screening, then optional per-cell
+refinement. Most of what sequential inference promises is available **without** giving up
+amortization, because the prior is too wide in ways knowable *before* seeing any recording.
+
+Three tiers, by defensibility, **each recorded by name in the sidecar** — a hand-narrowed box is
+unfalsifiable and will be forgotten by the next run:
+
+| tier | constraint | default | measured survival |
+|---|---|---|---|
+| 1 | **Physical consistency.** Derive `f_scale = N·β·k_B·T/x_scale` (addendum §5.5) | **ON** | 2.27 % of current rows |
+| 2 | **Instrument.** `x_scale` from bead/photodiode calibration; `dt_exp`/`T_obs` from the protocol | opt-in | — |
+| 3 | **Population/class.** The Ω₀ band the preparation actually produces | opt-in, flagged data-derived | 66.32 % (≥1 live probe) |
+
+**Tier 1 is ON by default and is framed as a bug fix, not a narrowing.** The box currently samples the
+gating-spring energy **twice** — once as `Nβ`, once as `f_scale·x_scale` — with no consistency
+requirement anywhere, and `T` is the ratio between the two copies. **97.7 % of a multi-day run went to
+combinations where those two disagree by orders of magnitude.** That is the largest single efficiency
+lever in the project, and it is not conservatism to keep it.
+
+**Derive `f_scale`, never `β`.** `β` is a drift parameter and the stability screen operates on the ND
+block alone; deriving `β` would make the ND block depend on the rescale block and contaminate the
+screen. Deriving `f_scale` confines the change to the 3-D rescale block and leaves all ten ND groups
+sampled exactly as now. The nondimensionalisation is untouched — `T` is not one of the four scales,
+`NadrowskiModel` never sees it, only the prior-sampling layer does.
+
+**The UI already exists.** The Prior tab's `SourceToggle` + `BoundsGrid` gives direct box entry
+("Direct entry starts FROM the file"). What is missing is *named constraints with provenance*, not
+widgets.
+
+> ### ⚠ TWO HAZARDS THAT MUST BE HANDLED BEFORE A FULL RUN
+> 1. **The derived `f_scale` reaches ~10⁴ pN**, and the χ drive amplitude is `CHI_F0 × f_scale`. Any
+>    feasibility guard must move to the derived value. This is a real change to the training
+>    distribution, not a relabelling.
+> 2. **`T`'s posterior will be its prior**, because the data adds nothing on that axis. Its SBC
+>    histogram will be flat and vacuous. **Report `T` as a fixed input, never as an inferred
+>    quantity**, or you will be quoting a credible interval on something you assumed.
+
+**Scope, honestly.** Projecting the constraint-violating direction onto `V`'s columns puts most of its
+weight on directions 8–12. So this tightens `N`, `β`, `x_scale`, `f_scale` and their combinations. It
+does **nothing** for `k` — direction 11 is `−1.00·k` alone and the constraint has no `k` component.
+
+### 11.6 Phase 4 — TSNPE, with the guardrails the "both" workflow requires
+
+Yes, the addendum's §8.2 is exactly **TSNPE** (Deistler, Gonçalves & Macke 2022), correctly described,
+including the property that matters: truncation is a **restriction**, not a **reweighting**, so no
+proposal correction is needed — which is why SNPE-A/B/C each need one and TSNPE does not.
+
+> ### ⚠⚠ THE ONE THING THAT MUST NOT BE GOT WRONG
+> **TSNPE proposes from the TRUNCATED PRIOR, never from the posterior.**
+>
+> Posterior → HPD region `A` → sample θ from **prior restricted to A** → simulate → retrain. The
+> posterior only ever says *where to look*.
+>
+> Fitting a density to the posterior and proposing from it gives `p_L ∝ L^(L+1) q` — **tempering**.
+> Credible intervals contract as `(L+1)^(−1/2)` with **no new information entering**: at L=4 the
+> posterior is 2.2× narrower than the data supports. **And SBC will come out flat anyway**, because it
+> validates the flow against the proposal it was trained on. No current diagnostic catches this.
+
+Guardrails, in order of how badly their absence bites:
+
+1. **Persist `x_obs` at INFERENCE time.** Not at save time — amortized NPE has no observation when it
+   is saved, which is why `default_x` is `None` on `posterior_08232026`. The TSNPE tab must refuse
+   unless the stored observation hash matches the dataset currently loaded.
+2. **Mark the artifact NON-AMORTIZED** and record the truncation region in the sidecar; the load path
+   refuses (or hard-warns) outside it. With both workflows live, truncated and amortized posteriors
+   sit side by side in one `ArtifactPicker` — **the same class of failure as the retired-band
+   posterior that already cost a run (§4.1).**
+3. **Truncate in the Fisher eigenbasis, not in 13-D physical space.** `k`, `delta_E` and `temp` sit at
+   or near prior (§4.6); an HPD box in physical space cuts those axes **on noise**, and deleted
+   support is permanent — a one-way ratchet. Truncate along directions 0–4, leave the flat ones
+   full-width. This also dissolves the addendum's own §8.3 flaw 2 outright: in that basis the region
+   is approximately axis-aligned, so there is no ridge for HDBSCAN to fragment and no clustering
+   needed at all.
+4. **Use unweighted posterior draws, not "the M best fits."** Selecting on goodness of fit applies a
+   second, undeclared likelihood with the discrepancy metric as a hidden hyperparameter.
+   `posterior_overlay` takes the best 50 — fine for a figure, wrong as the seed of a prior.
+5. **Generous HPD (99.9 %)**, and monitor how often simulated ground truths fall outside `A`. That
+   frequency is the honest failure rate.
+6. **Show the cost.** Each round is a simulation campaign, not a click — reuse the Posterior tab's
+   training-budget widget so the number is on screen before the button.
+
+**The free pre-test (addendum §8.5) works for one truncation and not the other.** Retraining on the
+cached rows whose θ falls in `A` is truncated NPE with zero new simulation — **66 % of the cache
+survives a probe-based truncation** (viable), but only **1.25 %, ~128 k rows, survives the Tier-1
+temperature constraint** — far too few for a 989 k-parameter flow. **Tier 1 cannot be tested by
+subsetting the checkpoint; it needs simulation.**
+
+Note the parent doc records `SNPE num_rounds > 1` as "refused loudly" in C-11. That is a checkpoint
+compatibility constraint, not a scientific one, and truncation is not the multi-round SNPE that was
+refused.
+
+### 11.7 Deferred, and the order is not arbitrary
+
+**§8.6 — M-replicate conditioning. Do this BEFORE designing any experiment.** Posterior width is a
+convolution of genuine degeneracy with the sampling noise of single-realisation summary estimators,
+and **nothing currently distinguishes them.** Simulate `M` independent passive traces per θ and
+condition on the set using the DeepSet machinery already built for χ. Width falling like `M^(−1/2)` →
+it was estimator noise, and longer or repeated recordings fix it. Width saturating → genuine
+degeneracy, and only a new observable helps. **Run this before §11.8's protocol work**, or you risk
+designing an experiment for a parameter whose width was never degeneracy.
+
+**§7 — the absolute thermal reference (Tier 2, needs re-simulation).** Above the bundle's corner
+frequency the ND bundle row gives `S_X(ω) → 2k_BT/(λω²)` with **every other parameter absent** — a
+direct absolute readout of `f_scale·t_scale/x_scale`. **Every Group-B feature is a ratio**
+(normalised by `f_peak` or peak power), so the entire spectral block is scale-invariant by
+construction and the one place an absolute energy calibration sits in plain sight is systematically
+normalised away. Proposed feature: `⟨log[ω²S_X(ω)]⟩` over ~a decade above the corner, paired with a
+valid-flag for rows where the tail is unresolved. Pairs with Tier 1 — the constraint is what makes
+the prefactor absolute.
+
+**§4 — the strata hypothesis (cheap test, not yet a finding).** Every row in a batch shares one
+`t_scale`, `T_k` and χ probe design, so those axes have effective sample size `TRAINING_NUM_RUNS`
+(5000), not 10.24 M — a factor of `run_size` = 2048. A clean loss plateau therefore says nothing about
+whether they converged. **Direction 4 sitting high in the ordering argues against it being binding.**
+Test: retrain from the checkpoint with `TRAINING_NUM_RUNS` halved and `run_size` doubled (same total
+rows, half the strata) and see whether `t_scale`'s SBC and posterior width degrade. Related and
+already in `config.py`: `t_scale`'s SBC effective sample size is `CAL_N_SCALES = 200`, not `SBC_N_CAL`
+— so "SBC flat on all 13" is strong for 11 of them and materially weaker for `t_scale` and anything
+the probe design controls.
+
+**Tier 3 — new experimental observables (§6.4). Only after §8.6.** For `k`: a **step or force-clamp
+transient**, which never accumulates the ~31-drive-cycle non-stationarity wall of §4.3.1 because that
+wall is a *steady-state* lock-in artifact. For `delta_E`, `S`, `N`, `φ` — the parameters carrying
+§4.6's worst directions: **two-tone intermodulation** at `2ω₁ − ω₂` with both drives inside the
+reproducible sub-resonance band, which structurally avoids entrainment because the measured frequency
+is not driven, while IMD amplitude directly probes the nonlinearity. `chi_f0_sweep` would measure IMD
+SNR with a modest extension.
+
+**Also worth doing and nearly free:** raise supplied `K`, or lower `chi_k_pad` 12 → 6. The network was
+built for 12 slots and fed 4 live probes.
+
+### 11.8 Files and verification
+
+| file | change |
+|---|---|
+| `core/SBI/embedded_network.py` | rank-Gaussianisation buffers (1.1) |
+| `core/SBI/statistics.py` | valid-flags at each `clamp(min=_EPS)` (1.2); the §7 thermal feature |
+| `core/SBI/pipeline.py` | winsorisation (1.3); pathological-trajectory counter (1.4); truncated-prior sampling |
+| `core/SBI/analysis.py` | the KL informativeness scalar (Phase 2) |
+| `core/SBI/reparam.py` | eigenbasis truncation region |
+| `core/orchestrator.py` | derived `f_scale`; persist `x_obs` at inference; sidecar provenance + non-amortized flag |
+| `core/SBI/Priors/prior.py` | derived-`f_scale` push-through; ND block untouched |
+| `core/gui/panels/inference_tabs.py` | `_TrainingBudgetMixin` (extracted, not copied) + the gated **TSNPE tab** |
+| `core/gui/screens/inference_screen.py` | the sixth tab and its gate |
+| `core/SBI/derived.py` | ⊕ **new** — the tier-1 relation, both directions, and its preflight |
+| `core/SBI/truncate.py` | ⊕ **new** — `TruncationRegion` + `TruncatedLatentPrior` (Phase 4) |
+| `core/SBI/decorrelate.py` | `stats_no_flags`: the flags must NOT reach the Fisher (trap CHI12) |
+| `core/config.py` | `RANK_GAUSS_KNOTS`, `WINSOR_PCT`, `OBSERVATION_PATH`; `SimConfig.nd_idx` / `sim_rescale_idx` / `k_b_cell` |
+| `scripts/channel_ablation.py` | ⊕ **new** — the CORRECTED range-sweep ablation (§11.2 item 1) |
+| `scripts/migrate_checkpoint_flags.py` | ⊕ **new** — one-shot cache widening, `V` copied verbatim |
+| `tests/test_conditioning_repair.py` | ⊕ **new** — 20 tests incl. the TSNPE pinning test |
+| ~~`Resources/Bounds/nadrowski/master.txt`~~ | ⚠ **NOT edited in place — see below.** Tier 1 got its own box: `master_tier1.txt` + `Cells/nadrowski/master_spont_tier1.txt` |
+
+> **Why tier 1 did not edit `master.txt`.** Editing it changes `param_keys`, hence the checkpoint
+> digest, hence the directory a Phase-1 retrain looks in — orphaning the cache that was migrated for
+> exactly that run, and making `posterior_08232026` no longer reproducible. Two boxes keep Phase 1
+> and Phase 3 separately runnable, which they need to be anyway: Phase 1 reuses 10.24 M cached rows
+> and Phase 3 cannot (**only 1.25 % of the cache survives the temperature constraint**).
+
+**Sort work by this line** (the addendum's, and it is right): *any change to the feature SET
+invalidates the checkpoint and requires re-simulation; changes to standardisation, or to per-channel
+transforms that are pure functions of stored features, do not.*
+
+**Verification** — **seven** suites now, run directly (no pytest), `QT_QPA_PLATFORM=offscreen`,
+`KMP_DUPLICATE_LIB_OK=TRUE`. §1.3 has the per-suite counts; the new one is
+`tests/test_conditioning_repair.py`. **Phase 4's gate is a TEST, not a run** — it is arithmetic on a
+case with a known answer and it already passes. The other three need the retrains, and §11.9 is the
+runbook.
+
+| # | gate | status |
+|---|---|---|
+| 1 | the corrected range-sweep ablation moves `A1_mean`/`D3` from ~1e-7 to a healthy channel's order | **baseline captured** (`A1_mean` 3.2e-7, `D3` 3.2e-7 vs healthy 1.2–2.4, 29 usable of 42, via `scripts/channel_ablation.py`); the standardiser-level improvement measures 1.166 / 0.827 on real cached rows. **Owed: the same script against a RETRAINED net** |
+| 2 | the KL scalar *increases* on the same calibration set | ⬜ needs both posteriors; `validate_calibration` prints it |
+| 3 | implied `T` in 280–310 K goes 2.27 % → ~100 %; mean live probes rises from 3.37/12 | ⬜ needs the Phase-3 run. The 2.27 % baseline is reproduced by `derived.implied_temperature` |
+| 4 | ⚠ **the proposal is the prior restricted to `A`, not the posterior** — the round-1 credible width must **not** contract by `√2` | ✅ **passing**, `test_the_proposal_is_the_TRUNCATED_PRIOR_and_not_the_posterior`. **This is the test that catches the tempering error, and SBC cannot** |
+
+---
+
+### 11.9 The runbook — the two runs that are owed, and what to watch
+
+Everything in §11 is code, tests and a migrated cache. **Neither retrain has been done.** Both need
+the card, and the VRAM rule has not changed: check `nvidia-smi --query-gpu=memory.used --format=csv`,
+**never** `torch.cuda.mem_get_info()`, which overstates free VRAM by the size of the desktop (measured
+15037 MiB against nvidia-smi's 5814). Closing the browsers is still worth more than any constant here.
+
+#### Run A — the Phase-1 flow-only retrain. NO SIMULATION.
+
+The cache at `Resources/Checkpoints/train_230ae7cb5fc2` is complete (5000/5000) and already carries
+the valid flags, so `gen_training_data` loads its 10.24 M rows and skips generation entirely. This is
+hours, not days — nearly all of it inside sbi's fit loop.
+
+> **This was verified, not assumed.** Rebuilding the record run's `training_identity` from scratch
+> resolves to `train_230ae7cb5fc2`; `training_checkpoint.verify()` — the same field-by-field check a
+> resume performs — passes; and `load_rows` returns **10,240,000 x 122**, which is exactly
+> `SUMMARY_WIDTH + 1 + expected_forcing_dim`. The stored `V` (13x13) and the bijection probe came
+> across from `train_98aebd93ed17` untouched.
+
+**The prior must be LOADED, not rebuilt.** `Resources/Priors/3d_master_08102026.pt` is the one whose
+fingerprint (`33ecff5c70c828d8`) the checkpoint identity names; a rebuilt prior gets a different
+fingerprint, a different digest, and starts a fresh 5-day simulation run instead. The run prints
+`[checkpoint] resuming at batch 5000/5000` when it has found the cache — **if that line is absent,
+stop it.**
+
+```
+$env:CHI=1; $env:TOBS_S=4.5
+$env:BOUNDS="Resources/Bounds/nadrowski/master.txt"
+$env:CELL="Resources/Cells/nadrowski/master_spont.txt"
+```
+
+Watch for, in order: the χ banner reading `K=6 F0=0.15 range=(0.03, 0.3)`; the
+`[checkpoint] resuming at batch 5000/5000 … COMPLETE, so generation will be skipped` line; the
+`[winsor] clipped N of M summary elements` line (expect a few tenths of a percent); and at the end the
+`Informativeness (expected prior->posterior KL)` block.
+
+> **Do NOT compare that KL against the 35.9 nats measured on cached TRAINING rows while smoke-testing
+> the estimator.** That figure is on rows the flow memorised and is optimistically biased by an
+> unknown amount. The gate is old-versus-new **on the same fresh calibration set**, which is what
+> `validate_calibration` produces.
+
+#### Run B — the Phase-3 retrain. FULL RE-SIMULATION, multi-day.
+
+```
+$env:BOUNDS="Resources/Bounds/nadrowski/master_tier1.txt"
+$env:CELL="Resources/Cells/nadrowski/master_spont_tier1.txt"
+```
+
+Tier 1 cannot be tested by subsetting the cache — **only 1.25 % (~128 k rows) survives the temperature
+constraint**, far too few for a 989 k-parameter flow. Before the first simulation the run prints
+`[tier1] f_scale is DERIVED as N*beta*k_B*T/x_scale: implied range over the prior p1/p50/p99 = …` and
+the χ drive amplitude those imply. **Read that line.** On the master box the corner reaches ~1.2e4 pN
+of `f_scale` and ~1.9e3 pN of drive; whether that is physically reasonable is a judgement about the
+preparation, which is why the banner reports rather than refuses.
+
+> ⚠ **`T`'s posterior will be its prior, and its SBC histogram will be flat and VACUOUS.** Report `T`
+> as a fixed input, never as an inferred quantity, or you are quoting a credible interval on something
+> you assumed. (The cleaner alternative — fix `T = 300 K` and drop to 12 inferred dimensions — is a
+> larger change and is worth raising once the 13-dim version has been measured.)
+
+#### The gates
+
+| # | gate | how |
+|---|---|---|
+| 1 | `A1_mean`/`D3` reach the same order as healthy channels | `POST=<new> CKPT=Resources/Checkpoints/train_230ae7cb5fc2 python scripts/channel_ablation.py`, against the baseline (`A1_mean` 3.2e-7, `D3` 3.2e-7, healthy 1.2–2.4, **29 usable of 42**) |
+| 2 | the KL scalar **increases** | the `Informativeness` block, old vs new, same calibration set |
+| 3 | implied `T` in 280–310 K goes 2.27 % → ~100 %; mean live probes rises from 3.37/12 | the `[tier1]` banner + `[ppc] chi probes: N live / K slots` |
+| 4 | the proposal is the truncated prior | `tests/test_conditioning_repair.py` — it is arithmetic, not a run |
+
+Also re-run `scripts/posterior_identifiability.py`. The new artifact carries `fisher_eigenvalues`
+(added 2026-08-25), so for the first time the decomposition has a **scale** and not just an ordering —
+the difference between "mildly uneven" and "nine of thirteen parameters are prior".
+
+> **Expect `k` to stay unmeasured.** §11.2.1's reconciliation is unchanged by any of this work: the
+> Fisher is computed on a **clean** standardisation (`fnoise` is locally measured single-trajectory
+> noise, not the embedding's contaminated `sum_std`), so `k`'s gradient was already known to be tiny
+> on clean features. Phase 1 recovers what the flow could not SEE; it cannot create information that
+> was never in the observable. Gains belong in `x_scale`, `delta_E` and the absolute-scale directions.
+
+---
+
 # Appendix A — Change history
+
+## 2026-08-26 — §11 implemented, and the measurement that set its width was not the one §11 assumed
+
+All four phases of the informativeness programme landed. **Nothing has been retrained yet** — the
+code, the migrated cache and the gates exist; the two runs that need the card are handed off.
+
+### The premise was checked before any of it was written, and it holds exactly
+
+§11's whole economy rests on "Phase 1 needs no re-simulation". That was verified rather than assumed:
+
+- `Resources/Checkpoints/train_98aebd93ed17` reports `complete: True, 5000/5000 batches` at
+  `chi_f0 = 0.15`, band `(0.03, 0.3)` — the run behind `posterior_08232026`.
+- `Resources/Priors/3d_master_08102026.pt` reproduces `prior_fingerprint 33ecff5c70c828d8`, the value
+  in both checkpoint identities.
+- **Rebuilding the retrain's `training_identity` from scratch reproduces the digest `train_98aebd93ed17`
+  exactly** — so the cache is genuinely reachable by a real run, not merely present on disk.
+
+The two §11 claims that Phase 1 targets were also reproduced from the artifact itself, off the
+trained net's own buffers: `A1_mean` fitted at **std 4.19e11** against a physical range of ~1e3, and
+`D3_bimodality` at **std 4.42e8** against a range of (0, 1]. `elem_std` matched §11.1's ledger to four
+decimals and the parameter count to the digit.
+
+### ⚠ THE SENTINEL PROBLEM IS SIX CHANNELS, NOT ONE — AND THAT IS WHAT SETS THE NEW WIDTH
+
+§11.3 item 1.2 is written as though `B1_log_Q` were the case. A point-mass census over **all
+10.24 M rows** — each column's most frequent value found empirically, then counted exactly — says
+otherwise:
+
+| channel | substituted | | channel | substituted |
+|---|---|---|---|---|
+| `B1_log_Q` | **69.66 %** | | `E1_log_tau_slow` | 8.01 % |
+| `C7_log_slowenv_relvar` | **30.04 %** | | `E1_w_fast` (fast decay gone) | 7.53 % |
+| `B7` (no secondary peak, both columns) | **14.49 %** | | `E2_log_h3` | 5.51 % |
+| `C6_log_slowenv_corrtime` | 5.07 % | | `E2_log_h2` | 2.83 % |
+
+So the valid-flag block is **8 channels**, not 1, and the conditioning goes `42 + 72 = 114` →
+`50 + 72 = **122**`. `C2_log_env_cv` — the addendum's predicted 5.6 % sentinel, which §11.2 item 2
+already flagged as a false positive — measures **exactly 0 rows in 10.24 M**. `A4_log_acf_decay`'s
+point masses at `0.0` (7.7 %) and `log 2` (9.1 %) are the **discreteness of an integer lag index** at
+short correlation times, not a substitution, and earn no flag.
+
+> **A measurement bug worth recording, because it fails silently and reads as good news.** The first
+> census cast the stored `float32` rows to `float64` before comparing against `math.log(1e-12)`. The
+> two are not equal, so **every sentinel count came back 0.000000** — a clean-looking table saying the
+> problem does not exist. Compare in the dtype the data is stored in.
+
+### Two co-occurrence assumptions, each checked on all 10.24 M rows rather than argued
+
+One flag covers `B7_log_sec_freq_ratio` and `B7_sec_height_ratio` together, and one covers
+`E1_log_tau_fast` and `E1_w_fast`. Both pairings are only legitimate if the members never disagree:
+measured, **the XOR fired zero times on either pair**. `E1`'s flag is keyed on `w_fast == 1` rather
+than on `log_tau_fast`'s value, because that value also carries the lag index `l1` and is only
+*incidentally* constant — the two agreed on every row, and the chosen one stays true if the lag clamp
+ever moves.
+
+### The flags must not reach the Fisher, and the reason was already written down
+
+`gen_stats` is what the Fisher's `feats()` calls, so widening it silently widened the Jacobian by 8
+**binary** rows. `decorrelate` standardises by `fnoise = max(f0.std(0), 1e-9)`, and a flag that
+happens to step between the ±δz arms divides 1 by that floor. That is trap **CHI10** exactly, and the
+comment three lines above the call site already says it: *"It is the NEARLY constant channel that is
+lethal, not the constant one."* The three Fisher call sites now route through `stats_no_flags`.
+
+### Phase 1, and the gate it has to clear
+
+`scripts/channel_ablation.py` is new, and it is §11.2 item 1's **corrected** test — sweep each channel
+across its real p1–p99 range, never substitute the fitted mean (which is itself contaminated and sits
+~1e7 from the data, which is why the addendum's own version concludes the dead channels are alive).
+Run against `posterior_08232026` it reproduces the finding:
+
+```
+A1_mean         3.2e-7      D3_bimodality  3.2e-7      <- 1.09e-6x a typical channel
+A2_log_var      1.228       A3_log_fpeak   2.374       <- healthy; median non-constant 0.295
+verdict: 11 structurally dead, 2 numerically invisible, 29 usable of 42
+```
+
+**The two dead channels reporting the same number to three figures is itself the tell** — that value
+is the network's own float noise, identical because neither channel moves the output at all. The base
+point is the real row nearest the standardised median (2 live probes of 12), not a median VECTOR: a
+median vector's χ block is all-zeros, i.e. an observation with no live probes, which no recording can
+produce and which puts the set encoder on its n=0 path.
+
+Under rank-Gaussianisation the same sweep on real cached rows moves `A1_mean` to **1.166** and `D3`
+to **0.827**, against `A3_log_fpeak` 1.152 and `B4_spec_entropy` 1.024. **The gate clears by a factor
+of ~1e6.** Two caveats, and they matter: that figure is on an untrained net, so the meaningful part is
+the *parity across channels*, not the absolute number; and the real comparison is old-trained against
+new-trained, which is the retrain that has not been run.
+
+Two defects in the script were found by reading its own output rather than by testing: on a pre-flag
+posterior it labelled `logT` as `V_B1_Q` (slicing the new label list against the old layout), and its
+"invisible" verdict keyed on an absolute float32 ulp, which misses a channel that moves the embedding
+a millionth as far as its neighbours while still clearing an ulp. Both now key on the layout the net
+actually carries and on the ratio to the median.
+
+### The cache was migrated rather than the guard loosened
+
+`summary_flags` joins `training_identity`, so the digest changes and the pre-flag checkpoints are
+orphaned — which is C-11's identity doing its job, not an obstacle. `scripts/migrate_checkpoint_flags.py`
+derives the flags from the cached values with **the same function the live pipeline calls** and writes
+a new directory (`train_230ae7cb5fc2`, 5.2 GiB, 102 shards, every one bitwise-verified after the
+write). `V` and the bijection probe are copied verbatim: trap **X10** again — a recomputed `V` would
+express the reused rows' latent targets in a different coordinate than the targets stored beside them.
+The source is untouched, so `posterior_08232026` stays reproducible.
+
+### The migrated cache was then checked the way a resume would check it
+
+Not "the files are there": the record run's identity was rebuilt from scratch, resolved to
+`train_230ae7cb5fc2`, and put through `training_checkpoint.verify()` — the field-by-field check the
+resume itself performs. It passes, `load_rows` returns **10,240,000 x 122** (exactly
+`SUMMARY_WIDTH + 1 + expected_forcing_dim`), and the stored `V` and probe are the source's.
+
+### Phase 3 reproduced §11.2's numbers before changing anything
+
+`derived.implied_temperature` over 1.02 M real cached θ gives quantiles **14 / 81 / 287 / 945 / 6318 K**
+against §11.2's 14 / 80 / 286 / 939 / 6292, and **2.273 %** in 280–310 K against 2.27 %, spread 447×
+against 450×. The formula and the units are right: `k_B` is derived from the units file rather than
+baked, and `k_B·T` at 300 K comes out **4.1419 pN·nm**.
+
+> ### ⚠ §11.2's CORRECTION 3 GIVES THE WRONG REASON, AND THE REASON IS WHAT PHASE 3 WOULD BE BUILT ON
+> It says `x_scale`/`f_scale` "are not log-uniform: `REPARAM_LOG_PARAMS = []`". `REPARAM_LOG_PARAMS`
+> governs only the **ND** block's box coordinate. The rescale block is built by
+> `_build_rescale_prior`, whose rule is `"scale" in name → "log-uni"` — and sampling it directly
+> returns log-medians of 3.451 / 1.844 / 3.457 against a log-uniform's 3.454 / 1.844 / 3.454. **They
+> ARE log-uniform in physical space.** The measured quantiles and the 2.27 % stand (they were taken on
+> real rows) and Phase 3's variance argument is untouched, but anyone re-deriving a survival fraction
+> from the stated cause will get it wrong.
+
+**One deliberate deviation from §11.8's file list.** It says to edit `Bounds/nadrowski/master.txt`
+in place (`f_scale` → `T`). Doing that would change the Phase-1 retrain's identity and orphan the
+cache that was just migrated for it. Tier 1 therefore gets its own box —
+`Bounds/nadrowski/master_tier1.txt` + `Cells/nadrowski/master_spont_tier1.txt` — so Phase 1 and
+Phase 3 are separately runnable and `posterior_08232026` stays reproducible.
+
+The derived `f_scale` spans **0.2 → 12426 pN** over the box corners, which is §11.5's ~1e4 hazard
+confirmed by arithmetic. It is announced by a preflight banner rather than bounded by a new threshold:
+whether 1.9e3 pN of drive is reasonable is a judgement about the preparation, not something a constant
+in `config.py` should decide.
+
+### Phase 4, and the test SBC cannot do
+
+The whole of TSNPE's risk is one sentence — **the proposal is the truncated prior, never the
+posterior** — and the failure is invisible: tempering contracts credible intervals by `(L+1)^(-1/2)`
+with no new information, and SBC comes out flat because it validates the flow against the proposal it
+was trained on. So the pinning test is arithmetic on a case with a known answer: a wide prior, a
+narrow posterior, a region, and an assertion that the proposal's width is the **prior's** over that
+region — explicitly not the posterior's (1.0) and not the posterior's over √2 (0.707).
+
+Guardrails 1–6 are all in: `x_obs` persisted at **inference** time (an amortized posterior has none at
+save time, which is why `default_x` is None on `posterior_08232026`); the artifact marked
+`amortized: False` with its region in the sidecar and a load path that refuses it for general
+inference; truncation along the leading Fisher directions only, leaving the flat ones full width;
+unweighted draws; a 99.9 % default with the kept-mass fraction printed; and the cost on screen before
+the button, via the Posterior tab's budget widget — **extracted into `_TrainingBudgetMixin` rather
+than copied**, because a second `_budget_memory` would be a second place for `pipeline`'s cost model
+to be restated wrongly.
+
+### Four defects the suites found in the new code, and the two that matter are the last two
+
+- `count_pathological` counted an all-NaN row as **both** non-finite and "exactly constant", because
+  `nan_to_num` flattens it to zeros and `amax == amin` then agrees. An all-NaN batch would have
+  reported a flatline population that was not there. Non-finite rows are now counted only as
+  non-finite; `constant` and `overflow` still overlap on purpose, since an all-1e29 row is genuinely
+  both.
+- One of the new tests contained `assert ... or True`, which is vacuous — the same defect this project
+  caught in its own fixtures on 2026-08-06. Replaced with a bounded assertion on the fraction of
+  elements a 0.1/99.9 clip is supposed to move.
+- **⚠ PYTHON EVALUATES CALL ARGUMENTS EAGERLY, AND A GUARD INSIDE THE CALLEE DOES NOT HELP.**
+  `to_sim_rescale` returns early for a box that declares `f_scale`, so passing
+  `cfg.nd_idx, cfg.k_b_cell` into it looked free. It is not: `k_b_cell` needs a FORCE unit in the
+  units file and raises without one. `test_no_forcing_user_model_full_sbi_pipeline` died inside the
+  Fisher rotation with *"No unit with dimensionality [mass] * [length] / [time] ** 2 found in the
+  units file"* — a user model, no force token, tier 1 not even on. Now `SimConfig.tier1_args`
+  returns `(None, None)` off-tier and every call site passes `*cfg.tier1_args`. **This is the one
+  that a green-looking six-suite run would have shipped**: the five fast suites never build a
+  rotation.
+- **The observation record turned the test suites into writers.** `infer_and_visualize` persisting
+  `x_obs` is right for a real run and litter in a test, and nothing else in the suite writes into
+  `Resources/` — a property worth keeping. Now `orchestrator.PERSIST_OBSERVATIONS`, rebound to False
+  by the suite exactly as `TRAINING_CHECKPOINT_EVERY` already is, and for the same reason. It is not
+  a user-facing switch: a real inference always records, because TSNPE keys on the digest.
+  *It also made a new test flaky in the honest way* — the TSNPE gate test cleared the picker's combo,
+  but `refresh_local_gates` repopulates it from disk, so the assertion held only while
+  `Resources/Observations/` happened to be empty and flipped after any run that had inferred. The
+  test now drives the picker's accessor instead of the filesystem.
+
+### The smoke train on the card — clean, and what it says about the masked fraction
+
+All four stages, **624 s** (prior 1 s from a loaded prior, posterior 549 s, validate 21 s, infer 52 s),
+**zero OOM retries**, banner reading `chi: K=6 F0=0.15 range=(0.03, 0.3)` and
+`conditioning width = 41+8 + 1 + 72 = 122`. The new instruments all reported: `[patho] run total: 0
+pathological of 40 simulated trajectories`, an `Informativeness` line, and
+`[obs] observation persisted as obs_…` — guardrail 1 working end to end. The PPC's decomposition read
+`6 live / 12 slots (6 never filled, 0 masked); 12 of 50 base features flat`.
+
+A smoke train on the tier-1 box was also clean — all four stages, **847 s**, zero OOM,
+zero pathological trajectories — and its preflight is the number Phase 3 turns on:
+
+```
+[tier1] f_scale is DERIVED as N*beta*k_B*T/x_scale: implied range over the prior
+        p1/p50/p99 = 14.2 / 683 / 6.86e+03, min 2.01 max 1.05e+04   (cell force units, pN)
+[tier1] chi drive amplitude = CHI_F0 * f_scale = 2.13 / 102 / 1.03e+03 at those quantiles
+```
+
+**The median derived `f_scale` is 683 pN against the retired box's log-uniform median of ~32 pN** — a
+~20× shift in the drive the training set actually sees. That is §11.5's "a real change to the
+training distribution, not a relabelling", quantified.
+
+> ### The masked fraction, and why one run cannot answer it
+> **Three** smoke trains, and they are the cleanest demonstration of this rule the project has:
+>
+> | run | masked | |
+> |---|---|---|
+> | Phase-1 box, pre-audit | 106/180 | **58.9 %** |
+> | tier-1 box | 197/704 | **28.0 %** |
+> | Phase-1 box, post-audit | 288/704 | **40.9 %** |
+> | **probe-weighted** | **591/1588** | **37.2 %** |
+>
+> Individually they span 28–59 %. Pooled they land on **37.2 %**, against a ~36–37 % reference. Any
+> one of the three, read alone, would have supported a different conclusion.
+>
+> The 58.9 % reading is a DRAW, not a regression, and there are two independent reasons to say so.
+> First, the χ path is byte-unchanged by this work: `chi.py` is untouched, the diff has no hunk inside
+> `gen_chi_raw`, and `sim_ridx` is the identical dict when tier 1 is off. Second, the spread is
+> exactly what `smoke_train`'s own docstring warns about — the effective n is the BATCH COUNT, here 4,
+> and one batch (`t_scale=37.29, T=1516`) masked 36/40 by itself. `SEED` does not make runs comparable
+> either, because initial conditions come from numpy's unseeded RNG (trap X8). **Compare a
+> probe-weighted mean over a few runs, never a single figure** — this pair is the cleanest
+> demonstration of that rule the project has.
+
+### The audit pass, and it found nine more — read this before trusting anything above
+
+Everything above was verified INCREMENTALLY as it was written: compile checks, targeted measurements
+against the artifacts, seven suites, two smoke trains. That process caught four defects, which is
+already a reason not to stop there. A deliberate read-through of the new code afterwards found
+**nine more**, five of them real bugs. The lesson is the boring one: *incremental verification finds
+what the tests were pointed at; only re-reading finds what nobody thought to point them at.*
+
+**Three that would have produced wrong results or lost work.**
+
+- **The TSNPE round's result was thrown away.** `TSNPEPanel._round` dispatched with `provide_fig_sink`
+  and **no `on_result`** — the round would simulate, train for hours, and the posterior would never
+  reach the session. It now installs the posterior, its latent, `V`, and the region.
+- **A TSNPE posterior would have been saved marked `amortized: True`** — guardrail 2 failing at the
+  one seam it is hardest to see. The GUI trains with `save=False` and saves LATER from a button, so
+  the region has to survive on the session; it did not, and `_save_posterior` called
+  `save_posterior_artifacts` without it. The result would be a non-amortized artifact sitting in the
+  same `ArtifactPicker` as the real ones with nothing to tell them apart — the retired-band failure
+  class exactly. **The mislabelling ran in both directions:** training an ordinary posterior after a
+  round would have inherited that round's region and been saved non-amortized. `SbiSession` now
+  carries `truncation`/`x_obs_digest`, `_on_posterior` CLEARS them, and
+  `test_a_tsnpe_posterior_cannot_be_saved_as_amortized` pins all three halves (verified to fail
+  against the old call).
+- **The informativeness decomposition characterised one or two strata, not the prior.** It looped
+  `range(n_d)` over the calibration set — and `gen_cal_data` returns rows in generation order with
+  every row in a batch sharing one `(t_scale, T)` operating point. The first 256 rows are a handful
+  of `t_scale` values. Trap **X5**'s class, in a new place. Now evenly spaced indices.
+
+**Two that would have hurt the runs this work exists to enable.**
+
+- **`winsorize_summary_block` tripled the host peak.** It built a clipped COPY of the summary block
+  and `torch.cat`-ed it back, holding the original, the copy and the concatenation alive together:
+  **~12 GiB against a 5 GiB tensor** — reinstating the very peak C-11's preallocated accumulators
+  were introduced to remove, at the very point in the run they removed it from (right before
+  `append_simulations`, at the end of a multi-day generation). Now `clamp_` in place on the summary
+  view, returning the same tensor.
+- **`count_pathological` allocated three trajectory-sized tensors per call.** `isfinite(x).all(-1)`,
+  `nan_to_num(x)` and `safe.abs()` are each 492 MB at the production shape, twice per batch, on a
+  card that has already died of OOM twice (traps X6/X7) — the cheapest item in §11 was the most
+  expensive thing in the batch. Now two `(rows,)` reductions: `amax`/`amin` propagate NaN and ±inf,
+  so `isfinite(mx) & isfinite(mn)` was **verified equal** to `isfinite(x).all(-1)` on NaN, +inf,
+  -inf, constant and ordinary rows.
+
+**One that would have been slow and alarming rather than wrong.** `TruncatedLatentPrior` seeded its
+blind first pass at a 1e-3 acceptance floor, so it asked for `(n / 1e-3) × 1.3` draws before it had
+measured anything — **2.66 million rows** for a 2048-row batch, out of a 13-D GMM. It now probes at a
+sane rate and sizes the rest from the measured one, with a cap on any single draw.
+
+**Three where the code was right and what it CLAIMED was not** — which in this document's terms is
+the same kind of defect:
+
+- **The ablation gate's base point was a median VECTOR, not an observation.** Under χ most probe-slot
+  columns are zero in most rows, so their medians are zero and the composed row has an all-pad probe
+  block — no live probes at all, which no recording can produce and which puts the set encoder on its
+  `n=0` path. A gate that decides whether to accept a multi-day retrain should not be evaluated
+  outside the data. It now uses the real row nearest the standardised median (2 live probes of 12).
+  **The finding is unchanged and sharper**: `A1_mean` and `D3` both come out at **3.2e-7**, and the
+  two agreeing to three figures is itself the tell — that number is the network's own float noise,
+  identical because neither channel moves the output at all.
+- **`per_param` is an entropy REDUCTION, not a marginal KL.** `H(prior_j) − E_x[H(posterior_j|x)]`
+  measures narrowing; a marginal that shifts without narrowing has positive KL and zero entropy
+  reduction. It is the right quantity for §4.6's complaint, which is width — but it was not named
+  that, and it can go negative.
+- **The valid flags are meaningless on a pathological row.** `compute_statistics` ends in
+  `nan_to_num(..., nan=0.0)`, so by the time `derive_valid_flags` sees a feature, `0.0` may mean
+  "genuinely zero" or "was NaN" — a fully non-finite trajectory arrives looking finite and its
+  `_logp` channels read 0.0 rather than the sentinel, so their flags say VALID. Not fixable at that
+  layer; the defence is `count_pathological`, which is exactly why item 1.4 belongs in the same phase
+  as 1.2. **Read the `[patho]` line before trusting a flag histogram.**
+
+Also fixed in passing: `TruncatedLatentPrior.__getattr__` raised `KeyError` where Python requires
+`AttributeError` (it is consulted before `__init__` during copy/pickle, so this broke copying);
+`_entropy_1d` returned a silent NaN when the spacing window was wider than the sample; and
+`informativeness` omitted two keys on one of its two return paths.
+
+> **And fixing the winsorise made two of MY OWN tests vacuous** — both compared `out` against `data`,
+> which after an in-place clip is the same object, so both asserted nothing. That is the third time
+> this defect class has appeared in this project's fixtures (2026-08-06, and the `or True` above).
+> They now snapshot with `.clone()` first, and one of them asserts `out is data` so the in-place
+> contract is pinned rather than assumed.
+
+### Verification
+
+`test_gui_progress.py` 95 → **97**, plus a new suite `tests/test_conditioning_repair.py` (**23**,
+seconds, pure torch). The other five are unchanged in count and green. The GUI test checks the TSNPE
+runner's **code** with its docstring stripped by `ast` — a naive text search for "proposal" flags the
+very comment that documents the rule, which is how that test failed first time.
+
+**Re-verified after the audit:** all seven suites green (266), and a THIRD smoke train on the card —
+all four stages, 599.1 s, zero OOM, zero pathological trajectories, and an observation digest
+byte-identical to the first run's, which is what it should be for the same cell and `T_obs`.
+
+**Not verified, and owed:** the two runs that need the card. The Phase-1 flow-only retrain against
+`train_230ae7cb5fc2` (no simulation), and the Phase-3 retrain (full re-simulation, multi-day). Also
+not verified: the pixels of the new TSNPE tab — §6 row 3's standing rule.
+
+---
+
+## 2026-08-25 (later) — the addendum, checked against the artifacts rather than read
+
+A user-written analysis (`PRISM_HANDOFF_ADDENDUM_2026-08-25.md`, kept on the Desktop) proposed a
+diagnosis for `posterior_08232026`'s uninformativeness and an ordered work queue. It is an unusually
+good document *because it is falsifiable*: it states its numbers and says where they came from. So it
+was not read and judged — **every checkable claim was run against the artifacts.** The result is §11.
+
+### The thing that made this possible was already on disk and nobody had used it
+
+**Both complete 5000×2048 C-11 training checkpoints survive**, holding all 10.24 M conditioning
+vectors and their θ. `train_98aebd93ed17` is the one this posterior trained on — proved by applying
+`train_nn`'s `abs<1e15` guard to its rows and reproducing the stored `sum_mean`/`sum_std` **to every
+digit**. That turns most of the addendum's §2 and §3 from inference into measurement, and it is the
+reason Phase 1 of §11 needs no re-simulation.
+
+### What held
+
+Most of it, exactly. All the embedding buffers; the 11 pass-through channels; `elem_std` to four
+decimals; 989,312 parameters; the whole drift/diffusion table in §6.2, verified line-by-line against
+`nadrowski_model.py`. Two deserve singling out:
+
+- **`k = 2.000` contaminated rows, predicted from `σ²/μ` alone with no access to the training data.
+  Measured: exactly 2 surviving rows, at exactly 1e12.** The mechanism is sharper than the addendum
+  states — `_group_d` computes `z = (s-mu)/std.clamp(1e-12)`, so an **exactly constant** trace gives
+  `z ≡ 0`, `kurt = 0`, clamp fires, `bimod = 1/_EPS`. A flatlined simulation, not an underflow.
+- **`B1_log_Q` sentinel fraction predicted 0.699, measured 0.697** over 1.02 M rows.
+
+### The four that did not, and one of them matters a great deal
+
+**The addendum's own "decisive test" is the wrong test and would have refuted its own best finding.**
+Task 0.1 says to replace a channel with its fitted mean and expect exactly zero change from a dead
+one. But the fitted mean is *itself contaminated* and sits ~10⁷ from the data, so substituting it is a
+LARGE move — measured 5.2e-5 and 4.6e-4, not zero. Run it as written and you conclude the channels are
+alive. **Sweeping the real p1–p99 range instead gives 1.8e-7 and 8.9e-8 against ~1.4 for healthy
+channels — a factor of 10⁷, and below one float32 ulp.** The conclusion was right; the test was not.
+
+Also: §3.2's "the fits are exact, which is itself strong evidence" is an identity, not evidence (two
+parameters, two moments, closed form) — and it produced a false positive, `C2_log_env_cv` predicted
+5.6 % sentinel and **measured 0.000 %**. And §5.2 assumed log-uniform sampling where the box is
+all-linear: implied median bath temperature is **286 K, not 15 K**. *The spread claim survives and is
+what matters* — only **2.27 %** of rows land in 280–310 K.
+
+### The reconciliation that decides what to expect
+
+The addendum argues §4.6's "identifiability limit" verdict is invalid because the conditioning is
+broken. Checkable, and the answer is no: `decorrelate.py` standardises its Jacobian by
+`fnoise = max(f0.std(0), 1e-9)` — **locally measured single-trajectory noise, not the embedding's
+contaminated `sum_std`.** So the Fisher, `V` and §4.6's decomposition run on clean features and are
+not artifacts of the bug. **Both findings are true and independent, which bounds what Phase 1 can
+buy: expect gains in `x_scale`, `delta_E` and the absolute-scale directions; do not expect `k`.**
+
+### One phenomenon behind three unrelated symptoms
+
+`D3`'s contamination is *exactly constant* traces. `A1_mean`'s is ~1e32-magnitude traces (measured min
+−4.59e32). The missing PSD band earlier the same day was divergent draws. **One population of
+pathological simulations, damaging three unrelated things silently, and nothing in the pipeline
+counted them.** That is now Phase 1's cheapest item.
+
+### Measured while answering "is TSNPE worth losing amortization for?"
+
+**33.68 %** of training rows carry zero live χ probes (mean **3.37** live of 12 slots) — matching
+§4.3.6's independent estimate. **66.32 %** survive a probe-based truncation; **2.27 %** survive the
+temperature constraint; **1.25 %** survive both. So the addendum's free-subset test works for the
+first and **not** the second, and the amortization question is largely a false dilemma: the two big
+wins come from a prior narrowing that keeps amortization entirely (§11.5).
+
+**Nothing in §11 has been implemented.** This entry records the verification and the plan only.
+
+---
+
+## 2026-08-25 — the retrain landed, and the plots that were meant to explain it could not be read
+
+The first posterior on the corrected χ band finished. Four questions came back with it: what the
+cycle-averaged waveform means, why the power spectrum was a bare white line, how to read the set, and
+what to do about the degeneracy. Three of the four turned out to have answers in the artifacts.
+
+### Two of the four questions were rendering defects, and one of them made the run look worse than it is
+
+**The power spectrum really was broken.** Counted pixels rather than eyeballing it: the only
+steelblue in the image was the legend swatch — zero band pixels, zero median pixels inside the axes.
+The obvious cause (a NaN poisoning `torch.quantile`) is **wrong**, and ruling it out is what found the
+real one: `posterior_overlay.png` and `cycle_avg_waveform.png` run the same quantile over the *same*
+traces and both rendered. They survive because the overlay band takes only the 50 best draws and
+`cycle_average` confines a bad phase to one bin — so a broad posterior drawing a few unstable
+parameter sets erases the PSD band and nothing else. **The symptom looked like a plotting bug in one
+figure; it is a property of the posterior.** Now trap **G7**: rows are dropped, the count is returned,
+and an empty band is annotated in the axes — *"the band is missing"* is a bug report, *"17 of 1000
+draws were non-finite"* is a finding.
+
+**And a defect nobody had asked about explained most of "it doesn't look that good".** Every axis
+label, tick label, title and both parameter tables were **invisible in 14 of the 15 figures** —
+measured contrast **1.06:1**, where readable is 4.5:1. The figures were BUILT under the dark theme
+(#2B2B2B axes, #F5F5F5 text — exact `DARK` token matches) and SAVED on a light page (#F3F3F3, the
+`LIGHT` token). matplotlib bakes artist colours at build time and reads `savefig.facecolor` at save
+time, and `mpl_theme` rewrites rcParams globally; a multi-day run straddles a theme flip easily.
+`loss_curve.png` was the one readable figure, fully light — i.e. built on the other side of the flip.
+Now trap **G6** + `visualizers.save_figure`, which pins the save to `fig.get_facecolor()`.
+
+### The identifiability decomposition, and the finding that revises §4.4
+
+The `.rot.pt` sidecar already carried the Fisher rotation `V` — eigenvectors of the prior-averaged
+`J^T J`, sorted best-first. That is exactly the "which directions does this experiment measure?"
+object, sitting on disk, free. `scripts/posterior_identifiability.py` now reads it.
+
+**`k` puts 99.9 % of its weight on a single direction loading −0.999·`k`, and its overlap with
+`x_scale` across all 13 directions is 0.0002.** §4.4/§4.4.1 have the central problem recorded as the
+`k`~`x_scale` alias (|cos| 0.97, measured three times). Both are true and together they say more:
+|cos| compares gradient DIRECTIONS, a Fisher eigenvalue is about gradient MAGNITUDE, and `k`'s
+gradient is both nearly parallel to `x_scale`'s and tiny. **`k` is not degenerate so much as
+unmeasured** — and a flat direction is a different engineering problem from an alias, because no
+rotation, reparameterisation or prior reaches it. Only a new observable does. Recorded in §4.6.
+
+The same read explained the PPC's alarming "Invalid stats: 48/114": `chi_n_freqs` 6 supplied into
+`chi_k_pad` 12 slots means 36 elements are padding before anything is masked — **~4 live probes in
+12 slots.** `analysis.invalid_breakdown` prints that split now, because "42 % of the conditioning is
+flat" is unactionable and "4 live probes of 12" is a lever.
+
+### The gap this left, and it is closed only for future runs
+
+**The eigenvalues were computed and thrown away.** `fisher_eigenbasis` returned V and dropped them,
+so the 2026-08-25 posterior can be decomposed only up to an ORDERING — direction 12 is worst, but
+whether direction 0 is 10× or 10⁶× better constrained is unrecoverable without a full Fisher re-run.
+That gap is the difference between "mildly uneven" and "nine of thirteen parameters are prior".
+`save_posterior_artifacts` now writes `fisher_eigenvalues`, and `build_posterior` prints the spread as
+it computes the rotation. **The current artifact cannot be retrofitted cheaply; the next one is fine.**
+
+Also noted and not fixed: `default_x` is None on the saved posterior, so the posterior behind those
+figures cannot be re-sampled from the artifacts alone. Amortized NPE has no observation at save time
+by design, so the fix belongs at *inference* time (persist `x_obs` beside the run's outputs), not at
+save time — deliberately left rather than bolted on.
+
+### Verification
+
+`test_gui_progress.py` 89 → **95**, `test_artifact_consistency.py` 14 → **15**,
+`test_user_sbi.py` 63 → **64**. Two of the new tests carry their own counterfactual: the theme test
+asserts the *unpinned* save still reproduces the bug, and the divergent-draw test asserts the good
+draws' band is unchanged rather than merely finite. The identifiability script was run against the
+real artifact and reproduces the table in §4.6 exactly.
+
+**Not verified: the pixels.** The figure fixes are pinned by contrast and background assertions, not
+by a human looking at the app — §6 row 3's standing rule.
+
+---
 
 ## 2026-08-21 (later) — the training budget, and the answer to "how many simulations per batch?"
 

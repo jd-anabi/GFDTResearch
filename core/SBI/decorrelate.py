@@ -29,6 +29,8 @@ from core import forcing as _forcing
 from core.config import CHUNK_LEN, REPARAM_FISHER_M, REPARAM_FISHER_DZ, REPARAM_FISHER_POINTS
 from core.SBI import chi as _chi
 from core.SBI import pipeline
+from core.SBI import statistics
+from core.SBI import derived
 from core.SBI.reparam import build_inferred_bijection, fisher_eigenbasis
 
 
@@ -63,7 +65,7 @@ def _representative_forcing(cfg, force_prior, dtype, device) -> torch.Tensor:
 
 def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                                  latent_prior=None, n_points: int = None,
-                                 force_prior=None) -> torch.Tensor:
+                                 force_prior=None, with_values: bool = False):
     """
     Decorrelating rotation V (P, P), P = ND + rescale dims, from the latent Fisher, AVERAGED over
     n_points operating points (GT + prior draws). Averaging makes the (single, linear) rotation
@@ -79,7 +81,11 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                          only GT is used (original GT-only behavior, regardless of n_points).
     :param n_points: number of operating points GT + (n_points-1) prior draws (default
                      config.REPARAM_FISHER_POINTS). n_points=1 => GT only.
+    :param with_values: also return the Fisher eigenvalues (descending, aligned with V's columns).
+                        They are what turns V from an ordering into a measurement of how much better
+                        constrained one direction is than another -- see reparam.fisher_eigenbasis.
     :return: orthogonal V on cfg.hw.device; w = z @ V are the decorrelated flow coordinates.
+             With ``with_values``, ``(V, eigenvalues)``.
     """
     T = T if T is not None else build_inferred_bijection(cfg)
     m = m or REPARAM_FISHER_M
@@ -143,6 +149,14 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
         t_fine = cfg.t[:n_fine]
         n_segs = max(1, math.ceil(n_fine / CHUNK_LEN))
         rv = res.unsqueeze(0).expand(mm, -1).contiguous()
+        # TIER 1 (section 11.5): the Fisher must be built over the SIMULATED experiment, so the
+        # drive amplitude here has to be the derived f_scale rather than the temperature sitting
+        # in its column. A no-op for a box that declares f_scale. Note the gradient is still taken
+        # with respect to the INFERRED coordinates (T among them) -- feats() is differenced in
+        # latent space by fisher_at, which is upstream of this substitution, so V comes out in the
+        # basis the flow actually trains in.
+        rv = derived.to_sim_rescale(nd, rv, cfg.rescale_idx, *cfg.tier1_args)
+        sim_ridx = cfg.sim_rescale_idx
 
         def s(f):
             return pipeline.gen_obs(model=cfg.model, params=nd, t=t_fine,
@@ -150,6 +164,19 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                                     n_segs=n_segs, steady_idx=cfg.steady_idx,
                                     state_dep_drift=cfg.state_dep_drift, batch_size=mm, var_idx=0,
                                     dtype=dtype, device=device)[0][:, ::subs][:, :N_obs]
+
+        def stats_no_flags(*a, **kw):
+            """gen_stats WITHOUT its trailing valid-flag block.
+
+            The flags are BINARY and near-constant across an ensemble at one operating point, which
+            is precisely the shape `fnoise = max(std, 1e-9)` turns into an amplifier: a flag that
+            happens to step between the +dz and -dz arms writes 1/1e-9 into J. That is the same
+            defect C-9/C-10 removed `logcyc` for, and the reason `mask` is absent from
+            CHI_FISHER_CHANNELS -- see the chi branch below, which spells out why a NEARLY constant
+            channel is lethal where an exactly constant one is free. The flags say which features
+            are real, which is a statement about the OBSERVATION and carries no gradient in theta.
+            """
+            return pipeline.gen_stats_features(*a, **kw)
 
         xsc = res[cfg.rescale_idx["x_scale"]].double()
         xof = res[cfg.rescale_idx["x_offset"]].double() if "x_offset" in cfg.rescale_idx else 0.0
@@ -184,8 +211,8 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 zero = _forcing.zero_force(mm, n_force_ch, t_fine.shape[0], dtype, device)
                 torch.manual_seed(2)
                 xs_d = xsc * s(zero).double() + xof
-                spont = pipeline.gen_stats(xs_d, None, cfg.dt_exp, None, None, None,
-                                           device=device, spontaneous_only=True).numpy()
+                spont = stats_no_flags(xs_d, None, cfg.dt_exp, None, None, None,
+                                       device=device, spontaneous_only=True).numpy()
                 # SEED AGAIN, right here. gen_chi_block runs K MORE simulations that are otherwise
                 # completely unseeded, so the zp/zm arms of the central difference would see different
                 # chi noise and the derivative would be swamped -- a plausible-looking, meaningless V.
@@ -199,7 +226,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 chi_v, _u_v, _logcyc_v, _valid_v = pipeline.gen_chi_raw(
                     model=cfg.model, params_nd=nd, rescale=rv, x_spont_dim=xs_d.to(dtype),
                     t_fine=t_fine, inits=base_inits.expand(mm, -1).contiguous(),
-                    rescale_idx=cfg.rescale_idx, n_segs=n_segs, steady_idx=cfg.steady_idx,
+                    rescale_idx=sim_ridx, n_segs=n_segs, steady_idx=cfg.steady_idx,
                     subsample=subs, N_points=N_obs, dt_exp=cfg.dt_exp,
                     multipliers=chi_mults, f0_nd=cfg.chi_f0,
                     # The duration ceiling STAYS ON here, unlike resolution_filter. The filter is a
@@ -218,10 +245,10 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 return np.concatenate([spont, fisher_block.double().cpu().numpy()], axis=1)
             if has_drive:
                 force = pipeline.build_nondim_sin_force_tensor(forcing_gt.expand(mm, -1), t_fine, rv,
-                                                               cfg.forcing_idx, cfg.rescale_idx)
+                                                               cfg.forcing_idx, sim_ridx)
                 torch.manual_seed(1); xf = s(force)
                 torch.manual_seed(2); xs = s(torch.zeros_like(force))
-                return pipeline.gen_stats(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
+                return stats_no_flags(xsc * xs.double() + xof, xsc * xf.double() + xof, cfg.dt_exp,
                                           amp_v.expand(mm).double(), freq_v.expand(mm).double(),
                                           phase_v.expand(mm).double(), device=device).numpy()
             # Spontaneous: ONE unforced run; Group G is zero-padded, so those 11 columns contribute
@@ -234,7 +261,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
             # model's DRIFT, so a driveless Hopf still needs 2 channels.
             zero = _forcing.zero_force(mm, n_force_ch, t_fine.shape[0], dtype, device)
             torch.manual_seed(2); xs = s(zero)
-            return pipeline.gen_stats(xsc * xs.double() + xof, None, cfg.dt_exp, None, None, None,
+            return stats_no_flags(xsc * xs.double() + xof, None, cfg.dt_exp, None, None, None,
                                       device=device, spontaneous_only=True).numpy()
 
     def fisher_at(theta_row):
@@ -279,4 +306,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
     print(f"[fisher] averaged simulation Fisher over {n_used}/{len(points)} operating points "
           f"(GT + {n_used - 1} prior draw(s))", flush=True)
     F = torch.tensor(F_accum / n_used, dtype=torch.float64, device=device)
+    if with_values:
+        V, evals = fisher_eigenbasis(F, with_values=True)
+        return V.to(dtype), evals.to(torch.float64).cpu()
     return fisher_eigenbasis(F).to(dtype)

@@ -5,6 +5,31 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 
+def save_figure(fig: "plt.Figure", target, **kwargs) -> None:
+    """``fig.savefig`` with the SAVED BACKGROUND PINNED TO THE FIGURE'S OWN COLOURS.
+
+    ⚠ USE THIS, NOT ``fig.savefig``, ANYWHERE A THEME MIGHT CHANGE MID-RUN.
+
+    matplotlib reads ``savefig.facecolor`` at SAVE time, while every artist's colour is baked at BUILD
+    time. Anything that changes the theme between the two splits one figure across two palettes. The
+    GUI does exactly that: ``core.gui.mpl_theme.apply_mpl_theme`` mutates GLOBAL rcParams whenever the
+    appearance changes, and a multi-day run straddles one easily -- a manual flip, or Windows
+    switching light/dark on its own schedule.
+
+    The result is not subtle and it is not cosmetic. Measured on the 2026-08-25 retrain: dark axes
+    (#2B2B2B, the DARK token) on a light page (#F3F3F3, the LIGHT token) with ``text.color`` still
+    light -- so every tick label, axis label, title and table cell rendered light-on-light at a
+    contrast ratio of **1.06:1**. 14 of the 15 figures were unreadable, and the parameter tables
+    carrying the actual best-fit numbers were blank.
+
+    ``fig.get_facecolor()`` is what the figure was CONSTRUCTED with, so passing it explicitly pins the
+    save to the theme the artists were drawn in, whatever the global has become since.
+    """
+    kwargs.setdefault("facecolor", fig.get_facecolor())
+    kwargs.setdefault("edgecolor", fig.get_edgecolor())
+    fig.savefig(target, **kwargs)
+
+
 # === GENERAL VISUALIZERS ===
 def plot(x: np.ndarray, y: np.ndarray, scatter: bool = False, title: str = None, labels: tuple = None, lims: list = None, hlines: tuple = None, tight: bool = True, sink=None) -> "plt.Figure":
     """Line/scatter plot. Builds an explicit Figure and returns it. ``sink``, if given, is a callable
@@ -71,7 +96,7 @@ def visualize_dist(dist: torch.distributions.Distribution, labels: list, n_sampl
 
     # save distribution visualization, then display it (sink for GUI, else blocking show)
     if save_path is not None:
-        figure.savefig(save_path)
+        save_figure(figure, save_path)
     if sink is not None:
         sink(title, figure)
     else:
@@ -161,6 +186,12 @@ def plot_ppc(ppc_results: dict, ground_truth: list = None, param_names: list = N
         f"Outside interval: {ppc_results['num_outside']}/{num_total}\n"
         f"Invalid stats: {ppc_results['num_invalid']}/{num_total}"
     )
+    # The zero-variance count is only actionable once it is split by origin: most of it is usually
+    # empty chi probe slots, which is a statement about the experiment rather than a defect.
+    from core.SBI.analysis import describe_invalid
+    note = describe_invalid(ppc_results.get("invalid_breakdown"))
+    if note:
+        textstr += "\n" + "\n".join(_wrap_note(note))
     props = dict(boxstyle='round', facecolor=plt.rcParams["axes.facecolor"],
                  edgecolor=plt.rcParams["axes.edgecolor"], alpha=0.9)
     ax.text(0.99, 0.98, textstr, transform=ax.transAxes, fontsize=9,
@@ -171,6 +202,20 @@ def plot_ppc(ppc_results: dict, ground_truth: list = None, param_names: list = N
         _param_table(fig.add_subplot(gs[0, 1]), param_names, ground_truth,
                      value_header="ground truth")
     return fig
+
+
+def _wrap_note(text: str, width: int = 34) -> list:
+    """Greedy word wrap for the PPC summary box (monospace, fixed-width)."""
+    lines, cur = [], ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > width:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}".strip()
+    if cur:
+        lines.append(cur)
+    return lines
 
 
 def plot_posterior_vs_truth(t: np.ndarray, x_true: np.ndarray,
@@ -246,10 +291,16 @@ def _param_table(ax, labels, values, ground_truth=None, value_header: str = "bes
     table.set_fontsize(8)
     table.scale(1.0, 1.18)
     fg = plt.rcParams["text.color"]
+    # An EXPLICIT cell background, not "none". A transparent cell shows the FIGURE background, while
+    # the text is `text.color` -- and those two are only guaranteed to contrast while the theme is
+    # self-consistent. `axes.facecolor` is the surface `text.color` is chosen against, so pinning the
+    # cell to it makes the table readable by construction rather than by coincidence. (Transparent
+    # cells are how the 13-row best-fit table came out completely blank at 1.06:1 contrast; see
+    # save_figure.)
     for cell in table.get_celld().values():
         cell.set_edgecolor(plt.rcParams["axes.edgecolor"])
         cell.get_text().set_color(fg)
-        cell.set_facecolor("none")
+        cell.set_facecolor(plt.rcParams["axes.facecolor"])
     return table
 
 
@@ -295,16 +346,29 @@ def plot_overlay_band(t: np.ndarray, x_true: np.ndarray, lo: np.ndarray, med: np
 
 
 def plot_psd_overlay(freqs: np.ndarray, gt_power: np.ndarray, lo: np.ndarray, med: np.ndarray,
-                     hi: np.ndarray, *, pct: tuple = (5, 95), freq_unit: str = "Hz") -> plt.Figure:
+                     hi: np.ndarray, *, pct: tuple = (5, 95), freq_unit: str = "Hz",
+                     n_dropped: int = 0) -> plt.Figure:
     """Observation PSD vs the posterior-predictive PSD band. Phase-invariant by construction, so this is
-    the honest "do frequency, amplitude and harmonic content agree?" check -- nothing is aligned away."""
+    the honest "do frequency, amplitude and harmonic content agree?" check -- nothing is aligned away.
+
+    ``n_dropped`` is the number of posterior draws ``overlay.psd_band`` had to discard as non-finite.
+    It is rendered ON THE FIGURE rather than logged, because this plot once came back as a bare
+    observation line -- no band, no median, no explanation -- and an absent band is indistinguishable
+    from a plotting bug unless the figure says which one it is.
+    """
     fig, ax = plt.subplots(figsize=(11, 5), constrained_layout=True)
     m = freqs > 0                                        # log axes: drop DC
+    drop_note = f"  [{n_dropped} non-finite draw(s) dropped]" if n_dropped else ""
     ax.fill_between(freqs[m], lo[m], hi[m], alpha=0.25, color="steelblue",
-                    label=f"posterior predictive, {pct[0]}–{pct[1]}%")
+                    label=f"posterior predictive, {pct[0]}–{pct[1]}%{drop_note}")
     ax.plot(freqs[m], med[m], color="steelblue", linewidth=1.0, label="posterior median")
     ax.plot(freqs[m], gt_power[m], color=plt.rcParams["text.color"], linewidth=1.1,
             label="Observation")
+    if not np.isfinite(med[m]).any():
+        # Nothing survived. Say so in the middle of the axes: a silently empty band is exactly the
+        # failure this argument exists to make impossible.
+        ax.text(0.5, 0.5, f"no finite posterior-predictive PSD\n({n_dropped} draw(s) dropped)",
+                transform=ax.transAxes, ha="center", va="center", fontsize=11, color="crimson")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel(f"frequency ({freq_unit})")
@@ -316,14 +380,21 @@ def plot_psd_overlay(freqs: np.ndarray, gt_power: np.ndarray, lo: np.ndarray, me
 
 def plot_cycle_average(phase: np.ndarray, gt_mean: np.ndarray, sim_mean: np.ndarray,
                        sim_lo: np.ndarray, sim_hi: np.ndarray, *,
-                       ylabel: str = r"$x$ (nm)") -> plt.Figure:
+                       ylabel: str = r"$x$ (nm)", n_dropped: int = 0) -> plt.Figure:
     """Observation vs posterior predictive, folded onto ONE oscillation cycle.
 
     Shows whether the waveform SHAPE agrees (the asymmetric hair-bundle spike) without depending on
-    absolute phase at all -- the complement to the aligned time-domain overlays."""
+    absolute phase at all -- the complement to the aligned time-domain overlays.
+
+    ⚠ THE BAND IS NOT A PARAMETER-UNCERTAINTY BAND, and it is routinely misread as one. It is the
+    25–75% range of sample values POOLED over every draw and every time point falling in a phase bin,
+    so it is dominated by cycle-to-cycle amplitude jitter and noise. A tight band here is not evidence
+    that the parameters are well constrained -- read this figure only as "is the waveform shape right".
+    """
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    drop_note = f"  [{n_dropped} non-finite sample(s) dropped]" if n_dropped else ""
     ax.fill_between(phase, sim_lo, sim_hi, alpha=0.25, color="steelblue",
-                    label="posterior predictive, 25–75%")
+                    label=f"posterior predictive, 25–75% (pooled){drop_note}")
     ax.plot(phase, sim_mean, color="steelblue", linewidth=1.2, label="posterior mean cycle")
     ax.plot(phase, gt_mean, color=plt.rcParams["text.color"], linewidth=1.4, label="Observation")
     ax.set_xlabel("cycle phase (rad)")
@@ -381,5 +452,5 @@ def plot_training_loss(diagnostics: dict, save_path: str | PathLike[str] = None,
     ax.legend()
     plt.tight_layout()
     if save_path is not None:
-        plt.savefig(save_path)
+        save_figure(fig, save_path)
     return fig

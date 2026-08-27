@@ -59,7 +59,7 @@ rotated_prior = RotatedLatentPrior(base, V)
 T_train = build_rotated_bijection(T, V)
 
 forcing_dim = orchestrator.expected_forcing_dim(cfg)   # shared width rule (chi-aware)
-input_dim = len(statistics.FEATURE_LABELS) + 1
+input_dim = statistics.SUMMARY_WIDTH + 1
 net = orchestrator.build_embedding_net(cfg, input_dim, forcing_dim)   # shared construction site
 training_params = {"model": cfg.model, "prior": rotated_prior, "t": cfg.t, "run_size": 256, "num_runs": 2,
                    "steady_idx": cfg.steady_idx, "dt_nd_min": cfg.dt_nd_min, "dt_exp": cfg.dt_exp,
