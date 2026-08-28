@@ -427,7 +427,7 @@ class ConfigPanel(_StagePanel):
         hw = QGroupBox("Hardware")
         hv = QVBoxLayout(hw)
         hform = make_form()
-        self.vram_ceiling = FloatField(str(pipeline._vram_ceiling_gib()))
+        self.vram_ceiling = FloatField(str(pipeline.vram_ceiling_gib()))
         add_help_row(hform, "VRAM ceiling per batch (GiB, 0 = off)", self.vram_ceiling,
                      HELP["vram_ceiling"])
         hv.addLayout(hform)
@@ -446,7 +446,7 @@ class ConfigPanel(_StagePanel):
         ASSIGNING THE CONSTANT IS ENOUGH HERE, and that is not true of the sweep and flow knobs
         beside it. Those had to become ARGUMENTS because `orchestrator` does `from .config import ...`
         and binds them at import, so assigning to the constant is a silent no-op (trap X12). This one
-        is read LIVE -- `pipeline._vram_ceiling_gib()` does a `getattr` on the module every time the
+        is read LIVE -- `pipeline.vram_ceiling_gib()` does a `getattr` on the module every time the
         planner asks -- so a plain assignment reaches every stage that simulates, with no plumbing.
 
         NOT PERSISTED, ON PURPOSE, and it is the only field on this tab that is not. Stale QSettings
@@ -460,7 +460,7 @@ class ConfigPanel(_StagePanel):
         over, because a field that silently does nothing is worse than no field.
         """
         config.SIM_VRAM_CEILING_GIB = max(0.0, self.vram_ceiling.value())
-        effective = pipeline._vram_ceiling_gib()
+        effective = pipeline.vram_ceiling_gib()
         env = os.environ.get(pipeline.VRAM_CEILING_ENV)
         free = _nvidia_smi_free_gib()
         free_txt = (f"nvidia-smi reports {free:.2f} GiB free"

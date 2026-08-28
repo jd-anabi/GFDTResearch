@@ -167,7 +167,7 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
 # multi-day run would silently restart from zero -- the exact failure that orphaned 884 batches on
 # 2026-08-27.
 # Override for one run without editing this file: PRISM_VRAM_CEILING_GIB=6.5 (pipeline reads it
-# live via pipeline._vram_ceiling_gib, the same shape as orchestrator's PRISM_CHI_OVERRIDE).
+# live via pipeline.vram_ceiling_gib, the same shape as orchestrator's PRISM_CHI_OVERRIDE).
 SIM_VRAM_CEILING_GIB = 0.0
 
 

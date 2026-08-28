@@ -72,7 +72,7 @@ def build_nondim_sin_force_tensor(
         forcing_params, t_nd, rescale_params, forcing_idx, rescale_idx, kind="sin")
 
 
-def _sim_class(model: str):
+def sim_class(model: str):
     """The Simulator class for a BUILT-IN model name, with a clear error for anything else (a user
     model leaking past the Simulate-only gate would otherwise surface as a bare KeyError)."""
     cls = VALID_SIMS.get(model.lower())
@@ -592,7 +592,7 @@ def peak_sim_elements(batch_size: int, n_fine: int, steady_idx: int, n_vars: int
 VRAM_CEILING_ENV = "PRISM_VRAM_CEILING_GIB"
 
 
-def _vram_ceiling_gib() -> float:
+def vram_ceiling_gib() -> float:
     """The hard per-batch VRAM ceiling in GiB: the env override if set, else the config constant.
 
     0 means off. See sim_memory_budget_elements for what it does and does not buy.
@@ -644,7 +644,7 @@ def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
     ignored with a note rather than crashing a multi-day run on a typo.
     """
     budget = min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION), _budget_cap())
-    ceiling_gib = _vram_ceiling_gib()
+    ceiling_gib = vram_ceiling_gib()
     if ceiling_gib > 0:
         bytes_per_elem = 4 if dtype == torch.float32 else 8
         budget = min(budget, int(ceiling_gib * 2 ** 30) // bytes_per_elem)

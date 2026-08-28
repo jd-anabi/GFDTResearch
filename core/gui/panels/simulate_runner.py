@@ -172,7 +172,7 @@ def _make_simulator(plan: StreamPlan, dtype, device):
         return registry.make_user_simulator(plan.user_spec, plan.params_tensor, placeholder_force,
                                             plan.inits_tensor, placeholder_t, segs=1, batch_size=1,
                                             device=device)
-    sim_cls = pipeline._sim_class(plan.model)
+    sim_cls = pipeline.sim_class(plan.model)
     return sim_cls(plan.params_tensor, placeholder_force, plan.inits_tensor, placeholder_t,
                    segs=1, batch_size=1, device=device)
 

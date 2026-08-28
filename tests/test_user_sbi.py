@@ -3246,13 +3246,13 @@ def test_the_vram_ceiling_env_override_wins_and_tolerates_junk():
     try:
         _os.environ.pop(pipeline_mod.VRAM_CEILING_ENV, None)
         config.SIM_VRAM_CEILING_GIB = 3.0
-        assert pipeline_mod._vram_ceiling_gib() == 3.0, "the config constant is the fallback"
+        assert pipeline_mod.vram_ceiling_gib() == 3.0, "the config constant is the fallback"
         _os.environ[pipeline_mod.VRAM_CEILING_ENV] = "6.5"
-        assert pipeline_mod._vram_ceiling_gib() == 6.5, "the env override must win"
+        assert pipeline_mod.vram_ceiling_gib() == 6.5, "the env override must win"
         _os.environ[pipeline_mod.VRAM_CEILING_ENV] = "not-a-number"
-        assert pipeline_mod._vram_ceiling_gib() == 3.0, "junk must fall back, not raise"
+        assert pipeline_mod.vram_ceiling_gib() == 3.0, "junk must fall back, not raise"
         _os.environ[pipeline_mod.VRAM_CEILING_ENV] = ""
-        assert pipeline_mod._vram_ceiling_gib() == 3.0, "empty means unset"
+        assert pipeline_mod.vram_ceiling_gib() == 3.0, "empty means unset"
     finally:
         _os.environ.pop(pipeline_mod.VRAM_CEILING_ENV, None)
         if saved_env is not None:

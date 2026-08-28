@@ -2760,7 +2760,7 @@ def test_the_vram_ceiling_is_on_config_live_and_NOT_persisted():
     A PLAIN ASSIGNMENT IS ENOUGH, unlike every other knob the GUI exposes. The sweep and flow fields
     had to become ARGUMENTS threaded into build_prior/build_posterior, because orchestrator does
     `from .config import ...` and binds them at import, so writing to the constant is a silent no-op
-    (trap X12). pipeline._vram_ceiling_gib() does a getattr on the module every time the planner
+    (trap X12). pipeline.vram_ceiling_gib() does a getattr on the module every time the planner
     asks, so this one genuinely takes effect -- and this test would catch it if that ever changed.
     """
     from core.gui.panels import inference_tabs as it
@@ -2777,7 +2777,7 @@ def test_the_vram_ceiling_is_on_config_live_and_NOT_persisted():
         # Live: typing must reach the planner with no plumbing in between.
         panel.vram_ceiling.setText("6.5")
         assert _cfg.SIM_VRAM_CEILING_GIB == 6.5, "the field must assign the config constant"
-        assert _pipe._vram_ceiling_gib() == 6.5, "and the planner must read it live"
+        assert _pipe.vram_ceiling_gib() == 6.5, "and the planner must read it live"
         # 2 GiB, not 6.5: the budget is a min() and the CPU branch of memory_budget_elements caps at
         # 4 GiB, so a ceiling above that would not bind and the assertion would prove nothing.
         panel.vram_ceiling.setText("2")
@@ -2801,7 +2801,7 @@ def test_the_vram_ceiling_is_on_config_live_and_NOT_persisted():
         # And the env override must ANNOUNCE that it wins, rather than leaving a dead field.
         os.environ[_pipe.VRAM_CEILING_ENV] = "2.0"
         panel.vram_ceiling.setText("9")
-        assert _pipe._vram_ceiling_gib() == 2.0, "the env override wins"
+        assert _pipe.vram_ceiling_gib() == 2.0, "the env override wins"
         assert _pipe.VRAM_CEILING_ENV in panel.vram_note.text(), (
             "a field that silently does nothing is worse than no field -- the note must say the "
             "environment is overriding it")
