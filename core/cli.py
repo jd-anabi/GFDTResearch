@@ -242,7 +242,7 @@ def load_and_validate_gt(cfg: SimConfig, cell_path: str) -> list:
 
 # Display-only SI unit hints, indexed by forcing param name (CLI prompts + the GUI's drive fields).
 # DERIVED from config.FORCING_SI_UNITS, the authoritative conversion table, so the two cannot drift.
-_INFERENCE_PROMPT_UNITS = config.FORCING_DISPLAY_UNITS
+INFERENCE_PROMPT_UNITS = config.FORCING_DISPLAY_UNITS
 
 def get_inference_inputs(force_param_names: list[str]) -> tuple[str, str, float, dict]:
     """
@@ -263,7 +263,7 @@ def get_inference_inputs(force_param_names: list[str]) -> tuple[str, str, float,
     print("\nForcing parameters (in SI units):")
     forcing_params_si: dict = {}
     for name in force_param_names:
-        unit = _INFERENCE_PROMPT_UNITS.get(name, "")
+        unit = INFERENCE_PROMPT_UNITS.get(name, "")
         unit_str = f" ({unit})" if unit else ""
         forcing_params_si[name] = float(input(f"  {name}{unit_str}: "))
     helpers.clear_screen()
@@ -390,7 +390,7 @@ def resolve_bounds_for_cell(cell_file: str, model: str | None = None) -> Path | 
     return master if master.exists() else None
 
 
-def _parse_cell(cell_file: str, model: str | None = None):
+def parse_cell(cell_file: str, model: str | None = None):
     """
     Parse a cell file into the 7-tuple used by the FDT/REDUCTION/CROSSVAL config builders and the
     diagnostic scripts, then run pint unit conversion.
@@ -424,7 +424,7 @@ def _parse_cell(cell_file: str, model: str | None = None):
         rescale_params = _merge_vals_bounds(v_rescale, b_rescale, "rescale parameters", cell_file)
         force_params_dict = _merge_vals_bounds(v_forcing, b_forcing, "forcing parameters", cell_file)
         units_dict = file_manager.parse_units_file(str(units_path))
-        si_factors, s_to_cell = _units_to_factors(units_dict)
+        si_factors, s_to_cell = units_to_factors(units_dict)
         return inits_dict, params_dict, rescale_params, force_params_dict, units_dict, si_factors, s_to_cell
 
     # ── Legacy fallback: bounds + units read inline from the cell (models without decoupled files) ──
@@ -452,9 +452,9 @@ def _parse_cell(cell_file: str, model: str | None = None):
 
 
 # ── Units → conversion factors (standalone helper for the decoupled bounds/units path) ──────
-def _units_to_factors(units: tuple) -> tuple[list[float], float]:
+def units_to_factors(units: tuple) -> tuple[list[float], float]:
     """
-    From a set of unit strings compute (si_factors, s_to_cell). Standalone so `_parse_cell` stays
+    From a set of unit strings compute (si_factors, s_to_cell). Standalone so `parse_cell` stays
     byte-for-byte untouched (it is shared by the FDT/REDUCTION/CROSSVAL builders + the scripts).
     """
     ureg = config.unit_registry()      # shared singleton: building one parses pint's full unit file
@@ -512,7 +512,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         units_dict = file_manager.parse_units_file(str(units_override))
     else:
         units_dict = tuple(str(u) for u in units_override)
-    _, s_to_cell = _units_to_factors(units_dict)
+    _, s_to_cell = units_to_factors(units_dict)
 
     # convert experimental constants from seconds to cell-file time units (training T-range)
     return SimConfig(
@@ -561,7 +561,7 @@ def make_fdt_config(model: str, state_dep_drift: bool, cell_file: str, *,
     """Build an FDTConfig (no prompts) from a model + cell file + FDT knobs. Shared by build_fdt_config
     (CLI) and the GUI's FDT form."""
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, _, _) = _parse_cell(cell_file, model=model)
+     units_dict, _, _) = parse_cell(cell_file, model=model)
     return FDTConfig(
         model=model,
         state_dep_drift=state_dep_drift,
@@ -622,7 +622,7 @@ def make_reduction_config(cell_file: str, *, F0: float = 0.05) -> FDTConfig:
     """Build a reduction-map FDTConfig (no prompts) from a cell file. Model is fixed to NADROWSKI
     (the reduction is Nadrowski-specific). Shared by build_reduction_config (CLI) and the GUI form."""
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, _, _) = _parse_cell(cell_file, model="NADROWSKI")
+     units_dict, _, _) = parse_cell(cell_file, model="NADROWSKI")
     return FDTConfig(
         model="NADROWSKI",
         state_dep_drift=True,
@@ -643,7 +643,8 @@ def make_reduction_config(cell_file: str, *, F0: float = 0.05) -> FDTConfig:
 # cost is Campaign 2's low-frequency drive points (cost ~ 1/omega), so the
 # exploratory preset raises freq_bounds[0] and trims n_freqs / T_obs_periods /
 # psd_T_obs_nd while keeping ensemble_M=256 so the trend stays clean above noise.
-_SWEEP_PRESETS = {
+# Public: the GUI's CrossVal panel builds its preset combo and knob defaults from this table.
+SWEEP_PRESETS = {
     "exploratory": dict(freq_bounds=(0.2, 30.0), n_freqs=30, T_obs_periods=20,
                         psd_T_obs_nd=4000.0, ensemble_M=256, points=8),
     "production":  dict(freq_bounds=(0.1, 30.0), n_freqs=60, T_obs_periods=30,
@@ -654,7 +655,7 @@ def _select_sweep_preset() -> dict:
     """
     Prompt for the sweep-study resolution preset. Defaults to exploratory.
 
-    :return: the chosen preset's knob dict (a copy of the _SWEEP_PRESETS entry).
+    :return: the chosen preset's knob dict (a copy of the SWEEP_PRESETS entry).
     """
     print("\nSweep preset:")
     print("  (1) Exploratory — fast/coarse; confirm the restoration trend (~3-4x faster)")
@@ -662,7 +663,7 @@ def _select_sweep_preset() -> dict:
     choice = input("\nWhich preset? Select a number [1]: ").strip() or "1"
     name = "production" if choice == "2" else "exploratory"
     print(f"Using the {name} preset.")
-    return dict(_SWEEP_PRESETS[name])
+    return dict(SWEEP_PRESETS[name])
 
 
 # ── Top-level config builder (FDT parameter-sweep study) ─────────────────────
@@ -679,7 +680,7 @@ def build_param_sweep_config() -> tuple["FDTConfig", "np.ndarray", "np.ndarray"]
     print("FDT parameter-sweep study: model fixed to NADROWSKI.")
 
     cell_file = select_cell_file()
-    (_i, params_dict, _r, _f, _u, _si, _s) = _parse_cell(cell_file, model="NADROWSKI")
+    (_i, params_dict, _r, _f, _u, _si, _s) = parse_cell(cell_file, model="NADROWSKI")
     cell_s = params_dict["s"][0]
     cell_temp = params_dict["temp"][0]
     print(f"\nCell-file values: S = {cell_s:.4f},  T_a/T = {cell_temp:.4f}")
@@ -719,7 +720,7 @@ def make_param_sweep_config(cell_file: str, *, preset: dict, s_spec: tuple, t_sp
     (min, max, n_points). Model fixed to NADROWSKI. Shared by build_param_sweep_config (CLI) + the GUI."""
     import numpy as np  # local import — keep top-of-file lean
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, _, _) = _parse_cell(cell_file, model="NADROWSKI")
+     units_dict, _, _) = parse_cell(cell_file, model="NADROWSKI")
     s_grid = np.linspace(*s_spec)
     temp_grid = np.linspace(*t_spec)
     cfg = FDTConfig(

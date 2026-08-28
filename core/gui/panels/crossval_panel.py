@@ -72,7 +72,7 @@ class CrossValPanel(BasePanel):
         self.cell_picker.combo.currentIndexChanged.connect(self._on_cell_changed)
 
         self.preset_combo = QComboBox()
-        self.preset_combo.addItems(list(cli._SWEEP_PRESETS))          # exploratory | production
+        self.preset_combo.addItems(list(cli.SWEEP_PRESETS))          # exploratory | production
         self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
 
         self.cell_values = QLabel("—")
@@ -111,12 +111,12 @@ class CrossValPanel(BasePanel):
         if not cell:
             return
         try:
-            _i, params, _r, _f, _u, _si, _s = cli._parse_cell(cell, model=_MODEL)
+            _i, params, _r, _f, _u, _si, _s = cli.parse_cell(cell, model=_MODEL)
         except Exception as e:                       # noqa: BLE001
             # Deliberately broad. __init__ calls this, so ANY exception here escapes CrossValPanel()
             # -> MainWindow() -> build_app() and the whole GUI fails to launch -- and app.py installs
             # its excepthook only AFTER MainWindow() is built, so nothing would even show it. A cell
-            # with no sibling Bounds/<model>/<name>.txt is enough to trigger it: _parse_cell then takes
+            # with no sibling Bounds/<model>/<name>.txt is enough to trigger it: parse_cell then takes
             # the legacy branch and raises a plain ValueError, not UnitParseError. A bad cell file must
             # degrade this one label, never brick the app.
             self.cell_values.setText(f"(could not read cell: {e})")
@@ -131,7 +131,7 @@ class CrossValPanel(BasePanel):
         self.t_grid.hi.setText(f"{cell_temp:g}")
 
     def _on_preset_changed(self, name: str):
-        preset = cli._SWEEP_PRESETS[name]
+        preset = cli.SWEEP_PRESETS[name]
         self.n_freqs.setText(str(preset["n_freqs"]))
         self.ensemble_m.setText(str(preset["ensemble_M"]))
         self.s_grid.points.setText(str(preset["points"]))
@@ -142,7 +142,7 @@ class CrossValPanel(BasePanel):
         if not cell:
             self.log_pane.append_line("Select a cell file first.", "warning")
             return
-        preset = dict(cli._SWEEP_PRESETS[self.preset_combo.currentText()])
+        preset = dict(cli.SWEEP_PRESETS[self.preset_combo.currentText()])
         try:
             cfg, s_grid, temp_grid = cli.make_param_sweep_config(
                 cell, preset=preset, s_spec=self.s_grid.spec(), t_spec=self.t_grid.spec(),

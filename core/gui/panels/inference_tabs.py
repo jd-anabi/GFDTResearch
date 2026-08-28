@@ -567,7 +567,7 @@ class ConfigPanel(_StagePanel):
                                           "model's units file.", "warning")
                 return
             try:                                       # reject unresolvable tokens HERE, not mid-run
-                cli._units_to_factors(units)
+                cli.units_to_factors(units)
             except Exception as e:                     # noqa: BLE001
                 self.log_pane.append_line(f"Those units are not usable: {e}", "warning")
                 return
@@ -1653,7 +1653,7 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
             self.exp_form.removeRow(self._forcing_anchor)
             self._forcing_anchor = None
         for name in cfg.force_params_dict:
-            unit = cli._INFERENCE_PROMPT_UNITS.get(name, "")
+            unit = cli.INFERENCE_PROMPT_UNITS.get(name, "")
             fld = FloatField(0.0)
             self._forcing_fields[name] = fld
             add_help_row(self.exp_form, labels.gui_forcing_label(name, unit), fld, HELP["forcing"])

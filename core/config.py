@@ -644,8 +644,8 @@ def unit_registry():
     """The process-wide pint UnitRegistry.
 
     Constructing one parses pint's full unit-definition file (~100-300 ms). Every config builder and
-    every diagnostic script parses units at least once per cell, and cli._parse_cell /
-    cli._units_to_factors used to mint a fresh registry on each call. Quantities from different
+    every diagnostic script parses units at least once per cell, and cli.parse_cell /
+    cli.units_to_factors used to mint a fresh registry on each call. Quantities from different
     registries cannot be combined, so a single shared instance is also the safer arrangement.
     """
     import pint

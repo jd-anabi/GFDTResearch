@@ -364,7 +364,7 @@ class BasePanel(QWidget):
 
         Deliberately catches broadly at the call sites: cli's builders raise a bare ValueError (NOT
         UnitParseError) for the two most plausible user mistakes -- a cell with no sibling bounds file
-        (cli._parse_cell) and a cell missing a param the bounds file requires
+        (cli.parse_cell) and a cell missing a param the bounds file requires
         (cli.load_and_validate_gt -> SimConfig.inject_ground_truth). A
         narrow `except cli.UnitParseError` lets those escape the clicked slot and surface as a raw
         traceback in app.py's last-resort excepthook, with nothing in the panel's own log.

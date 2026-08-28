@@ -214,7 +214,7 @@ def parse_bounds_file(file_name: str) -> tuple:
              {name: (None, (lo, hi))} -- the value slot is None until a cell file fills it.
 
     NOTE on ``collected_units``: inline ``(units)`` annotations are parsed but ALL THREE callers
-    (``cli._parse_cell``, ``cli.make_sim_config``, ``inference_tabs``) discard the
+    (``cli.parse_cell``, ``cli.make_sim_config``, ``inference_tabs``) discard the
     result, and no shipped bounds file carries them -- units are declared centrally (the per-model units
     file, or the Config tab's units control) precisely so one declaration governs every file. It is
     returned for backward compatibility; do not start relying on per-line units here, or a bounds file

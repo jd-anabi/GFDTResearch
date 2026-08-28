@@ -879,8 +879,8 @@ def test_fdt_panel_guard_translates_model_error_and_gate_admits_builtins():
 
 
 def test_an_unparseable_cell_does_not_brick_the_gui():
-    """Dropping a cell into Resources/Cells/<model>/ that cli._parse_cell cannot read makes it raise a
-    bare ValueError (NOT a UnitParseError). CrossValPanel prefills from _parse_cell in __init__, so
+    """Dropping a cell into Resources/Cells/<model>/ that cli.parse_cell cannot read makes it raise a
+    bare ValueError (NOT a UnitParseError). CrossValPanel prefills from parse_cell in __init__, so
     that exception used to escape CrossValPanel() -> MainWindow() -> build_app(), and
     `python -m core.gui` died before the window ever appeared -- before app.py's excepthook was even
     installed.

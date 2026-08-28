@@ -1,7 +1,7 @@
 """Shared setup for the diagnostic scripts in this folder.
 
 WHY THIS EXISTS. Nine scripts each carried a copy of the same five-line ``SimConfig(...)`` literal,
-built by hand from ``cli._parse_cell``. That literal hard-coded ``model="NADROWSKI"`` and
+built by hand from ``cli.parse_cell``. That literal hard-coded ``model="NADROWSKI"`` and
 ``state_dep_drift=True``, and -- the part that actually bit -- it set **no chi(omega) fields at all**.
 ``SimConfig.chi_mode`` is a plain ``= False`` default rather than a ``default_factory`` reading
 ``config.CHI_MODE``, and only ``cli.make_sim_config`` bridges the module constants onto a config. So
@@ -97,7 +97,7 @@ def _env_opt(name: str, cast):
 def model_for_cell(cell: str, override: str | None = None) -> str:
     """The model a cell belongs to, from its PARENT FOLDER (Resources/Cells/<model>/<cell>.txt).
 
-    Same rule ``cli._parse_cell`` uses -- the layout is the single source of truth, so a script never
+    Same rule ``cli.parse_cell`` uses -- the layout is the single source of truth, so a script never
     has to hard-code a model name.
     """
     if override:
