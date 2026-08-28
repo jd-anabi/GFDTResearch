@@ -9,6 +9,50 @@ from pathlib import Path
 
 import torch
 
+# === CACHING-ALLOCATOR POLICY ===
+# MEASURED 2026-08-28, on the real chi training loop at run_size=2048: this recovers ~6 GiB of usable
+# VRAM on a 16 GiB card, and it is the difference between a run that survives and one that wedges.
+#
+# THE PROBLEM. `n_fine` swings from a median ~40k to a p99 ~283k, so consecutive training batches ask
+# the allocator for wildly different large blocks. One big batch carves segments that later small
+# batches cannot reuse, and `empty_cache()` can only return a segment that is ENTIRELY free -- a
+# single live block pins the whole thing. Measured over 21 batches with PRISM_MEM_LOG_EVERY=1:
+#
+#     batch   peak allocated   peak reserved   free VRAM
+#     b8           8.50 GiB        8.66 GiB     8.14 GiB   <- the big batch carves the segments
+#     b14          0.67 GiB        6.39 GiB     8.14 GiB
+#     b21          0.37 GiB        6.39 GiB     8.14 GiB   <- 6.39 GiB held to serve 0.37 GiB
+#
+# The reserved floor never came back down, and free VRAM never recovered past 8.14 GiB. That is what
+# left a stuck run holding 15310 MB of a 16303 MB card while every other process on the machine held
+# ~270 MB combined -- it was waiting for memory it was sitting on.
+#
+# THE FIX, and the same 21 batches with it: free VRAM holds at 14.10 GiB for the whole run, and
+# reserved tracks the load instead of a floor (b21: 0.73 GiB against 6.39). `roundup_power2_divisions`
+# collapses that continuum of block sizes onto a handful, so segments are reusable across batches;
+# `garbage_collection_threshold` makes the allocator reclaim proactively rather than only when an
+# allocation is already failing.
+#
+# ⚠ THE VARIABLE NAME IS A TRAP, and the deprecation warning is wrong on this build (torch
+# 2.9.0+cu130). `PYTORCH_ALLOC_CONF` -- the name torch TELLS you to use -- is SILENTLY IGNORED here:
+# an unrecognised option inside it raises nothing at all. `PYTORCH_CUDA_ALLOC_CONF` is the one that
+# is actually parsed (an unrecognised option raises `Unrecognized CachingAllocator option`), while
+# printing "PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead". Verify with an
+# invalid value before believing any future experiment on either name; an hour was lost to a
+# "negative result" that was really a no-op.
+#
+# NOT `expandable_segments`, which would be the ideal fix and is a measured no-op on this Windows
+# build (see the 2026-08-10 appendix entry): it needs CUDA's VMM API, which cu130-on-Windows does not
+# expose. These two options are pure allocator POLICY and are not platform-gated.
+#
+# SET HERE rather than in run.bat so the CLI, the scripts and the tests get it too. Safe this late:
+# the config is parsed at the FIRST CUDA ALLOCATION, not at `import torch` -- verified by setting an
+# invalid value after importing torch and watching it still raise. `setdefault`, so anything the
+# operator exports wins.
+PYTORCH_ALLOC_CONF_ENV = "PYTORCH_CUDA_ALLOC_CONF"     # NOT PYTORCH_ALLOC_CONF -- see above
+PYTORCH_ALLOC_CONF_DEFAULT = "roundup_power2_divisions:8,garbage_collection_threshold:0.6"
+os.environ.setdefault(PYTORCH_ALLOC_CONF_ENV, PYTORCH_ALLOC_CONF_DEFAULT)
+
 # === DEVICE DETECTION ===
 @dataclass
 class DeviceConfig:

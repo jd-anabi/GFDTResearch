@@ -217,7 +217,9 @@ def _batch_tag() -> str:
     return _BATCH_TAG or "simulation"
 
 
-_MEM_LOG_EVERY = 250          # 21 lines over a 5000-batch run
+# 21 lines over a 5000-batch run. PRISM_MEM_LOG_EVERY overrides it for a diagnostic run: when a run
+# is dying at batch 93, a line every 250 batches has told you nothing at all.
+_MEM_LOG_EVERY = int(os.environ.get("PRISM_MEM_LOG_EVERY") or 250)
 
 
 def _log_memory(device: torch.device, tag: str) -> None:
@@ -440,6 +442,32 @@ def _release_device_memory(device: torch.device, *, plans: bool = True,
         _try(_drop, "CUDA-graph cache drop")
 
 
+def _we_are_the_holder(device: torch.device) -> bool:
+    """True when THIS process's own reserved pool is more than everyone else's usage combined.
+
+    ⚠ WAITING ONLY HELPS IF SOMEBODY ELSE HOLDS THE MEMORY. The batch-level retry was written for the
+    documented failure -- a card momentarily full of the desktop's evictable surfaces -- where pausing
+    is exactly right. It is exactly WRONG when we are the holder: on 2026-08-28 a stuck run sat at
+    batch 93 repeating "waiting for device memory", holding 15310 MB of a 16303 MB card while every
+    other process on the machine held ~270 MB combined. It was waiting for itself, and no delay could
+    ever have satisfied it.
+
+    Measured against the DRIVER's totals rather than our own bookkeeping alone, because the question
+    is whose memory it is. `reserved` counts what PyTorch has taken from the driver, cached blocks
+    included -- which is the right quantity: if empty_cache could have returned it, it already did,
+    since the release runs before this is consulted.
+    """
+    if device.type != "cuda":
+        return False
+    try:
+        free, total = torch.cuda.mem_get_info(device)
+        reserved = torch.cuda.memory_reserved(device)
+    except Exception:                        # noqa: BLE001 -- unknowable => fall back to waiting
+        return False
+    others = max(0, total - free - reserved)
+    return reserved > others
+
+
 def _cancellable_wait(seconds: float, why: str) -> None:
     """Sleep ``seconds``, in slices, staying responsive to a GUI cancel and saying why we are idle.
 
@@ -475,8 +503,18 @@ def _short_err(err: BaseException, limit: int = 200) -> str:
     IndexError would REPLACE the out-of-memory with a confusing traceback from inside the handler,
     and where _release_device_memory's own error path would violate its "never raises" contract.
     """
-    text = str(err)
-    first = text.splitlines()[0] if text.splitlines() else ""
+    # ⚠ THE REGRESS STOPS HERE. This function is called from inside the `except` clause of every
+    # guard in this module -- _release_device_memory._try, _try_rng_snapshot, _try_rng_restore,
+    # _log_memory -- so if IT can raise, all of them can, and the whole best-effort layer is a
+    # fiction. `str(err)` is not free: an exception whose __str__ raises (or whose args hold an
+    # object with a broken __repr__) takes the guard down with it. So this one has no error path of
+    # its own: it is total, and the type name is always available without touching the payload.
+    try:
+        text = str(err)
+    except Exception:                        # noqa: BLE001 -- see above
+        return type(err).__name__
+    lines = text.splitlines()
+    first = lines[0] if lines else ""
     return f"{type(err).__name__}: {first[:limit]}" if first else type(err).__name__
 
 
@@ -513,7 +551,7 @@ def _try_rng_restore(tc, rng, device, chi_gen) -> bool:
     died here at batch 3990/10000: the recovery block had just released every cached block and slept
     15 s on a contended card, so the few KB this needs was the one request the driver could not
     serve. Dying in the recovery step of a mechanism whose entire purpose is not to die is the
-    second instance of trap X13.
+    second instance of trap X14.
     """
     if not rng:
         return False
@@ -566,7 +604,15 @@ def _vram_ceiling_gib() -> float:
         except ValueError:
             print(f"{VRAM_CEILING_ENV}={raw!r} is not a number; ignoring it and using "
                   f"config.SIM_VRAM_CEILING_GIB instead", file=sys.stderr, flush=True)
-    return float(getattr(config, "SIM_VRAM_CEILING_GIB", 0.0) or 0.0)
+    # Guarded for the same reason as the env branch: this runs inside the PLANNER, on every batch,
+    # and a config.py edited to a non-numeric value would otherwise raise there rather than at the
+    # point of the mistake.
+    try:
+        return max(0.0, float(getattr(config, "SIM_VRAM_CEILING_GIB", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        print(f"config.SIM_VRAM_CEILING_GIB is not a number; treating the ceiling as off",
+              file=sys.stderr, flush=True)
+        return 0.0
 
 
 def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
@@ -2101,7 +2147,23 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 # worth handing that cache back, and only then worth sleeping.
                 _try_rng_restore(_tc, _rows_rng, device, chi_gen)
                 _release_device_memory(device)
-                _cancellable_wait(_delay, "waiting for device memory before re-running this batch")
+                # ONE [mem] LINE PER OOM, unconditionally. The cadence line is every
+                # _MEM_LOG_EVERY batches, which is far too coarse to diagnose a run that dies at
+                # batch 93 -- and peak RESERVED against peak ALLOCATED is the number that separates
+                # "this geometry is too big" from "the allocator is fragmented and cannot hand the
+                # memory back". It is printed AFTER the release, so it describes what we could not
+                # give up.
+                _log_memory(device, f"after OOM on {_batch_tag()}")
+                if _we_are_the_holder(device):
+                    # Waiting cannot help: we are what is full. Go straight back to the retry, where
+                    # the two halving ladders will shrink the work instead.
+                    print(f"{_batch_tag()}: THIS process holds most of the card, so waiting cannot "
+                          f"free anything -- retrying immediately at a smaller size instead of "
+                          f"pausing {_delay:.0f}s. If this repeats, the allocator is fragmented: "
+                          f"restart the run (it resumes from its checkpoint) and consider setting "
+                          f"the VRAM ceiling on the Config tab.", file=sys.stderr, flush=True)
+                else:
+                    _cancellable_wait(_delay, "waiting for device memory before re-running this batch")
 
             # 6. Collect LATENT targets (not physical). OUTSIDE the retry on purpose: the targets are
             # computed before any simulation and are already at full width, so a retry neither

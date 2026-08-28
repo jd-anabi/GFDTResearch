@@ -1248,6 +1248,50 @@ def build_truncation_region(posterior, obs_record: dict, x_obs: torch.Tensor, *,
         level=truncate.DEFAULT_HPD if level is None else float(level))
 
 
+def _refuse_to_orphan_a_checkpoint(name: str, nd_prior) -> None:
+    """Refuse to overwrite a prior file that an existing checkpoint is the only copy of.
+
+    ⚠ THIS IS HOW 3989 BATCHES WERE LOST. A checkpoint's directory is named after a digest of the
+    prior's fitted GMM, so the prior FILE is the only thing that can reproduce it. On 2026-08-28
+    ``prior_08282026.pt`` was overwritten, under the same name, with a different distribution -- and
+    the 3989-batch run that had been training against the old contents for six and a half hours
+    became unreachable. No error, no warning, one click. The same mechanism cost 884 batches the day
+    before.
+
+    Only fires when ALL of: the file exists, its current contents differ from what is being written,
+    and a COMMITTED checkpoint depends on those contents. Saving under a new name, re-saving the
+    same distribution, or overwriting a prior nothing references are all untouched.
+    """
+    path = PRIOR_PATH / (name + ".pt")
+    if not path.exists():
+        return
+    try:
+        existing = torch.load(str(path), map_location="cpu", weights_only=False)
+        if not (isinstance(existing, dict) and "means" in existing and "weights" in existing):
+            return
+        h = hashlib.sha256()
+        h.update(existing["means"].detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+        h.update(existing["weights"].detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+        old_fp = h.hexdigest()[:16]
+        new_fp = _gmm_fingerprint(nd_prior)
+    except Exception:                        # noqa: BLE001 -- an unreadable existing file is not ours to judge
+        return
+    if new_fp is None or old_fp == new_fp:
+        return                               # same distribution: overwriting changes nothing
+    users = training_checkpoint.checkpoints_using_prior(old_fp)
+    if not users:
+        return
+    listed = "; ".join(f"{n} ({b:,} batches)" for n, b in users)
+    raise ValueError(
+        f"Refusing to overwrite {path.name}: it is the only copy of the prior that "
+        f"{len(users)} checkpoint(s) were generated against -- {listed}.\n"
+        f"  A checkpoint's directory is named after a digest of the prior's fitted GMM, so replacing "
+        f"this file makes those runs UNRESUMABLE -- the simulation is still on disk but nothing can "
+        f"ever match it again. That is how 3989 batches (6.5 h) were lost on 2026-08-28.\n"
+        f"  Save under a different name. If you really mean to discard those checkpoints, delete "
+        f"them first and the save will go through.")
+
+
 def save_prior_artifacts(name: str, nd_prior, cfg: SimConfig, *, fig_sink=None) -> None:
     """
     Persist an ND prior GMM to Resources/Priors/<name>.pt and its corner PNG to Resources/Plots.
@@ -1258,6 +1302,7 @@ def save_prior_artifacts(name: str, nd_prior, cfg: SimConfig, *, fig_sink=None) 
     not, deliberately: a half-written PNG is loud and free to regenerate, whereas a half-written prior
     is the file a checkpointed resume fingerprints and SBC later draws theta* from.
     """
+    _refuse_to_orphan_a_checkpoint(name, nd_prior)
     # model + the ND parameter ORDER travel with the file so _assert_prior_matches can refuse a
     # cross-config load. Without them a prior is identifiable only by its box edges, which several
     # cells happened to share.

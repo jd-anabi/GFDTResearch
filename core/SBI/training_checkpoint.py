@@ -212,15 +212,17 @@ def verify(path, identity: dict, probe=None, *, probe_atol: float = 1e-6) -> dic
     return header
 
 
-def describe_siblings(identity: dict, root=None) -> str:
-    """A one-line account of other checkpoints under ``root``, and the first identity field each one
-    differs in. Turns the commonest silent restart -- 'I rebuilt the prior, so the digest changed and
-    it started from zero' -- into a message that names the reason."""
+def _sibling_diffs(identity: dict, root=None):
+    """Yield ``(dir, batches_done, diff_fields, stored_identity)`` for every OTHER committed
+    checkpoint under ``root``.
+
+    Extracted so describe_siblings and near_miss_siblings cannot drift: they ask the same question of
+    the same directories and differ only in what they do with the answer.
+    """
     root = Path(root) if root is not None else config.CHECKPOINT_PATH
     if not root.is_dir():
-        return ""
+        return
     mine = resolve_dir(identity, root).name
-    notes = []
     for d in sorted(root.glob("train_*")):
         if d.name == mine:
             continue
@@ -233,12 +235,64 @@ def describe_siblings(identity: dict, root=None) -> str:
             continue
         diff = [k for k in sorted(set(stored) | set(identity))
                 if _canonical(identity.get(k)) != _canonical(stored.get(k))]
-        notes.append(f"{d.name} ({st['batches_done']} batches, differs in "
-                     f"{diff[0] if diff else 'nothing recorded'})")
+        yield d, int(st["batches_done"]), diff, stored
+
+
+def describe_siblings(identity: dict, root=None) -> str:
+    """A one-line account of other checkpoints under ``root``, and the first identity field each one
+    differs in. Turns the commonest silent restart -- 'I rebuilt the prior, so the digest changed and
+    it started from zero' -- into a message that names the reason."""
+    notes = [f"{d.name} ({done} batches, differs in {diff[0] if diff else 'nothing recorded'})"
+             for d, done, diff, _ in _sibling_diffs(identity, root)]
     if not notes:
         return ""
     return (f"[checkpoint] {len(notes)} other checkpoint(s) exist and do NOT match this run: "
             + "; ".join(notes))
+
+
+def checkpoints_using_prior(fingerprint: str, root=None) -> list:
+    """``[(name, batches_done)]`` for every committed checkpoint whose prior has ``fingerprint``.
+
+    A checkpoint is keyed on the prior's fitted GMM, so the prior FILE is the only thing that can
+    reproduce its directory name. Overwrite that file and the checkpoint becomes unresumable -- there
+    is no error and no warning, and several GiB of simulation simply stop being reachable. That has
+    now happened twice: 884 batches on 2026-08-27 (a prior built and never saved) and 3989 batches on
+    2026-08-28 (prior_08282026.pt overwritten with a different distribution under the same name).
+    """
+    root = Path(root) if root is not None else config.CHECKPOINT_PATH
+    if not fingerprint or not root.is_dir():
+        return []
+    out = []
+    for d in sorted(root.glob("train_*")):
+        st = peek(d)
+        if not st or not st.get("batches_done"):
+            continue
+        try:
+            stored = read_header(d).get("identity", {})
+        except Exception:                    # noqa: BLE001
+            continue
+        if stored.get("prior_fingerprint") == fingerprint:
+            out.append((d.name, int(st["batches_done"])))
+    return sorted(out, key=lambda r: -r[1])
+
+
+def near_miss_siblings(identity: dict, root=None) -> list:
+    """Committed checkpoints that differ from ``identity`` in EXACTLY ONE field.
+
+    ``[{"name", "batches", "field", "mine", "theirs"}]``, richest first.
+
+    WHY ONE FIELD SPECIFICALLY. A run that shares every declared property but one is almost never a
+    genuinely different experiment -- it is the same experiment with something nudged by accident,
+    and the digest turns that nudge into a silent restart from zero. That has now happened three
+    times on this project: a prior rebuilt rather than loaded (884 batches, unrecoverable because the
+    prior was never saved), and twice more where a 3989-batch checkpoint was one field away from the
+    run about to start. Two or more differing fields is a different question -- that usually IS a
+    different experiment -- so widening this would make it noise and it would be ignored.
+    """
+    out = [{"name": d.name, "batches": done, "field": diff[0],
+            "mine": identity.get(diff[0]), "theirs": stored.get(diff[0])}
+           for d, done, diff, stored in _sibling_diffs(identity, root) if len(diff) == 1]
+    return sorted(out, key=lambda r: -r["batches"])
 
 
 # ── rows ─────────────────────────────────────────────────────────────────────────────────────────

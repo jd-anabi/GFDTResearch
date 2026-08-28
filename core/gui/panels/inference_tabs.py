@@ -13,9 +13,12 @@ reads/writes the session through ``self._screen`` and calls ``self._screen.refre
 stage completes.
 """
 import math
+import os
+import subprocess
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QMessageBox,
                                QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from core import cli, config, forcing, orchestrator, registry
@@ -67,6 +70,16 @@ HELP = {
                    "candidates-per-round, so this is the coverage of the broad Sobol census that "
                    "SEEDS the local flood-fill. The sweep is ITERATION-bounded, which is why the "
                    "next field is not a speed dial.",
+    "vram_ceiling": "HARD ceiling on what ONE simulation batch may plan to hold on the GPU. "
+                    "0 = off, and off is right on an idle card. It is NOT a substitute for freeing "
+                    "VRAM — with nothing free it can do nothing, because not even a floor-sized "
+                    "chunk fits. What it buys is keeping a run that HAS headroom inside real VRAM: "
+                    "past that, Windows pages the batch into shared system memory rather than "
+                    "failing, and it runs up to 9x slower with nothing to say why (measured "
+                    "2026-08-27: 21.67 GiB completed on a 15.92 GiB card). Set it to about the free "
+                    "VRAM nvidia-smi reports, minus ~1 GiB for the CUDA context. Splitting costs "
+                    "wall-clock on the batches it touches. Not remembered between sessions, on "
+                    "purpose.",
     "sweep_batch": "Candidates per global round; 0 = follow the hardware batch. NOT a speed knob — "
                    "the sweep is iteration-bounded, so shrinking this makes the prior WORSE without "
                    "making it faster (measured 527 s at 2048 against >70 min and unfinished at 32).",
@@ -405,8 +418,65 @@ class ConfigPanel(_StagePanel):
 
         form.addRow(self.btn_config)
         self.controls_layout.addWidget(box)
+
+        # -- hardware: not a science knob. It changes how a batch is PLANNED, never what is trained,
+        # which is exactly why it is kept out of the checkpoint identity (a memory knob in the
+        # digest would rename the checkpoint directory and silently restart a resumable multi-day
+        # run). It lives on Config rather than Prior/Posterior because it applies to every stage
+        # that simulates.
+        hw = QGroupBox("Hardware")
+        hv = QVBoxLayout(hw)
+        hform = make_form()
+        self.vram_ceiling = FloatField(str(pipeline._vram_ceiling_gib()))
+        add_help_row(hform, "VRAM ceiling per batch (GiB, 0 = off)", self.vram_ceiling,
+                     HELP["vram_ceiling"])
+        hv.addLayout(hform)
+        self.vram_note = _TrainingBudgetMixin._derived_label()
+        hv.addWidget(self.vram_note)
+        self.vram_ceiling.textChanged.connect(lambda _t: self._apply_vram_ceiling())
+        self.controls_layout.addWidget(hw)
+        self._apply_vram_ceiling()
+
         self.restore_settings(settings.settings())
         self._sync_chi_enabled()
+
+    def _apply_vram_ceiling(self):
+        """Push the field into ``config.SIM_VRAM_CEILING_GIB`` and say what will ACTUALLY take effect.
+
+        ASSIGNING THE CONSTANT IS ENOUGH HERE, and that is not true of the sweep and flow knobs
+        beside it. Those had to become ARGUMENTS because `orchestrator` does `from .config import ...`
+        and binds them at import, so assigning to the constant is a silent no-op (trap X12). This one
+        is read LIVE -- `pipeline._vram_ceiling_gib()` does a `getattr` on the module every time the
+        planner asks -- so a plain assignment reaches every stage that simulates, with no plumbing.
+
+        NOT PERSISTED, ON PURPOSE, and it is the only field on this tab that is not. Stale QSettings
+        have already cost this project a ~5-day run (the 2026-08-19 retrain trained on the retired
+        band because a saved value silently won over config.py). A ceiling fails the same way but
+        more quietly: a forgotten 2 GiB would not error, it would just make every future run split
+        from batch 0 and take several times longer, with nothing in the log to explain it. Starting
+        each session from config.py's 0.0 means the throttle is always a decision someone just made.
+
+        The env override still wins if it is set -- said out loud here rather than left to puzzle
+        over, because a field that silently does nothing is worse than no field.
+        """
+        config.SIM_VRAM_CEILING_GIB = max(0.0, self.vram_ceiling.value())
+        effective = pipeline._vram_ceiling_gib()
+        env = os.environ.get(pipeline.VRAM_CEILING_ENV)
+        free = _nvidia_smi_free_gib()
+        free_txt = (f"nvidia-smi reports {free:.2f} GiB free"
+                    if free is not None else "free VRAM unreadable (no nvidia-smi)")
+        if env is not None and env.strip():
+            self.vram_note.setText(
+                f"⚠ {pipeline.VRAM_CEILING_ENV}={env} is set and OVERRIDES this field — "
+                f"planning to {effective:.2f} GiB. {free_txt}.")
+        elif effective <= 0:
+            self.vram_note.setText(
+                f"Off: batches are planned from the free-memory reading and the learned cap alone. "
+                f"{free_txt} — set a ceiling near that, minus ~1 GiB, only if you need the desktop.")
+        else:
+            self.vram_note.setText(
+                f"Batches will be planned to fit {effective:.2f} GiB. {free_txt}. Above the real "
+                f"free figure this does nothing; below it, expect more splitting and more wall-clock.")
 
     def _sync_chi_enabled(self):
         """The three χ knobs are meaningless unless χ-mode is on. The rotation is available in ALL
@@ -832,6 +902,32 @@ class PriorPanel(_StagePanel):
 
 
 # ── the training budget, shared by the Posterior and TSNPE tabs ───────────────────────────────
+def _hw_batch(cfg) -> int:
+    """The rows-per-batch the run will actually use when the cap field is 0 (= auto)."""
+    return (getattr(getattr(cfg, "hw", None), "batch_size", None)
+            or config.detect_device().batch_size)
+
+
+def _nvidia_smi_free_gib() -> "float | None":
+    """Free VRAM in GiB according to ``nvidia-smi``, or None if it cannot be read.
+
+    ⚠ DELIBERATELY NOT ``torch.cuda.mem_get_info``. That reading overstates free VRAM on Windows by
+    roughly the size of the desktop -- measured 15037 MiB against nvidia-smi's 5814 at the same
+    instant (trap X6) -- and it is the number that green-lit the batch which killed the first chi
+    retrain. Showing it next to a field whose whole purpose is to bound VRAM would be handing the
+    user the exact lie the field exists to defend against.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2.0)
+        if out.returncode != 0:
+            return None
+        return float(out.stdout.strip().splitlines()[0]) / 1024.0
+    except Exception:                        # noqa: BLE001 -- no driver, no binary, a timeout: all "unknown"
+        return None
+
+
 class _TrainingBudgetMixin:
     """Batches x rows-per-batch, and the three derived lines that say what it will cost.
 
@@ -1072,6 +1168,8 @@ class PosteriorPanel(_TrainingBudgetMixin, _StagePanel):
         if cap < 0:
             self.log_pane.append_line("Max rows per batch cannot be negative (0 = auto).", "warning")
             return
+        if is_new and not self._confirm_fresh_run(cfg, cap or _hw_batch(cfg), n_runs):
+            return
         self.session.reset_downstream("posterior")
         self._screen.refresh_gates()
         # Passed, never written to config: orchestrator does `from .config import TRAINING_NUM_RUNS`,
@@ -1087,6 +1185,57 @@ class PosteriorPanel(_TrainingBudgetMixin, _StagePanel):
                       fisher_dz=self.fisher_dz.value() or config.REPARAM_FISHER_DZ,
                       fisher_points=max(1, self.fisher_points.value()),
                       provide_fig_sink=True, on_result=self._on_posterior)
+
+    def _confirm_fresh_run(self, cfg, width: int, n_runs: int) -> bool:
+        """Ask before starting from zero when a checkpoint is ONE FIELD away. True = go ahead.
+
+        THE STATUS LINE WAS NOT ENOUGH, and this is the evidence. `_budget_checkpoint` already says
+        "these settings match no checkpoint, so this starts a NEW run" and names the differing field
+        -- but it is a passive label, on a tab the user has usually scrolled past by the time they
+        press Train, and it has now failed to prevent three restarts: 884 batches lost outright on
+        2026-08-27 (a prior rebuilt rather than loaded, and never saved, so unrecoverable), and a
+        3989-batch checkpoint nearly abandoned twice on 2026-08-28 because a prior was selected in
+        the picker but never loaded. A modal costs one click on the rare occasion it fires.
+
+        DELIBERATELY NARROW. It asks only when a committed sibling differs in EXACTLY ONE field --
+        the signature of an accident rather than of a different experiment. A genuinely new run,
+        with no near-miss, is never interrupted.
+
+        FAILS OPEN. A status line must never block a run: if the identity cannot be computed (no
+        prior yet, an unreadable header) this returns True and the run proceeds, exactly as before.
+        """
+        if not config.TRAINING_CHECKPOINT_EVERY or self.session.inf_prior is None:
+            return True
+        try:
+            ident = orchestrator.training_identity(cfg, self.session.inf_prior, width, n_runs)
+            if (training_checkpoint.peek(training_checkpoint.resolve_dir(ident)) or {}).get("batches_done"):
+                return True                  # this IS a resume; nothing to warn about
+            near = training_checkpoint.near_miss_siblings(ident)
+        except Exception as e:               # noqa: BLE001 -- never block a run over a warning
+            self.log_pane.append_line(
+                f"Could not check for resumable checkpoints ({type(e).__name__}: {e}); "
+                f"continuing.", "warning")
+            return True
+        if not near:
+            return True
+
+        lines = [f"  • {r['name']}: {r['batches']:,} batches — differs only in {r['field']}\n"
+                 f"      this run: {str(r['mine'])[:60]}\n"
+                 f"      that one: {str(r['theirs'])[:60]}" for r in near[:3]]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("This starts a NEW run")
+        box.setText(f"This will simulate {n_runs:,} batches from zero.")
+        box.setInformativeText(
+            "A checkpoint that is ONE setting away already exists:\n\n" + "\n".join(lines) +
+            "\n\nIf you meant to continue that run, cancel and change the setting named above "
+            "— for a prior, remember that choosing it in the picker does nothing until you press "
+            "\"Build / Load prior\".")
+        go = box.addButton("Start a new run anyway", QMessageBox.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        box.exec()
+        return box.clickedButton() is go
 
     def _on_posterior(self, payload):
         self.session.posterior, self.session.diagnostics = payload

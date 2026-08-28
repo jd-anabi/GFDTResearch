@@ -1818,7 +1818,7 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   reports) premised on the box round-trip producing `±inf`; it cannot on torch 2.9. Pinned by
   `test_box_roundtrip_never_yields_a_nonfinite_latent_target`, which exists precisely so a version
   bump that removes that clamp surfaces as a test failure rather than a dead training run.
-- **X13. THE RECOVERY PATH CAN BE THE THING THAT KILLS YOU, and Python will not tell you what it was
+- **X14. THE RECOVERY PATH CAN BE THE THING THAT KILLS YOU, and Python will not tell you what it was
   recovering from.** On 2026-08-27 the retrain caught a genuine OOM at batch 351/5000, entered
   `_rows_with_oom_retry`'s handler correctly, and then died on `torch.cuda.empty_cache()` — which
   raised a raw `AcceleratorError: CUDA error: out of memory` of its **own**. Two things made that
@@ -1960,6 +1960,21 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 ## 6. Open backlog
 
+> ### ▶ PICK UP HERE (as of 2026-08-28) — THE REFACTOR COMES BEFORE THE RETRAIN
+>
+> **Next task: a systematic refactor of the whole codebase — structure, code AND comments.** Split the
+> 2,500-line modules along their real seams, break up the long functions, remove the duplication,
+> replace the dicts-as-structs, fix the public/private boundary, and compress the commentary. Nothing
+> may change functionally. **The full brief is §6.1**, and note its first rule: this handoff is being
+> deleted when the project ends, so knowledge must be inlined in the code, never pointed at from it.
+> Do it before the retrain, not after: the retrain is days of wall-clock during which the tree should
+> be still.
+>
+> The memory work that blocked the retrain is **done and measured** — see the 2026-08-28 appendix
+> entries. The headline: the caching allocator was fragmenting on variable batch geometry and pinning
+> a 6.39 GiB floor, and an allocator option now recovers ~6 GiB of headroom. `config.py` sets it by
+> default.
+
 > ### ▶ PICK UP HERE (as of 2026-08-21)
 >
 > **The retrain is DONE** (`posterior_08232026`, 2026-08-25) and characterised in **§4.6**: calibrated,
@@ -2032,6 +2047,132 @@ S-2 (JIT solver fast path), UX1–UX5 (the five UI/UX requests), and the PySide6
 (`requirements.txt:37`).
 
 ---
+
+
+### 6.1 THE REFACTOR — the next task
+
+**Goal.** A codebase a person can read and an agent can navigate: sensible modules, short functions,
+no duplication, and comments that carry facts rather than narration. Today it reads as
+machine-written — accreted structure, 2,500-line modules, and prose where a sentence would do.
+
+**No functional change of any kind.** Every test passes unchanged and a run's artifacts stay
+bit-identical. This is structure and legibility only.
+
+#### ⚠ THE HANDOFF IS NOT A DESTINATION — IT IS BEING DELETED
+
+This document goes away when the project is done. So:
+
+- **Do not move explanations into it and leave a pointer.** A `# see handoff trap X13` comment becomes
+  a dangling reference the moment this file is gone.
+- **32 code sites already reference trap numbers** (`X6` ×8, `X12` ×5, `X8` ×4, `X10` ×4, …). Every one
+  of them will dangle. **Inline the fact at each site and drop the reference** — `# trap X6` becomes
+  `# mem_get_info overstates free VRAM under WDDM (measured 15037 MiB against nvidia-smi's 5814)`.
+- Load-bearing knowledge therefore stays **in the code**. The work is to **compress it, not relocate
+  it**: keep the number and the prohibition, cut the story around them.
+
+#### The starting measurements
+
+| module | lines | comment lines | share |
+|---|---|---|---|
+| `core/SBI/pipeline.py` | 2553 | 646 | 25 % |
+| `core/orchestrator.py` | 2408 | 366 | 15 % |
+| `core/gui/panels/inference_tabs.py` | 1904 | 106 | 5 % |
+| `core/config.py` | 1216 | 482 | 39 % |
+
+31,258 lines across `core/` + `scripts/`; four files hold 8,000 of them.
+
+---
+
+### A. Code and structure — the main work
+
+**1. Split the giants along their real seams.**
+`pipeline.py` holds memory planning, three OOM ladders, the simulator wrapper, summary statistics,
+the χ probe loop, training-data generation and the sbi training call — seven jobs. Each is a module.
+`inference_tabs.py` is six unrelated panels in one file: one module per tab.
+`orchestrator.py` is both the public API and the body of several stages; keep it as the API and push
+the bodies down.
+
+**2. Break up the long functions.** `gen_training_data` is ~500 lines wrapping a nested `_rows`
+closure that itself branches three ways (chi / forced / spontaneous). The branches are the natural
+functions; the closure exists mostly to capture batch state, which is a signal that the state wants
+to be an object.
+
+**3. Kill the duplication.** The conditioning layout `[S(x) | log(T) | forcing-or-chi]` is assembled
+by hand in **eight** places across `pipeline.py` and `orchestrator.py` — the code says so in a
+comment, which is an admission, not a fix. One constructor, used everywhere. Same for the repeated
+release/retry idiom and the repeated stats-then-cat blocks.
+
+**4. Replace dicts-as-structs with real types.** `training_params` is a ~30-key dict threaded through
+several layers, with every consumer doing `.get(...)` and its own defaulting. A dataclass makes the
+contract checkable and the call sites shorter. `SimConfig` has drifted into a god object; look for
+the cohesive pieces inside it.
+
+**5. Fix the public/private boundary.** `_`-prefixed helpers are called across module lines —
+`pipeline._release_device_memory` from `orchestrator`, `pipeline._vram_ceiling_gib` and
+`pipeline._max_sim_batch` from the GUI and tests. If it is used outside its module it is public:
+rename it and give it a docstring; if it should not be, give the caller a real API.
+
+**6. Name things for readers.** `_rows`, `_th_out`, `_ck_from`, `_per_row`, `_patho`, `x_nd_spont_fine`
+are write-time abbreviations. The hot loops can keep short names; the seams should not.
+
+**7. Sweep for dead weight** — unused parameters, unreachable branches, `scripts/` that no longer run,
+and helpers with a single caller that would read better inlined.
+
+**8. Make error handling uniform.** The guarded-release / best-effort pattern arrived incrementally
+and is applied inconsistently outside `pipeline.py`. Decide the rule, apply it everywhere, and let
+`decorrelate.py` and the PPC loop stop being exceptions.
+
+---
+
+### B. Comments and docstrings — secondary, and surgical
+
+**Delete outright:** comments restating the code (`# loop over batches`), `:param x: the x`,
+docstrings that repeat the signature, defensive hedging, and any explanation copy-pasted at three
+call sites (keep one, at the definition).
+
+**Compress, keep the fact.** The pattern to apply, from `_gen_obs_retry`:
+
+> *Before (7 lines):* "EVERYTHING BELOW IS OUTSIDE THE HANDLER, AND THAT IS LOAD-BEARING. `err` owns
+> a traceback, which owns the frames of the failed attempt, which own its tensors — Simulator's
+> entire (n_vars, batch, T) buffer among them, plus whatever the chained `__cause__`'s solver frames
+> hold. Calling empty_cache() while `err` is still bound frees NOTHING, so the retry OOMs again at
+> half the width and the whole mechanism reads as 'the retry does not work'…"
+>
+> *After (2 lines):* `# Outside the except: while err is bound its traceback pins the failed`
+> `# attempt's tensors (~7 GiB at production width), so releasing there frees nothing.`
+
+The number survives. The narration does not. Apply that to every block of this shape — there are
+hundreds, and they are most of the 646 lines in `pipeline.py` and the 482 in `config.py`.
+
+**Never delete:** a measured number, a "this was tried and regressed", an ordering requirement, or a
+"this looks removable and is not". Those exist because something died without them.
+
+**Pick one docstring convention** — the repo mixes reST `:param:` with prose — and apply it.
+
+---
+
+### Rules
+
+- **Tests are the contract.** All suites pass unchanged. **Do not edit a test to make a refactor
+  pass**; that inverts the safety net. If a test breaks, decide which of the two is right.
+  ⚠ Several tests assert on **parsed source** (`_unparsed`, `_code_only`) and on **call order inside
+  functions**, so renames and reorderings will trip them by design.
+- **`orchestrator.training_identity` is FROZEN.** Its field names and values are digested into
+  checkpoint DIRECTORY names. Rename a key and every existing checkpoint is orphaned — including
+  three 5000-batch ones. Do not touch it, even cosmetically.
+- **Watch trap X12 when moving constants:** `from .config import NAME` snapshots at import, so
+  relocating a constant can silently change which value a caller sees. This has caused silent no-ops
+  twice.
+- **Small steps, suites between them, one commit per seam** so a regression bisects cleanly. ~31 k
+  lines with a multi-day run depending on them; a big-bang refactor cannot be reviewed.
+
+### Worth doing on the way, as their own commits
+
+`decorrelate.py` has no OOM ladder and no guards — a Fisher rotation can die outright on a starved
+card (it did, 2026-08-28, `cudaErrorUnknown`). The PPC bin loop in `orchestrator.py` has the same
+gap. Both fit naturally into refactoring those files, but they ARE functional changes: separate
+commits, not smuggled into a cleanup.
+
 
 ## 7. Known bugs and risks
 
@@ -3234,6 +3375,36 @@ The retrain reached **batch 3990/10000**, against 351 the day before, and stoppe
 `AcceleratorError: CUDA error: out of memory` raised from `_tc.rng_restore` — inside the batch-level
 retry added the previous day *to stop exactly this class of failure*.
 
+### Test state at the end of the session
+
+All green on a free card, 2026-08-28:
+
+| suite | result |
+|---|---|
+| `tests/test_user_sbi.py` | **88/88 ALL PASSED** (78 before this session; ~15 added, some replacing) |
+| `tests/test_gui_progress.py` | ALL PASSED (2 new: the VRAM ceiling, the near-miss confirmation) |
+| `tests/test_conditioning_repair.py` | ALL PASSED |
+| `tests/test_chi_set_encoder.py` | ALL PASSED |
+
+⚠ Two earlier "28/88, zero failures" readings in this session were **not** slow runs — the suite had
+died and taken the remaining 60 tests with it, silently. See the harness note below; that is fixed,
+and a crash now reports as a failure of its own test.
+
+### What changed, by file
+
+Nothing below is committed as of the end of the session; `pipeline.py` and `config.py` carry earlier
+round-1/round-2 work that WAS committed (`aaa9696`, `2d91666`).
+
+| file | change |
+|---|---|
+| `core/config.py` | `PYTORCH_CUDA_ALLOC_CONF` default (~6 GiB recovered); guarded the driver reads in `memory_budget_elements`; `SIM_VRAM_CEILING_GIB` + `PRISM_VRAM_CEILING_GIB`; `TRAINING_BATCH_RETRY_*` |
+| `core/SBI/pipeline.py` | `_short_err` (total, cannot raise); `_release_device_memory`; `_free_gib_note`; `_cancellable_wait`; `_try_rng_snapshot` / `_try_rng_restore`; `_we_are_the_holder`; `_vram_ceiling_gib`; batch-level retry reordered to restore→release→wait; `[mem]` on every OOM; `PRISM_MEM_LOG_EVERY`; `_pending_rng` paired with its batch index; drive charged at its measured 4.10× build peak |
+| `core/SBI/training_checkpoint.py` | `_sibling_diffs` (shared); `near_miss_siblings`; `checkpoints_using_prior` |
+| `core/Solvers/sdeint.py` | `drop_graph_cache()` |
+| `core/orchestrator.py` | `_saved_prior_fingerprints`; `_assert_prior_is_saved`; `_refuse_to_orphan_a_checkpoint`; guarded the PPC release |
+| `core/gui/panels/inference_tabs.py` | Hardware group on the Config tab (VRAM ceiling, unpersisted, `nvidia-smi`-backed note); `_confirm_fresh_run` modal on a one-field near miss; `_nvidia_smi_free_gib`; `_hw_batch` |
+| `tests/` | ~15 new tests across `test_user_sbi.py` (88 total) and `test_gui_progress.py`; `_unparsed` corrected to strip docstrings; the training-budget test now isolates its QSettings |
+
 ### The same defect, in the step that fixed the same defect
 
 `rng_restore` → `torch.cuda.set_rng_state_all` copies each generator's state into device memory, so
@@ -3272,6 +3443,7 @@ recovery surface was walked instead:
 | `_log_memory` (4 CUDA calls) | a **diagnostic**, on the success path every 250 batches — i.e. right after a batch clawed through all three ladders. Now best-effort; a failed read prints "statistics unavailable". |
 | `config.memory_budget_elements` | bare `mem_get_info` / `memory_reserved`, and **every retry re-enters it** to re-plan. `_free_gib_note` guards the identical call. Now falls back to a deliberately small budget — the safe direction, since it only causes more splitting. |
 | `rng_snapshot` ×4 (per-batch, before-retry, cadence, final) | all driver calls. The **final** one sits *after* the `finally`, outside the `try` entirely — a failure there would lose the whole run's product. All best-effort now; the cadence write defers to the next boundary rather than dying. |
+| `ast.unparse` keeps docstrings | the "assert on parsed source" rule was written to dodge comments, and `ast.unparse` does drop those — but **docstrings are string expressions in the AST, not trivia, and survive**. A check that `_nvidia_smi_free_gib` does not use `mem_get_info` matched the docstring explaining why it does not. Third instance of this false positive (`_local_map`, the TSNPE runner, now this). `_unparsed` strips docstrings too, and its own claim to have been doing so all along is corrected. |
 | `str(e).splitlines()[0]` ×4 | `IndexError` on a zero-message exception — `"".splitlines()` is `[]`. Reachable, because `_is_oom` returns True on the *type* test alone. One of the four was inside `_release_device_memory`, the function whose docstring says it never raises. Now `_short_err`. |
 | stale `_pending_rng` | `batch_k` is bound by the `for` before the snapshot, so a snapshot failing at the top of batch *k* left *k-1*'s state paired with `batch_k = k` — a resume would restart *k* with the streams where *k-1* began. Now paired with its index, and the rescue write commits the rows with **no** restore point rather than a wrong one. |
 
@@ -3279,6 +3451,151 @@ recovery surface was walked instead:
 > checkpoint that resumes without restoring streams draws fresh noise from that point, which is a
 > reproducibility loss. A write that is skipped, or a run that dies, throws away hours of simulation.
 > Those are not the same size of mistake.
+
+### ⚠ WAITING FOR MEMORY YOU ARE HOLDING YOURSELF
+
+A run stuck at batch 93/10000 repeated *"waiting for device memory before re-running this batch"*
+indefinitely. Measured with the Windows per-process GPU counter (`\GPU Process Memory(*)\Local
+Usage` — `nvidia-smi` cannot report per-process memory under WDDM):
+
+| holder | GPU memory |
+|---|---|
+| **the training process itself** | **15,310 MB** |
+| csrss + dwm + msedgewebview2 + explorer | ~270 MB combined |
+
+**It was waiting for itself.** The batch-level retry was written for the documented failure — a card
+momentarily full of the desktop's *evictable* surfaces — where pausing is exactly right. It is
+exactly wrong when we are the holder, and no delay could ever have satisfied it. The retry now asks
+`_we_are_the_holder` first and, when the answer is yes, goes straight back to the halving ladders
+instead of sleeping.
+
+**It is NOT the CUDA graphs**, and the arithmetic settles it rather than an opinion: the cache is
+bounded at `SOLVER_GRAPH_CACHE_MAX = 8`, static tensors are 1.70 MB per graph at B=2048 (13.6 MB for
+a full cache), and even at a generous 20 MB per in-capture pool the total is ~174 MB — two orders of
+magnitude short of 15.3 GiB.
+
+The leading hypothesis is **allocator fragmentation**: `n_fine` swings from ~40k to ~283k, so the
+allocator reserves many differently-sized segments and `empty_cache()` can only release segments that
+are *entirely* free — one live block pins a whole segment. That is precisely what
+`expandable_segments` fixes and what this platform does not offer. **Not yet proven**: the decisive
+number is peak reserved against peak allocated, so `_log_memory` now runs on EVERY OOM (not just
+every `_MEM_LOG_EVERY` batches — a cadence of 250 says nothing about a run that dies at 93), and
+`PRISM_MEM_LOG_EVERY` overrides the cadence for a diagnostic run.
+
+### THE FRAGMENTATION WAS REAL, AND AN ALLOCATOR OPTION RECOVERS ~6 GiB
+
+Measured on the real chi loop at `run_size=2048` with `PRISM_MEM_LOG_EVERY=1`, 21 batches, same seed
+both runs:
+
+| batch | live | baseline reserved / free | tuned reserved / free |
+|---|---|---|---|
+| b8 | 8.50 GiB | 8.66 / **8.14** | 14.42 / **14.10** |
+| b14 | 0.67 GiB | **6.39** / 8.14 | 1.26 / 14.10 |
+| b21 | 0.37 GiB | **6.39** / 8.14 | **0.73** / 14.10 |
+
+Baseline: one big batch carves segments, the reserved floor sticks at 6.39 GiB, and **free VRAM never
+recovers past 8.14 GiB** — `empty_cache()` runs every batch and cannot return a segment that retains
+a single live block. Tuned: reserved tracks the load and free holds at 14.10 GiB all run.
+
+`config.py` now sets, via `setdefault` so an operator export wins:
+
+```
+PYTORCH_CUDA_ALLOC_CONF = roundup_power2_divisions:8,garbage_collection_threshold:0.6
+```
+
+`roundup_power2_divisions` collapses the continuum of block sizes (`n_fine` spans ~40k to ~283k) onto
+a handful so segments are reusable across batches; `garbage_collection_threshold` reclaims
+proactively instead of only when an allocation is already failing. Set in `config.py` rather than
+`run.bat` so the CLI, scripts and tests get it too — safe there because the config is parsed at the
+**first CUDA allocation**, not at `import torch` (verified).
+
+> ### ⚠ THE ENV VAR NAME IS A TRAP, AND THE DEPRECATION WARNING IS WRONG
+> On torch 2.9.0+cu130, **`PYTORCH_ALLOC_CONF` — the name torch tells you to use — is SILENTLY
+> IGNORED**: an unrecognised option inside it raises nothing. `PYTORCH_CUDA_ALLOC_CONF` is the one
+> actually parsed (an unrecognised option raises `Unrecognized CachingAllocator option`) while
+> printing *"PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead"*.
+> **Test any allocator experiment with a deliberately invalid value first.** An entire "negative
+> result" on this page was really a no-op on the ignored name.
+>
+> This does not contradict the 2026-08-10 finding that `expandable_segments` is a no-op here — that
+> one needs CUDA's VMM API, which this Windows build does not expose. These two options are pure
+> allocator policy and are not platform-gated. The earlier entry's "do not re-try this" applies to
+> `expandable_segments` specifically, **not** to allocator configuration in general.
+
+### ⚠ SAVING A PRIOR CAN DESTROY A CHECKPOINT, AND DID
+
+`prior_08282026.pt` was overwritten on 2026-08-28 at 12:20, under the same name, with a distribution
+byte-identical to `prior_08272026.pt`. The 3989-batch run that had been training against the old
+contents since 00:07 became **permanently unresumable** — its `prior_fingerprint`
+(`d8f719a5ddde5183`) now matches no file on disk. The simulation is still there; nothing can ever
+name it again.
+
+That is the second loss by this mechanism (884 batches on 2026-08-27, a prior built and never saved)
+and the exposure is live: **`3d_master_08102026.pt` currently backs three separate 5000-batch
+checkpoints.** `save_prior_artifacts` now refuses to overwrite a prior file whose current contents a
+committed checkpoint depends on, naming the checkpoints and their batch counts. It fires only when
+the file exists, the contents would actually change, and something depends on them — saving under a
+new name or re-saving the same distribution is untouched.
+
+> **The debugging lesson, because it cost an argument.** The fingerprint said one prior, the user
+> said another, and both were right: the file had been overwritten between the two observations. When
+> an identity digest disagrees with what someone tells you they selected, check the file's mtime and
+> content hash before concluding they mis-clicked.
+
+### A passive warning was not enough, three times over
+
+`_budget_checkpoint` has said *"these settings match no checkpoint, so this starts a NEW run"* — and
+named the differing field — since C-11. It did not prevent any of:
+
+| date | cost | one field away |
+|---|---|---|
+| 2026-08-27 | **884 batches lost outright** | `prior_fingerprint` (prior rebuilt, never saved → unrecoverable) |
+| 2026-08-28 | 3989 batches nearly abandoned | `prior_fingerprint` (prior selected in the picker but never loaded) |
+| 2026-08-28 | the same 3989, nearly abandoned again | same |
+
+The label is on a tab the user has scrolled past by the time they press Train. So a run that would
+start from zero **while a committed checkpoint sits exactly one identity field away** now raises a
+modal naming that checkpoint, its batch count, the field, and both values.
+
+`training_checkpoint.near_miss_siblings` is deliberately narrow: **exactly one** differing field is
+the signature of an accident, and two or more is usually a genuinely different experiment — warning
+there would make it noise and it would be ignored. It shares `_sibling_diffs` with
+`describe_siblings` so the two cannot drift. The check **fails open**: no prior, an unreadable
+header, or no near miss all proceed, because a warning that can block a run is worse than no warning.
+
+> ⚠ **Choosing a prior in the picker does not load it.** `session.inf_prior` is set only by the
+> `_on_prior` callback, i.e. when **"Build / Load prior"** completes. Changing the dropdown and
+> pressing Train uses whatever was last actually loaded — which is how the same 3989-batch
+> checkpoint was passed over twice in one morning. The modal now names the field, and the
+> Posterior tab's checkpoint line remains the pre-flight check: it must read
+> *"Resumes an existing checkpoint: N/M batches already done."* before you commit hours.
+
+### A test that passed all morning and then failed for no code reason
+
+`test_the_training_budget_shows_the_simulation_count_and_the_cap_trade` asserts the budget fields
+seed from `config.py`, but the panel **restores them from QSettings** — so it was reading the
+developer's live `PRISM.ini`, and started failing the moment a run was configured with 10000
+batches. Nothing to do with the code under test. It now isolates its settings file, like the other
+QSettings-touching tests in that file.
+
+That is the same restore-wins-over-config mechanism that trained the 2026-08-19 retrain on the
+retired chi band. **Any test asserting a DEFAULT has to start from a settings file with no saved
+value**, or it is asserting the developer's last session.
+
+### Two test-harness defects that hid work, both found on the way
+
+**The runner aborted the whole suite on any non-assertion error.** `tests/test_user_sbi.py`'s
+`__main__` block caught `AssertionError` only, so a test raising anything else killed the run at that
+point and every test after it silently never ran. It cost 26 tests twice in one afternoon: once to a
+`cudaErrorUnknown` inside `decorrelate` under memory pressure, once to a `ValueError` from a stale
+`str.index`. Now `except Exception`, reporting the type — a crash is a failure of that TEST, not of
+the suite.
+
+**An ordering assertion pinned two calls as NEIGHBOURS and went stale.** The round-1 batch-retry test
+asserted `_release_device_memory(device)` was immediately followed by `_cancellable_wait`. Round 2
+moved the RNG restore ahead of the release and round 4 inserted the `_we_are_the_holder` branch
+between them, so the substring vanished and `str.index` raised. **Assert on ORDER, not adjacency** —
+`src.index(a) < src.index(b)` survives an insertion; a concatenated two-line literal does not.
 
 ### Three that were found and deliberately NOT fixed
 
@@ -3292,7 +3609,7 @@ recovery surface was walked instead:
    and calls `get_rng_state_all()` on entry and `set_rng_state_all()` on exit — the identical pair
    that crashed here. Its `__exit__` restore runs *while unwinding* any exception raised inside the
    block, so an OOM in `feats()` would be followed by a device call on a starved card and the
-   secondary failure would replace the original traceback. Same shape as trap X13, different
+   secondary failure would replace the original traceback. Same shape as trap X14, different
    subsystem, and not touched because the Fisher path was not what failed.
 3. **`gen_training_data:1550/1560`** (the resume path's `.to(device)` and `rng_restore`) run *before*
    the `try`, so they have no rescue write. Tolerable: nothing has been generated yet, so a failure
@@ -3306,6 +3623,24 @@ a single run can be throttled without editing a tracked file; junk values are ig
 `_max_sim_batch` finds that not even a floor-sized chunk fits and runs the batch as asked. What it
 buys is keeping a run that *has* headroom out of the 9× shared-memory paging regime measured on
 2026-08-27. Free the memory first, then set it to about `(nvidia-smi free) − 1 GiB`.
+
+It is also a **field on the Config tab**, in its own "Hardware" group, with a live note saying what
+will actually take effect. Three things about it are deliberate:
+
+- **A plain assignment is enough, and that is unusual here.** Every other GUI knob had to become an
+  ARGUMENT threaded into `build_prior`/`build_posterior`, because `orchestrator` does
+  `from .config import …` and binds at import, so writing to the constant is a silent no-op
+  (trap X12). `pipeline._vram_ceiling_gib()` does a `getattr` on the module every time the planner
+  asks, so this one genuinely takes effect with no plumbing.
+- **It is NOT persisted** — the only field on that tab that is not. Stale QSettings already cost a
+  ~5-day run (2026-08-19, the retired band). A ceiling fails the same way but far more quietly: a
+  forgotten 2 GiB does not error, it just makes every future run split from batch 0 and take several
+  times longer with nothing in the log to explain it. Starting each session at 0.0 keeps the
+  throttle a decision somebody just made.
+- **The note reads `nvidia-smi`, never `mem_get_info`.** The optimistic reading is the number that
+  green-lit the batch which killed the first chi retrain (trap X6); printing it beside a field whose
+  purpose is to bound VRAM would hand the user the exact lie the field defends against. If the env
+  override is set, the note says so rather than leaving a field that silently does nothing.
 
 ---
 
@@ -3327,7 +3662,7 @@ entered the retry. **The run died on its RECOVERY.**
 bound frees nothing — and it raised. The pasted traceback had no *"During handling of the above
 exception"* chain, which is the signature of a raise after an except clause closes, and is what
 pinned the diagnosis. Worse, the notice naming the original OOM was printed *after* the release, so
-the failure that started it all left **no record at all**. That is now trap **X13**.
+the failure that started it all left **no record at all**. That is now trap **X14**.
 
 ### Five changes
 
@@ -4936,7 +5271,7 @@ staged.** Treat the retries as tested-by-construction until a real run exercises
 >
 > **UPDATE 2026-08-27: they fired, and the first real firing found a bug in them.** The Phase-1
 > retrain hit a genuine reactive OOM at batch 351/5000 and `_rows_with_oom_retry` caught it exactly
-> as designed — then died on its own `empty_cache()`. See the 2026-08-27 (later) entry and trap X13.
+> as designed — then died on its own `empty_cache()`. See the 2026-08-27 (later) entry and trap X14.
 > The retries are no longer untested by real hardware; the release path they depend on is now
 > best-effort and pinned by `test_the_release_path_survives_a_failing_empty_cache`.
 

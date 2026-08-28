@@ -11,6 +11,7 @@ Group-G-populated conditioning vector, so the spontaneous-only branching did not
 
 Run:  python tests/test_user_sbi.py      (or under pytest)
 """
+import ast
 import io
 import math
 import os
@@ -2631,16 +2632,40 @@ def test_the_graph_cache_is_not_hung_off_the_solver_class():
     assert len(_sd._GRAPH_CACHE) <= _cfg.SOLVER_GRAPH_CACHE_MAX, "graph cache exceeded its bound"
 
 
+def _strip_docstrings(tree):
+    """Remove every docstring from a parsed tree, in place, and return it.
+
+    ⚠ ``ast.unparse`` DROPS COMMENTS BUT KEEPS DOCSTRINGS -- they are real string expressions in the
+    AST, not trivia. An earlier version of _unparsed claimed otherwise, and the claim went unnoticed
+    because the checks that used it happened to forbid strings that appeared only in comments. It
+    stopped being harmless the moment a check forbade `mem_get_info` in a function whose DOCSTRING
+    explains why it does not use mem_get_info: the assertion matched the prose, exactly the
+    false positive the parse was supposed to prevent (the same shape as the _local_map lesson).
+    """
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and isinstance(body, list) and body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body.pop(0)
+            if not body:
+                body.append(ast.Pass())
+    return ast.fix_missing_locations(tree)
+
+
 def _unparsed(obj) -> str:
-    """``ast.unparse(ast.parse(source))`` for a function/method -- source with comments REMOVED.
+    """Source for a function/method with comments AND docstrings removed -- the executable code only.
 
     IF YOU ASSERT ON SOURCE TEXT, PARSE IT FIRST. A check that "_local_map no longer hardcodes the
     CPU" failed on its first run against the very COMMENT that documents the fix, because the comment
     necessarily contains the string it forbids. The same false positive had already cost time once on
-    the TSNPE runner check. ast.unparse drops comments and docstrings by construction.
+    the TSNPE runner check, and a THIRD time on 2026-08-28 -- see _strip_docstrings for why
+    ast.unparse alone is not enough.
     """
-    import ast as _ast, inspect as _inspect, textwrap as _textwrap
-    return _ast.unparse(_ast.parse(_textwrap.dedent(_inspect.getsource(obj))))
+    import inspect as _inspect, textwrap as _textwrap
+    return ast.unparse(_strip_docstrings(ast.parse(_textwrap.dedent(_inspect.getsource(obj)))))
 
 
 def test_n_max_and_step_are_no_longer_hidden_inside_gen_prior():
@@ -3051,7 +3076,13 @@ def test_the_batch_retry_waits_releases_and_restores_the_rng():
     ):
         assert needle in src, f"batch retry: {needle!r} missing -- {why}"
     # The release must follow the notice, not precede it (the 2026-08-27 ordering bug).
-    assert src.index("Waiting") < src.index("_release_device_memory(device)\n                _cancellable_wait"), \
+    # ORDER, not adjacency: anything pinning these two as neighbours goes stale the moment
+    # a step is inserted between them -- round 2 moved the RNG restore ahead of the release
+    # and round 4 put the _we_are_the_holder branch before the wait. This line DID go stale,
+    # and took the whole suite down with it, because str.index raises ValueError rather than
+    # AssertionError and the runner below caught only the latter: the 26 tests after it never
+    # ran. Both halves of that are fixed.
+    assert src.index("Waiting") < src.index("_release_device_memory(device)"), \
         "the batch-retry notice must be printed BEFORE the release that may itself fail"
 
 
@@ -3077,6 +3108,17 @@ def test_short_err_survives_an_empty_message():
     assert pipeline_mod._short_err(RuntimeError("boom")) == "RuntimeError: boom"
     assert pipeline_mod._short_err(RuntimeError("first\nsecond")) == "RuntimeError: first"
     assert pipeline_mod._short_err(RuntimeError("x" * 500), 10) == "RuntimeError: xxxxxxxxxx"
+    # ⚠ AND IT MUST BE TOTAL, because it is called from inside the `except` clause of every guard in
+    # the module -- _release_device_memory._try, _try_rng_snapshot, _try_rng_restore, _log_memory.
+    # If _short_err can raise, all of them can, and the whole best-effort layer is a fiction. An
+    # exception whose __str__ raises is the case that would do it.
+    class _Nasty(RuntimeError):
+        def __str__(self):
+            raise ValueError("this exception's __str__ is broken")
+
+    assert pipeline_mod._short_err(_Nasty()) == "_Nasty", (
+        "_short_err must never raise -- it is the terminal primitive every other guard calls")
+
     # And the guard that uses it must survive an exception with no message at all.
     saved = torch.cuda.empty_cache
     try:
@@ -3237,6 +3279,147 @@ def test_the_planner_budget_survives_an_unreadable_card():
     assert got == (1 * 1024 ** 3) // 4, f"expected the conservative fallback budget, got {got}"
 
 
+def _gmm_from(means, weights):
+    """A real MixtureSameFamily over the given means/weights -- what _gmm_fingerprint digests."""
+    k, d = means.shape
+    return torch.distributions.MixtureSameFamily(
+        torch.distributions.Categorical(probs=weights),
+        torch.distributions.MultivariateNormal(
+            means, covariance_matrix=torch.eye(d, dtype=means.dtype).expand(k, d, d)))
+
+
+def test_saving_a_prior_cannot_orphan_a_checkpoint():
+    """⚠ THIS IS HOW 3989 BATCHES (6.5 h) WERE LOST ON 2026-08-28.
+
+    A checkpoint's directory is named after a digest of the prior's fitted GMM, so the prior FILE is
+    the only thing that can reproduce it. `prior_08282026.pt` was overwritten, under the same name,
+    with a different distribution -- and the run that had been training against the old contents all
+    morning became unreachable. No error, no warning, one click. The same mechanism cost 884 batches
+    the day before, and `3d_master_08102026.pt` currently backs THREE 5000-batch checkpoints.
+
+    Narrow by construction: it fires only when the file exists, its contents would actually change,
+    AND a committed checkpoint depends on the old contents."""
+    import tempfile, hashlib
+    from pathlib import Path as _P
+    from core.SBI import training_checkpoint as tc
+
+    def fp_of(means, weights):
+        h = hashlib.sha256()
+        h.update(means.detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+        h.update(weights.detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+        return h.hexdigest()[:16]
+
+    torch.manual_seed(0)
+    # NORMALISED, because torch.distributions.Categorical normalises `probs` on construction: a file
+    # holding raw weights would fingerprint differently from the distribution rebuilt out of it, and
+    # the test would then "pass" by accident on a mismatch that production never sees (save_mix_dist
+    # writes `mixture_distribution.probs`, which is already normalised).
+    def _w(n):
+        w = torch.rand(n, dtype=torch.float64)
+        return w / w.sum()
+
+    m_old, w_old = torch.randn(4, 3, dtype=torch.float64), _w(4)
+    m_new, w_new = torch.randn(4, 3, dtype=torch.float64), _w(4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        priors, ckpts = _P(tmp) / "Priors", _P(tmp) / "Checkpoints"
+        priors.mkdir(); ckpts.mkdir()
+        # Build the distribution FIRST and save what it exposes, exactly as save_mix_dist does.
+        # Constructing a Categorical normalises `probs` again, so saving the raw weights would make
+        # the file and the rebuilt distribution differ in the last bits -- a mismatch production
+        # never has, which would make this test assert the wrong thing.
+        gmm_old = _gmm_from(m_old, w_old)
+        f_means = gmm_old.component_distribution.loc.detach().clone()
+        f_weights = gmm_old.mixture_distribution.probs.detach().clone()
+        torch.save({"means": f_means, "weights": f_weights}, priors / "p.pt")
+
+        ident = {"format": "training-rows", "n_runs": 10000,
+                 "prior_fingerprint": fp_of(f_means, f_weights)}
+        d = tc.resolve_dir(ident, ckpts); (d / "shards").mkdir(parents=True)
+        torch.save({"identity": ident}, d / "header.pt")
+        torch.save({"batches_done": 3989, "complete": False, "rng": None}, d / "state.pt")
+
+        saved_pp, saved_cp = orchestrator.PRIOR_PATH, config.CHECKPOINT_PATH
+        try:
+            orchestrator.PRIOR_PATH = priors
+            config.CHECKPOINT_PATH = ckpts
+
+            try:
+                orchestrator._refuse_to_orphan_a_checkpoint("p", _gmm_from(m_new, w_new))
+            except ValueError as e:
+                assert "3,989" in str(e), f"the message must name what would be lost: {e}"
+                assert "UNRESUMABLE" in str(e).upper(), f"and why it matters: {e}"
+            else:
+                raise AssertionError(
+                    "overwriting a prior that a 3989-batch checkpoint depends on must be refused")
+
+            # Re-saving the SAME distribution changes nothing, so it must go through.
+            orchestrator._refuse_to_orphan_a_checkpoint("p", gmm_old)
+            # A name nothing depends on must go through.
+            orchestrator._refuse_to_orphan_a_checkpoint("something_else", _gmm_from(m_new, w_new))
+            # And a prior no COMMITTED checkpoint uses must go through.
+            torch.save({"means": m_new, "weights": w_new}, priors / "unused.pt")
+            orchestrator._refuse_to_orphan_a_checkpoint("unused", gmm_old)
+        finally:
+            orchestrator.PRIOR_PATH, config.CHECKPOINT_PATH = saved_pp, saved_cp
+
+
+def test_the_retry_does_not_wait_when_THIS_process_holds_the_card():
+    """WAITING ONLY HELPS IF SOMEBODY ELSE HOLDS THE MEMORY.
+
+    The batch retry was written for the documented failure -- a card momentarily full of the
+    desktop's evictable surfaces -- where pausing is exactly right. It is exactly wrong when we are
+    the holder. On 2026-08-28 a run sat at batch 93 repeating "waiting for device memory" while
+    holding 15310 MB of a 16303 MB card, every other process on the machine accounting for ~270 MB
+    combined. It was waiting for itself, and no delay could ever have satisfied it."""
+    class _Dev:
+        type = "cuda"
+
+    saved = (torch.cuda.mem_get_info, torch.cuda.memory_reserved)
+    try:
+        total = 16303 * 2 ** 20
+        # The real numbers from the stuck run: we hold 15310 MB, everyone else ~270 MB.
+        torch.cuda.mem_get_info = lambda *a, **k: (373 * 2 ** 20, total)
+        torch.cuda.memory_reserved = lambda *a, **k: 15310 * 2 ** 20
+        assert pipeline_mod._we_are_the_holder(_Dev()) is True, (
+            "holding 15310 of 16303 MB must be recognised as us, so the retry stops waiting")
+
+        # And the case the wait WAS designed for: the desktop holds it, we hold almost nothing.
+        torch.cuda.memory_reserved = lambda *a, **k: 200 * 2 ** 20
+        torch.cuda.mem_get_info = lambda *a, **k: (300 * 2 ** 20, total)
+        assert pipeline_mod._we_are_the_holder(_Dev()) is False, (
+            "when another process holds the card, waiting is the right response and must happen")
+
+        # Unknowable => fall back to waiting rather than skipping it.
+        def _boom(*a, **k):
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        torch.cuda.mem_get_info = _boom
+        assert pipeline_mod._we_are_the_holder(_Dev()) is False
+    finally:
+        torch.cuda.mem_get_info, torch.cuda.memory_reserved = saved
+
+    # ...and the retry must actually consult it rather than always sleeping.
+    src = _unparsed(pipeline_mod.gen_training_data)
+    assert "_we_are_the_holder(device)" in src, "the retry must ask whose memory it is"
+    i_hold = src.find("_we_are_the_holder(device)")
+    i_wait = src.find("_cancellable_wait(_delay")
+    assert i_hold < i_wait, "the check must gate the wait, not follow it"
+
+
+def test_the_mem_line_is_printed_on_every_oom_and_its_cadence_is_overridable():
+    """Peak RESERVED against peak ALLOCATED is what separates 'this geometry is too big' from 'the
+    allocator is fragmented and cannot hand the memory back'. A line every 250 batches told us
+    nothing about a run that died at batch 93."""
+    import os as _os
+    src = _unparsed(pipeline_mod.gen_training_data)
+    assert "_log_memory(device, f'after OOM on " in src or "after OOM on" in src, (
+        "every OOM must emit a [mem] line -- that is the moment the numbers matter")
+    assert isinstance(pipeline_mod._MEM_LOG_EVERY, int) and pipeline_mod._MEM_LOG_EVERY >= 1
+    mod_src = _strip_docstrings(ast.parse(io.open(pipeline_mod.__file__, encoding="utf-8").read()))
+    assert "PRISM_MEM_LOG_EVERY" in ast.unparse(mod_src), (
+        "the cadence must be overridable for a diagnostic run without editing a tracked file")
+
+
 if __name__ == "__main__":
     failures = 0
     for test_name, fn in sorted(globals().items()):
@@ -3244,8 +3427,12 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"PASS  {test_name}")
-            except AssertionError as e:
+            # Exception, NOT AssertionError. A test that raises anything else -- a ValueError
+            # from a stale str.index, a CUDA error from a hostile card -- used to abort the
+            # ENTIRE run at that point, silently losing every test after it. That cost 26
+            # tests twice on 2026-08-28. A crash is a failure of THAT test, not of the suite.
+            except Exception as e:
                 failures += 1
-                print(f"FAIL  {test_name}\n      {e}")
+                print(f"FAIL  {test_name}\n      {type(e).__name__}: {e}")
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILURE(S)'}")
     raise SystemExit(1 if failures else 0)
