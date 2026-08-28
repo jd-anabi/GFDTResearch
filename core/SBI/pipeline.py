@@ -1574,9 +1574,10 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                     f"chi_k_fixed={chi_k_fixed} is outside 1..chi_k_pad={chi_k_pad}. A calibration "
                     f"stratum cannot ask for more probes than the network has slots, and 0 probes is "
                     f"an all-masked observation the experimental path refuses outright.")
-        # A DEDICATED generator for the probe draw. Never the global RNG: the chi block is surrounded
-        # by deliberate manual_seed() calls (trap X3's common-random-numbers), and a placement drawn
-        # from the global stream would be re-randomised -- or worse, frozen -- by them.
+        # A DEDICATED generator for the probe draw. Never the global RNG: common-random-number
+        # schemes (the Fisher, degeneracy_map) surround the chi block with deliberate manual_seed()
+        # calls, and a placement drawn from the global stream would be re-randomised -- or worse,
+        # frozen -- by them.
         chi_gen = torch.Generator(device="cpu")
         chi_gen.manual_seed(20260805)
 
@@ -1609,8 +1610,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             _ck_resumed = _tc.verify(_ck_dir, checkpoint["identity"], checkpoint.get("probe"))
             _start_k = int(_state["batches_done"])
             # The schedule and the initial conditions come from the header, never from a redraw.
-            # inits especially: it is drawn from NUMPY's RNG (trap X8), which nothing else here
-            # restores, so a redraw would quietly change the initial conditions mid-run.
+            # inits especially: it is drawn from NUMPY's RNG (which torch seeds do not touch), and
+            # nothing here restores that, so a redraw would quietly change the inits mid-run.
             batch_t_scales = _ck_resumed["batch_t_scales"]
             batch_Ts = _ck_resumed["batch_Ts"]
             inits = _ck_resumed["inits"].to(dtype=dtype, device=device)
@@ -1776,7 +1777,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
 
             # Recompute the latent to reflect the override; this is the training target.
             #
-            # NOTE on the "non-finite training targets" concern (handoff 7.1): on torch 2.9 this
+            # NOTE on the "non-finite training targets" concern: on torch 2.9 this
             # round-trip CANNOT produce +-inf. SigmoidTransform._inverse clamps its argument to
             # [tiny, 1-eps] internally, and sigmoid() saturates at 0.9999998807907104 rather than
             # exactly 1.0, so a theta on -- or even outside -- a box bound still inverts to a finite
@@ -1790,7 +1791,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             else:
                 curr_thetas_latent = curr_thetas_phys
 
-            # TIER 1 (section 11.5): the SIMULATOR runs at the DERIVED f_scale; the training
+            # TIER 1 (a box that declares T instead of f_scale): the SIMULATOR runs at the DERIVED
+            # f_scale; the training
             # TARGET keeps T. Applied after the latent is taken, and that order is the whole
             # point -- T is the inferred parameter, so the target must record T while the
             # simulation runs at the force scale T implies. Deriving first would train the flow
@@ -1981,9 +1983,10 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # THE DRIVE IS CHARGED AT ITS BUILD PEAK, NOT AT ITS RESULT SIZE. This term used to be a
             # bare `n_force_ch * n_fine_total`, i.e. the tensor the builder returns -- but building it
             # costs _FORCE_BUILD_PEAK_MULTIPLE times that, and in chi mode the builder runs again for
-            # every probe, inside the K loop, alongside x_spont_dim and idx_c. Section 8.2 named this
-            # 4x under-count as a plausible source of the unwrapped OOMs of trap X7, and this is the
-            # place it actually bites: `_per_row` is what _budget_note_oom charges the learned cap
+            # every probe, inside the K loop, alongside x_spont_dim and idx_c. That 4x under-count is
+            # a plausible source of the historical UNWRAPPED OOMs (a bare CUDA OOM outside
+            # SimulationError means the batch's own tensors, not the solver), and this is the place
+            # it actually bites: `_per_row` is what _budget_note_oom charges the learned cap
             # with, so under-counting here taught the cap a number smaller than what really failed.
             _seg = min(n_fine_total, CHUNK_LEN)
             _n_keep = max(0, n_fine_total - steady_idx)              # var_idx=0 on every path here
@@ -1998,7 +2001,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # size and the card is momentarily full of somebody ELSE's surfaces -- a browser opening
             # a video, a game launcher waking up, the compositor after an unlock. Under WDDM those
             # are evictable, so mem_get_info reported them to us as free and the driver then lost
-            # the eviction race (trap X6). Shrinking does not help; WAITING does.
+            # the eviction race. Shrinking does not help; WAITING does.
             #
             # THE RE-RUN REPRODUCES THE BATCH, which is worth having but is NOT a correctness gate
             # -- an earlier version of this comment claimed it was, and that was wrong. Restoring the
@@ -2254,35 +2257,21 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
              show_train_summary: bool = False,
              batch_size: int = 128, device: torch.device = torch.device('cpu')) -> DirectPosterior | tuple[DirectPosterior, dict]:
     """
-    Trains a neural posterior distribution using either Neural Posterior Estimation (NPE) or Sequential Neural Posterior
-    Estimation (SNPE), depending on the number of training runs specified. The method automates simulation-based
-    learning by generating synthetic data, training a density estimator, and refining a posterior iteratively if multiple
-    training runs are performed.
+    Generate training data and fit the NPE flow (SNPE when ``num_rounds > 1``).
 
-    :param training_params: A dictionary of parameters required to generate training data. These parameters are used as input
-        for the data generation function. Check @gen_training_data for details of the order of the parameters.
-    :param model: The type of neural density estimator to use, specified as a string. It determines the architecture of the
-        neural network approximating the posterior distribution.
-    :param prior: The prior distribution over parameters, given as a `torch.distributions.Distribution` object.
-    :param embedding_net: A neural network module that is used to compute embeddings of the data.
-    :param x_obs: Observed data given as a `torch.Tensor`. Required when performing SNPE (i.e., `num_runs > 1`). Defaults
-        to None.
-    :param theta_obs: Observed parameters given as a `torch.Tensor`. Required when returning diagnostics. Defaults to None.
-    :param num_rounds: The number of sequential training runs. If greater than 1, Sequential Neural Posterior Estimation (SNPE)
-        is performed. Defaults to 1.
-    :param return_diagnostics: Whether to return additional diagnostics such as loss values during training. Defaults to False.
-    :param fixed_dict: Dictionary of fixed parameters for the model. Defaults to None.
-    :param hidden_features: Hidden units per flow transform (density-estimator capacity).
-    :param num_transforms: Number of flow transforms / coupling layers (capacity).
-    :param num_bins: Spline bins per transform (NSF only).
-    :param learning_rate: Adam learning rate for training.
-    :param stop_after_epochs: Early-stopping patience in epochs.
-    :param max_num_epochs: Hard cap on the number of training epochs.
-    :param show_train_summary: If True, print sbi's per-epoch train/validation-loss summary.
-    :param batch_size: Batch size for training the density estimator during each run. Defaults to 128.
-    :param device: Device on which the computations should be performed (e.g., 'cpu' or 'cuda'). Defaults to 'cpu'.
-    :return: A `NeuralPosterior` object representing the trained posterior distribution. If 'return_diagnostics = True', return a tuple containing
-        the posterior and diagnostics.
+    :param training_params: the dict ``gen_training_data`` is driven from -- see that signature for
+        each key's meaning; the .get() defaults below are the compatibility story for older callers.
+    :param model: sbi density-estimator name (e.g. "nsf"); NOT the simulation model, which rides in
+        ``training_params["model"]``.
+    :param embedding_net: the conditioning net; ``owns_standardization`` decides z_score_x below.
+    :param x_obs: observed data, required for SNPE (``num_rounds > 1``).
+    :param theta_obs: ground-truth parameters, required only for ``return_diagnostics``.
+    :param hidden_features: hidden units per flow transform; ``num_transforms`` the coupling-layer
+        count; ``num_bins`` the spline bins (NSF only); ``learning_rate`` /
+        ``stop_after_epochs`` / ``max_num_epochs`` / ``batch_size`` sbi's fit-loop knobs;
+        ``show_train_summary`` prints sbi's per-epoch loss table.
+    :return: the trained ``DirectPosterior`` -- ``(posterior, diagnostics)`` when
+        ``return_diagnostics``.
     """
     if num_rounds > 1 and x_obs is None:
         raise ValueError("x_obs must be specified for SNPE algorithm")
@@ -2355,7 +2344,7 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
         # message naming the offending columns instead of as a silently poisoned multi-hour run.
         nan_mask = torch.isfinite(data).all(dim=1)
         theta_finite_mask = torch.isfinite(thetas).all(dim=1)
-        # WINSORISATION REPLACES THE OLD `abs(data) < 1e15` ROW FILTER (section 11.3 item 1.3), and
+        # WINSORISATION REPLACES THE OLD `abs(data) < 1e15` ROW FILTER, and
         # the change of instrument is the point. A row filter answers one bad channel by discarding
         # that row's other 113 good values, and at a 1e15 threshold it caught 10 rows in 10.24M while
         # A1_mean still reached -1.7e29 -- three decades of outlier sat under the threshold, and that
@@ -2385,8 +2374,9 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
         # gather: it allocates a SECOND full-size tensor while the first is still live, which at the
         # production shape is another 4.35 GiB and reinstates exactly the 8.7 GiB host peak
         # gen_training_data's preallocated accumulators were introduced to remove. The mask is
-        # all-true in practice (the box round-trip cannot produce a non-finite latent on torch 2.9 --
-        # trap X4), so this is behaviour-identical and is what makes that preallocation pay.
+        # all-true in practice (the box round-trip cannot produce a non-finite latent on torch 2.9;
+        # SigmoidTransform._inverse clamps internally), so this is behaviour-identical and is what
+        # makes that preallocation pay.
         if not bool(valid_idx.all()):
             thetas = thetas[valid_idx]
             data = data[valid_idx]
