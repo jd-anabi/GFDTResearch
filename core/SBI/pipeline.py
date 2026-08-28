@@ -96,26 +96,13 @@ _SIM_MEM_FRACTION = 0.85
 _MIN_SIM_CHUNK = 256
 
 # Peak device residency of forcing.build_nondim_force_tensor, as a multiple of the (batch, n_ch, T)
-# tensor it RETURNS. Section 8.2 flagged the planner as under-counting the drive and named 4x; this
-# is that number, written where the planner can use it.
-#
-# DERIVED BY COUNTING THE EAGER ALLOCATIONS on the "sin" path (core/forcing.py), each of which is a
-# full (batch, T) block -- call it R, the same size as the result:
-#     t_dim    = rescale(t_nd, ...)                      -> R, LIVE to the end
-#     sin_term = sin(2*pi*freq*t_dim + phase)            -> R, LIVE to the end
-#                (with a transient product/sum alongside while it is computed)
-#     f_x_nd   = (amp*carrier + offset - f_offset)/f_scale
-#                four elementwise ops, each allocating R and freeing the previous one
-# so the high-water mark is t_dim + sin_term + two elementwise temporaries = 4R. The returned
-# `unsqueeze(1)` is a view and costs nothing.
-#
-# MEASURED 4.10x on the 5070 Ti (2026-08-27, B=64/T=20000, max_memory_allocated around the call),
-# against the 4x derived above and section 8.2's independently-recorded "2.16 GiB result with an
-# 8.64 GiB transient". The 0.10 is the handful of (batch, 1) parameter columns, which do not scale
-# with T and are negligible at the production geometry -- so 4 is charged, not 5: the elementwise
-# blocks are what the planner needs to see, and over-charging would split batches that fit.
-# tests/test_user_sbi.py re-measures it on any box with CUDA and fails if a rewrite of the builder
-# changes the shape of this count.
+# tensor it RETURNS. Derived by counting the eager allocations on the "sin" path (core/forcing.py):
+# t_dim and sin_term stay live to the end and the four elementwise ops each hold one result-sized
+# transient, so the high-water mark is 4R (the returned unsqueeze(1) is a view). MEASURED 4.10x on
+# the 5070 Ti (2026-08-27, B=64/T=20000, max_memory_allocated around the call; independently a
+# 2.16 GiB result was seen with an 8.64 GiB transient). The 0.10 is (batch, 1) parameter columns
+# that do not scale with T, so 4 is charged, not 5 -- over-charging would split batches that fit.
+# tests/test_user_sbi.py re-measures this on any box with CUDA.
 _FORCE_BUILD_PEAK_MULTIPLE = 4
 
 
@@ -172,19 +159,13 @@ def _budget_note_ok(*, batch_level: bool = False) -> None:
     call to _max_sim_batch, so it can never climb past what the (optimistic) reading allows anyway --
     the cap only ever makes the plan MORE conservative than that reading, never less.
 
-    THE UNIT IS THE TRAINING BATCH, NOT THE gen_obs CALL, and getting that wrong silently disabled
-    the throttle. _BUDGET_RECOVER_AFTER is 32 and every description of it -- here, in the block
-    comment above, and in the handoff -- says "32 clean BATCHES". But gen_obs is what calls this, and
-    a chi batch makes 1 + K of them: one spontaneous run plus one per probe in gen_chi_raw's loop. At
-    the production K that is ~7-12 calls per batch, so the cap probed upward every ~3 batches
-    instead of every 32 -- an 0.8x backoff fully unwound in three batches and climbing from there.
-    The throttle never held, which is why a busy card produced repeated OOMs rather than settling
-    into a slower but surviving steady state.
-
-    So: inside gen_training_data (``_BATCH_TAG`` non-empty) only the batch-level call counts, and
-    gen_training_data makes exactly one per completed batch. Outside it -- the PPC, decorrelate, the
-    prior sweeps -- ``_BATCH_TAG`` is "" and every call still counts, which is both the historical
-    behaviour and the right one there, since those callers have no batch to speak of.
+    THE UNIT IS THE TRAINING BATCH, NOT THE gen_obs CALL: a chi batch makes 1 + K gen_obs calls
+    (spontaneous plus one per probe), so counting calls probed the cap upward every ~3 batches
+    instead of every _BUDGET_RECOVER_AFTER=32 -- the 0.8x backoff unwound in three batches and the
+    throttle never held, which is why a busy card produced repeated OOMs instead of settling into a
+    slower surviving state. Hence: inside gen_training_data (``_BATCH_TAG`` non-empty) only the
+    batch-level call counts, one per completed batch. Outside it (the PPC, decorrelate, the prior
+    sweeps) ``_BATCH_TAG`` is "" and every call counts -- those callers have no batch to speak of.
     """
     global _BUDGET_CAP_ELEMENTS, _budget_clean_runs
     if _BATCH_TAG and not batch_level:
@@ -198,17 +179,12 @@ def _budget_note_ok(*, batch_level: bool = False) -> None:
 
 
 # ── Where are we? ─────────────────────────────────────────────────────────────────────────────────
-# A training round is thousands of batches over hours, and its warnings and failures are one line
-# each in a log the GUI shows WITHOUT the traceback (Worker.run keeps that for the error dialog). The
-# 2026-08-11 chi retrain died with a bare "CUDA error: out of memory" and the only clue to where was
-# that the preceding line happened to be gen_chi_block's mask warning -- which narrowed it to "inside
-# the per-batch loop" and no further. One f-string per batch, microseconds against a ~20 s batch,
-# removes that entire class of forensics.
-#
-# A module global rather than a parameter because the consumers are gen_chi_block and the two OOM
-# retries, none of which has any business taking a batch index. Single-writer by construction (one
-# gen_training_data at a time in this process -- BasePanel._running is class-level for exactly that
-# reason), and the only consumer is a log string, so the worst a concurrent run could do is mislabel.
+# The GUI log shows warnings/failures without tracebacks, and the 2026-08-11 chi retrain died with a
+# bare "CUDA error: out of memory" that could not be placed beyond "inside the per-batch loop". One
+# f-string per batch (microseconds against a ~20 s batch) removes that class of forensics. A module
+# global rather than a parameter because the consumers (gen_chi_block, the OOM retries) have no
+# business taking a batch index; single-writer by construction (one gen_training_data at a time per
+# process), and the only consumer is a log string, so the worst a concurrent run could do is mislabel.
 _BATCH_TAG = ""
 
 
@@ -232,15 +208,11 @@ def _log_memory(device: torch.device, tag: str) -> None:
     the thing that trends upward before a card runs out.
 
     Reported-free is printed with its health warning attached: under WDDM other processes' evictable
-    surfaces count as free -- measured 15037 MiB against nvidia-smi's 5814 on this machine (trap X6).
+    surfaces count as free -- measured 15037 MiB against nvidia-smi's 5814 on this machine.
 
-    ⚠ A DIAGNOSTIC MUST NEVER BE ABLE TO KILL THE RUN, and this one could. All four device calls here
-    -- mem_get_info, max_memory_allocated, max_memory_reserved, reset_peak_memory_stats -- go to the
-    driver or the allocator and can raise on a starved card. This function is called on the SUCCESS
-    path (every _MEM_LOG_EVERY batches) but that is precisely the moment after a batch has clawed its
-    way through all three OOM ladders, i.e. when the card is at its most degraded. Losing a
-    multi-day run because a log line could not be formatted is not a trade anyone would make, so the
-    whole body is best-effort and a failure degrades to a one-line note.
+    ⚠ A DIAGNOSTIC MUST NEVER BE ABLE TO KILL THE RUN. All four device calls here can raise on a
+    starved card, and this runs on the success path right after a batch may have clawed through all
+    three OOM ladders -- the card at its most degraded. Best-effort; a failure degrades to a note.
     """
     if device.type != "cuda":
         return
@@ -362,7 +334,7 @@ def _free_gib_note(device: torch.device) -> str:
     that is already refusing allocations ``mem_get_info`` is itself a driver call that can fail, and
     it sits in the OOM notices -- i.e. on the one path where an extra exception is most expensive.
     The health warning rides along because the reading OVERSTATES free VRAM on Windows by roughly the
-    size of the desktop (trap X6: 15037 MiB reported against nvidia-smi's 5814 at the same instant).
+    size of the desktop (measured 15037 MiB reported against nvidia-smi's 5814 at the same instant).
     """
     if device.type != "cuda":
         return ""
@@ -377,19 +349,21 @@ def _release_device_memory(device: torch.device, *, plans: bool = True,
                            graphs: bool = True) -> None:
     """Hand back everything reclaimable on ``device``. BEST EFFORT: this function NEVER raises.
 
+    Called across module lines (orchestrator's PPC loop) and named as a literal needle by the
+    order-pinned retry tests in tests/test_user_sbi.py -- do not rename it.
+
     ``plans`` and ``graphs`` select the two resources that live OUTSIDE the caching allocator, and
     they default to on because the callers that matter are RECOVERY paths. Turn them off in a hot
     loop -- see "NOT EVERY CALLER WANTS ALL THREE" below.
 
-    WHY THE GUARD EXISTS, AND IT IS NOT DEFENSIVE PROGRAMMING. On 2026-08-27 the retrain died at
-    batch 351/5000 with a raw ``AcceleratorError: CUDA error: out of memory`` raised BY
-    ``torch.cuda.empty_cache()`` inside _rows_with_oom_retry -- i.e. the OOM was caught correctly and
-    the run was then killed by its own RECOVERY. Every caller here is already recovering and its next
-    act is to retry smaller; a release that cannot free anything is INFORMATION, not a reason to
-    abandon a multi-day run. Worse, because the release deliberately sits OUTSIDE the ``except``
-    block (see below), Python has already cleared the exception context by then -- so the secondary
-    failure arrives with ``__context__`` of None and the traceback contains NOTHING about the OOM
-    that started it. That is exactly the traceback the 2026-08-27 crash produced.
+    WHY THE GUARD EXISTS. On 2026-08-27 the retrain died at batch 351/5000 with a raw
+    ``AcceleratorError: CUDA error: out of memory`` raised BY ``torch.cuda.empty_cache()`` inside
+    _rows_with_oom_retry -- the OOM was caught correctly and the run was killed by its own recovery.
+    A release that cannot free anything is INFORMATION, not a reason to abandon a multi-day run.
+    And because the release sits OUTSIDE the ``except`` block (see below), Python has already
+    cleared the exception context -- the secondary failure arrives with ``__context__`` None and a
+    traceback saying nothing about the OOM that started it, which is the traceback that crash
+    produced.
 
     ``except Exception``, NEVER ``BaseException``: streams.WorkerCancelled derives from BaseException
     precisely so a cooperative cancel sails through handlers like this one to reach Worker.run.
@@ -544,14 +518,15 @@ def _try_rng_restore(tc, rng, device, chi_gen) -> bool:
     it re-draws SDE noise in smaller blocks. It does NOT desynchronise the checkpoint, because the
     checkpoint always stores the ACTUAL state at a batch boundary (the cadence write snapshots
     fresh, the rescue write uses that batch's own opening snapshot), and rows already on disk are
-    never regenerated. Trap X8 rules out seed-level reproducibility of this function anyway.
+    never regenerated. Seed-level reproducibility is out of reach here anyway: the inits come from
+    numpy's global RNG, which torch seeds do not touch.
 
     WHY IT MUST NOT RAISE. ``torch.cuda.set_rng_state_all`` copies each generator's state into
     device memory, so it is an ALLOCATION -- small, but an allocation. On 2026-08-28 the retrain
     died here at batch 3990/10000: the recovery block had just released every cached block and slept
     15 s on a contended card, so the few KB this needs was the one request the driver could not
-    serve. Dying in the recovery step of a mechanism whose entire purpose is not to die is the
-    second instance of trap X14.
+    serve -- the second time a recovery step killed the run it was rescuing (the first was
+    empty_cache itself, 2026-08-27).
     """
     if not rng:
         return False
@@ -629,8 +604,8 @@ def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
     free (optimistic). The LEARNED cap says what has actually failed (reactive -- it can only know
     after something died). The CEILING says what the OPERATOR knows in advance: on a day the desktop
     will be busy, it makes the planner split from batch 0 rather than discover the ceiling hours in.
-    Read live off the module, never imported, so it can be set per run without tripping trap X12's
-    snapshot-at-import problem.
+    Read live off the module, never imported: ``from .config import NAME`` binds at import, so an
+    importer would never see a per-run assignment to config.SIM_VRAM_CEILING_GIB.
 
     ⚠ THE CEILING NEEDS HEADROOM TO CAP TO, and it is not a substitute for freeing VRAM. On a card
     with 115 MiB actually free it changes nothing: _max_sim_batch finds that not even a floor-sized
@@ -699,37 +674,22 @@ def gen_obs(model: str, params: torch.Tensor, t: torch.Tensor, inits: torch.Tens
             batch_size: int = 1, var_idx: int | None = None,
             dtype: torch.dtype = torch.float32, device: torch.device = torch.device("cpu")):
     """
-    Generates observations based on specified simulation type, parameters, and other input data.
+    Simulate one batch of observations, splitting it whenever the geometry would not fit on device.
 
-    This function initializes a simulator based on the chosen simulation type and configuration. It
-    validates the batch size of input tensors and ensures that the simulation type is supported.
-    The specified simulator is used to simulate observations, and the processed observation data
-    is returned.
-
-    :param model: The type of model to use. Must be one of ["bp", "nadrowski", "hopf"].
-    :param params: Tensor containing simulation parameters. The first dimension must match the given batch size.
-    :param t: Tensor specifying the time points for the simulation. Its data type and device are set during processing.
-    :param inits: Tensor containing initial conditions for the simulation. The first dimension must match the batch size.
-    :param force: Tensor specifying the forces acting during the simulation.
-    :param n_segs: The number of segments in the simulation. Used for configuration of the simulator.
-    :param steady_idx: The index representing steady-state time points for slicing simulation results.
-    :param fixed_dict: Dictionary of fixed parameters for the model.
-    :param state_dep_drift: Whether to use state-dependent drift for the simulator.
-    :param batch_size: Number of simulation batches to process. Default is 1.
-    :param var_idx: If given, copy out ONLY this state variable, returning shape (1, batch, steady
-        time points) instead of (n_vars, ...). Pure memory: the solution buffer is n_vars deep and
-        the copy below has to coexist with it, so at the training batch size cloning all channels
-        for a caller that only ever reads ``[0, :, :]`` doubles the peak of the largest allocation
-        in the pipeline. Leading dim is kept so ``[0, :, :]`` indexes the same variable either way.
-        Default None preserves the full multi-variable contract.
-    :param dtype: Data type of tensors during processing. Default is `torch.float32`.
-    :param device: The device on which simulations are run, such as "cpu" or "cuda". Default is "cpu".
-
-    :return: Tensor containing simulated observations after processing using the selected simulator. Shape: (number of variables, batch size, steady state time points), or (1, batch, ...) when ``var_idx`` is given.
-    :rtype: torch.Tensor
-
-    :raises ValueError: If the batch size of input tensors does not match the first dimension of the parameters tensor or initial conditions tensor.
-    :raises ValueError: If the specified model is not supported.
+    :param model: built-in model name (one of VALID_SIMS) or a registered user model.
+    :param params: (batch, n_params) simulation parameters.
+    :param t: ND time grid; dtype/device are applied during processing.
+    :param inits: (batch, n_vars) initial conditions.
+    :param force: (batch, n_ch, T) drive tensor (or a broadcastable single-row drive).
+    :param n_segs: time segments the simulator integrates over.
+    :param steady_idx: transient cutoff; only points past it are returned.
+    :param var_idx: if given, copy out ONLY this state variable, returning (1, batch, steady points)
+        instead of (n_vars, ...). Pure memory: the solution buffer is n_vars deep and the copy has
+        to coexist with it, so at the training batch size cloning all channels for a caller that
+        only ever reads ``[0, :, :]`` doubles the peak of the largest allocation in the pipeline.
+        The leading dim is kept so ``[0, :, :]`` indexes the same variable either way.
+    :return: (n_vars, batch, steady points) observations -- (1, batch, ...) when ``var_idx`` is set.
+    :raises ValueError: batch-size mismatch against params/inits, or an unknown model.
     """
     if params.shape[0] != batch_size or inits.shape[0] != batch_size:
         raise ValueError(f"Batch size: {batch_size} cannot differ from dim 0 of parameters tensor or initial conditions tensor")
@@ -838,25 +798,15 @@ def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dic
                                        + (force.shape[1] if force.dim() > 2 else 1) * t.shape[0]
                                        + max(inits.shape[-1] * min(t.shape[0], CHUNK_LEN), n_keep)))
 
-    # EVERYTHING BELOW IS OUTSIDE THE HANDLER, AND THAT IS LOAD-BEARING. `err` owns a traceback, which
-    # owns the frames of the failed attempt, which own its tensors -- Simulator.simulate's entire
-    # (n_vars, batch, T) buffer among them, plus whatever the chained __cause__'s solver frames hold.
-    # Calling empty_cache() while `err` is still bound frees NOTHING, so the retry OOMs again at half
-    # the width and the whole mechanism reads as "the retry does not work". Python drops `err` at the
-    # end of the except clause; only then is a release worth asking for. Hence `note` is a STRING.
+    # Outside the except: while `err` is bound its traceback pins the failed attempt's tensors
+    # (the solver's whole (n_vars, batch, T) buffer among them), so releasing there frees nothing.
+    # Hence `note` is a STRING.
     half = batch_size // 2
-    # ANNOUNCED BEFORE THE RELEASE, AND THE ORDER IS THE FIX FOR A REAL FAILURE. The release is a
-    # device call that can itself raise on a starved card, and it runs outside the except clause --
-    # so Python has already cleared the exception context and a secondary failure would carry no
-    # trace of the OOM at all. Printing first puts the original on the record no matter what the
-    # recovery does. (2026-08-27: a run died exactly this way and `note` was never seen.)
-    #
-    # NOT SILENT, and on stderr rather than warnings.warn. This repo has no silent caps: a run that
-    # halves on a large fraction of its batches has its geometry or its card wrong, and the only way
-    # anyone learns that is if it says so EVERY time. warnings.warn cannot -- the default filter
-    # ("once per location") would collapse hundreds of events into one line, and parts of
-    # gen_training_data run under simplefilter("ignore"). stderr also lands in the GUI log as a
-    # WARNING row, which is the right weight for an event that costs 2x on this batch.
+    # Notice BEFORE release: the release can itself raise on a starved card, outside the except
+    # clause the exception context is already cleared, and on 2026-08-27 a run died exactly there
+    # with `note` never seen. Printed on stderr, not warnings.warn -- the "once per location" filter
+    # would collapse hundreds of events into one line, and parts of gen_training_data run under
+    # simplefilter("ignore"); stderr also lands in the GUI log as a WARNING row.
     print(f"{_batch_tag()}: OOM at simulation batch {batch_size}; retrying in chunks of "
           f"{half}{_free_gib_note(device)}. Original: {note}", file=sys.stderr, flush=True)
     _release_device_memory(device)
@@ -937,20 +887,11 @@ def _rows_with_oom_retry(fn, lo: int, hi: int, *, per_row_elements: int,
         # is the currency _max_sim_batch plans in -- so the next plan is wiser for the right reason.
         _budget_note_oom(n_rows * per_row_elements)
 
-    # OUTSIDE THE HANDLER, AND EVEN MORE LOAD-BEARING HERE THAN IN _gen_obs_retry. `err` owns a
-    # traceback owning every frame between here and the failure -- fn's own (force0, x_spont_dim),
-    # gen_chi_raw's (idx_c, this probe's force, the accumulating chis list), gen_obs' and the
-    # solver's. That is several GiB in the chi path at run_size=2048. Calling empty_cache() while
-    # `err` is still bound frees NONE of it, the retry OOMs again at half the width, and the whole
-    # mechanism reads as "the retry does not work". Python drops `err` at the end of the except
-    # clause; only then is a release worth asking for. Hence `note` is a STRING.
-    #
-    # THIS IS THE LINE THE 2026-08-27 RETRAIN DIED ON. The OOM was caught correctly and the run was
-    # then killed by `torch.cuda.empty_cache()` raising a raw AcceleratorError of its OWN -- carrying
-    # no exception chain, because the except clause above had already closed and Python had cleared
-    # the context. The release is now best-effort (_release_device_memory never raises) and the
-    # notice is printed BEFORE it, so the original failure is on the record whatever the recovery
-    # manages to free.
+    # Outside the except: while `err` is bound its traceback pins the whole failed chi path --
+    # several GiB at run_size=2048 -- so releasing there frees nothing; hence `note` is a STRING.
+    # This is where the 2026-08-27 retrain died: empty_cache() raised its own AcceleratorError with
+    # the context already cleared. The release is now best-effort and the notice prints BEFORE it,
+    # so the original failure is on the record whatever the recovery manages to free.
     half = n_rows // 2
     print(f"{_batch_tag()}: OOM with {n_rows} rows OUTSIDE the simulator retry; re-running this batch "
           f"in halves of {half}{_free_gib_note(device)}. Original: {note}", file=sys.stderr, flush=True)
@@ -1027,18 +968,20 @@ _PATHO_MAG = 1e15          # |x| beyond which a trajectory's features cannot be 
 def count_pathological(x: torch.Tensor, acc: dict) -> None:
     """Tally trajectories that are non-finite, exactly constant, or of overflow magnitude.
 
-    WHY THIS EXISTS (section 11.1). One population of pathological simulations was silently damaging
-    three unrelated things at once, and NOTHING in the pipeline counted them:
+    WHY THIS EXISTS. One population of pathological simulations was silently damaging three
+    unrelated things at once, and NOTHING in the pipeline counted them:
 
       * an EXACTLY CONSTANT trace makes `_group_d`'s `std.clamp(1e-12)` fire, so `z == 0`,
         `kurt == 0`, and D3_bimodality comes back as exactly 1/1e-12 -- a flatlined simulation, not
         an underflow;
       * a ~1e29-magnitude trace drags A1_mean's fitted std to 4.19e11, which is what made the
         channel invisible to the flow;
-      * divergent draws erased the posterior-predictive PSD band entirely (trap G7).
+      * divergent draws erased the posterior-predictive PSD band entirely (torch.quantile
+        propagates a single non-finite entry across the whole reduction, so one bad draw in a
+        thousand blanked the figure).
 
     Three cheap reductions over tensors that are already resident, so this is the cheapest item in
-    section 11 and should have existed from the start.
+    the conditioning-repair programme and should have existed from the start.
 
     Counted per SIMULATED trajectory, so an OOM retry that re-simulates a half-batch counts those
     rows twice -- the row denominator is accumulated the same way, so the FRACTION stays honest even
@@ -1071,36 +1014,23 @@ def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.T
               device: torch.device = torch.device('cpu'), stats_batch_size: int = 256,
               spontaneous_only: bool = False) -> torch.Tensor:
     """
-    Generate statistical features from input data using the given parameters.
+    Compute the summary-statistics block, in sub-batches on ``device`` (GPU FFT throughput without
+    OOM on large inputs; each sub-batch result moves to CPU immediately).
 
-    Computes statistics in sub-batches on the target device to keep GPU FFT
-    performance while avoiding OOM on large datasets. Each sub-batch result
-    is moved to CPU immediately.
-
-    :param x_spont: Unforced (spontaneous) trajectories for Groups A-F, shape (B, n), on CPU.
-    :param x_forced: Forced (driven) trajectories for Group G, shape (B, n), on CPU.
-    :param dt: The time step resolution for the input data (scalar, cell time units).
-    :type dt: float
-    :param drive_amp: Per-sample drive amplitude (dimensional), scalar or (B,).
-    :param drive_freq: Per-sample drive frequency (dimensional), scalar or (B,).
-    :param drive_phase: Per-sample drive phase (dimensional), scalar or (B,).
-    :param band_halfwidth: Spectral band half-width in FFT bins (B7 / E2 harmonic powers). Default 2.
-    :param bp_lo: Envelope band-pass lower edge as a fraction of the centre frequency. Default 0.5.
-    :param bp_hi: Envelope band-pass upper edge as a fraction of the centre frequency. Default 1.5.
-    :param slow_env_frac: Slow-envelope low-pass cutoff as a fraction of f_peak. Default 0.15.
-    :param device: The device on which to compute statistics. Defaults to torch.device('cpu').
-    :type device: torch.device
-    :param stats_batch_size: Number of samples to process per sub-batch on GPU. Defaults to 256.
-    :type stats_batch_size: int
-    :param spontaneous_only: If True (a no-forcing model), skip the forced-response Group G and zero-pad
-        it to the full feature width. ``x_forced``/``drive_*`` may then be None -- the spontaneous run
-        is reused as the (unused) forced input. Keeps the output width == len(FEATURE_LABELS).
-
+    :param x_spont: unforced (spontaneous) trajectories for Groups A-F, shape (B, n), on CPU.
+    :param x_forced: forced (driven) trajectories for Group G, shape (B, n), on CPU.
+    :param dt: time-step resolution in cell time units, scalar or (B,) tensor.
+    :param drive_amp: per-sample drive amplitude (dimensional), scalar or (B,); likewise
+        ``drive_freq`` / ``drive_phase``.
+    :param band_halfwidth: spectral band half-width in FFT bins (B7 / E2 harmonic powers).
+    :param bp_lo: envelope band-pass lower edge as a fraction of the centre frequency; ``bp_hi``
+        the upper edge; ``slow_env_frac`` the slow-envelope low-pass cutoff as a fraction of f_peak.
+    :param spontaneous_only: if True (a no-forcing model), skip the forced-response Group G and
+        zero-pad it to the full feature width. ``x_forced``/``drive_*`` may then be None -- the
+        spontaneous run is reused as the (unused) forced input.
     :return: ``[features | valid flags]``, shape (batch, statistics.SUMMARY_WIDTH) -- the
-        len(FEATURE_LABELS) features followed by the len(VALID_FLAG_LABELS) binary companion
-        channels that say which of them are real measurements rather than substituted sentinels
-        (see statistics.derive_valid_flags).
-    :rtype: torch.Tensor
+        len(FEATURE_LABELS) features followed by the binary companion channels saying which are
+        real measurements rather than substituted sentinels (statistics.derive_valid_flags).
     """
     def _sub(v, s, e):
         if torch.is_tensor(v) and v.dim() > 0:
@@ -1151,8 +1081,10 @@ def gen_stats_features(*args, **kwargs) -> torch.Tensor:
     THE ONE NAME FOR "features, not conditioning", and every Jacobian in the project must use it.
     A diagnostic that standardises by a locally-measured `fnoise = max(std, 1e-9)` turns a BINARY
     channel into an amplifier the moment it steps between two operating points -- constant almost
-    everywhere (harmless) and then 1/1e-9 at the one place it moves. That is trap CHI12, and it is
-    the same defect C-9/C-10 removed `logcyc` for.
+    everywhere (harmless) and then 1/1e-9 at the one place it moves. The same defect class that
+    removed `logcyc` from the Fisher channel set (C-9/C-10): decide deliberately, for every channel
+    added to gen_stats, whether each caller is a conditioning vector (wants it) or a Jacobian
+    (does not); the tell is whether the result is cat-ed with log_T.
 
     It is also simply the right width: these callers index their results against FEATURE_LABELS, and
     the flags are not features -- they are a statement about the OBSERVATION, carrying no gradient in
@@ -1167,27 +1099,13 @@ def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_s
               min_cluster_size: int | None = None, min_samples: int | None = None,
               dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> torch.distributions.MixtureSameFamily:
     """
-    Generates a prior distribution based on the given model and parameters.
+    Construct the stability-screened GMM prior for ``model`` over ``prior_bounds``.
 
-    The function constructs a prior distribution using the specified model type
-    and parameters. It supports different models, including "BP", "Nadrowski",
-    and "Hopf". For any invalid model input, it raises a ValueError. The prior
-    generation process involves a series of calculations and iterations executed
-    without gradient computation.
-
-    :param model: Specifies the type of model to use for prior generation. Accepted
-                  values include "BP", "Nadrowski", and "Hopf".
-    :param t: A tensor representing the input time vector used in the prior
-              construction process.
-    :param global_batch_size: Global batch size to be considered during the prior
-                              generation.
-    :param local_batch_size: Local batch size to be used in the computation.
-    :param segs: Number of segmentation points for prior construction.
-    :param prior_bounds: A list of bounding values defining the range of the prior
-                         parameters.
-    :param state_dep_drift: Boolean flag indicating whether to include state-dependent drift in the prior.
-    :param num_iterations: Number of iterations to be performed in the process.
-                           Defaults to 25.
+    :param model: a built-in prior owner ("BP" / "NADROWSKI" / "HOPF") or an SBI-capable user model.
+    :param t: ND time grid the stability sweep integrates over.
+    :param global_batch_size: candidates per global sweep round; ``local_batch_size`` the local
+        flood-fill's batch; ``segs`` the integration segments; ``num_iterations`` the global rounds.
+    :param prior_bounds: per-parameter (lo, hi) list; its length is the parameter count.
     :param n_max: accepted parameter sets that STOP the local flood-fill; None reads
                   ``config.PRIOR_SWEEP_MAX_SETS``. This is the point cloud HDBSCAN clusters and the
                   GMM is fitted to, so it buys COVERAGE of the stable manifold, not precision.
@@ -1197,16 +1115,8 @@ def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_s
                  ``config.PRIOR_CLUSTER_MIN_SIZE``. Its label count IS the GMM's component count.
     :param min_samples: HDBSCAN's density conservatism; None reads
                  ``config.PRIOR_CLUSTER_MIN_SAMPLES``. Higher declares more points noise.
-    :param dtype: Data type to be used for tensor computations.
-                  Defaults to torch.float32.
-    :param device: Device on which the computation should run.
-                   Defaults to torch.device('cpu').
-
-    :return: A torch.distributions.MixtureSameFamily object representing the
-             constructed prior distribution.
-    :rtype: torch.distributions.MixtureSameFamily
-
-    :raises ValueError: If the specified model is not supported.
+    :return: the fitted ``torch.distributions.MixtureSameFamily``.
+    :raises ValueError: unknown model, or a user model that is Simulate-only.
     """
     from core import registry
     if registry.is_user_model(model):
@@ -1369,7 +1279,8 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         mults = mults.unsqueeze(0)                                      # (1, K) -> broadcast over B
     if adapt_placement and not absolute_freqs:
         # Per-ROW placement: one shared multiplier set cannot resolve across a prior spanning ~4
-        # decades of Omega_0 (trap CHI10 / handoff 4.3.4). Uses the FULL duration as the budget --
+        # decades of Omega_0 -- live-probe fraction goes 0% below 3 Hz to 98% above 30 Hz when the
+        # set is shared, and the driver is the row's own Omega_0. Uses the FULL duration as the budget --
         # duration_frac and the CHI_MAX_CYCLES ceiling below only ever SHORTEN the window, so a
         # multiplier chosen against the full length is the most permissive honest choice; the floor
         # check below still has the last word on the duration actually used.
@@ -1395,7 +1306,7 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         # It used to be one scalar keyed on the batch's FASTEST row, because lock_in_batched took a
         # scalar T_obs. That cost was real and measured: Omega_0 spans ~4 decades inside a training
         # batch, so keying on the fastest truncated the slow rows to a fraction of a cycle and masked
-        # them -- ~48 % of rows carried no live probe at all (handoff 4.3.4/4.3.5). lock_in_batched
+        # them -- ~48 % of rows carried no live probe at all. lock_in_batched
         # now takes an (B,) n_samples, so each row gets exactly the prefix its own frequency needs.
         # Rows whose full length is already under the ceiling are untouched.
         #
@@ -1555,7 +1466,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                          identity  the config fields a resume must match, checked field by field
                          probe     bijection_probe(theta_transform, P) -- catches a changed box
                          V         the rotation to store, so a resume can reuse it rather than
-                                   recompute it (trap X10: V is NOT reproducible across processes)
+                                   recompute it (V is NOT reproducible across processes: its
+                                   operating points come from the caller's unseeded global RNG)
                          every     batches between writes; None/absent => config.TRAINING_CHECKPOINT_EVERY
                          resume    "auto" (default) | "never" | "require"
     :param chi_k_fixed: hold the probe COUNT at this value instead of drawing it per batch, and skip
@@ -1572,8 +1484,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     :param chi_max_cycles: lock-in duration CEILING in drive cycles; None reads
                            ``config.CHI_MAX_CYCLES``. Bounds the ``duration_frac`` draw below --
                            without it the draw is a FRACTION of the recording, which does not bound
-                           cycles at all, so a long recording walks its probes past the
-                           reproducibility wall (config.CHI_MAX_CYCLES, trap CHI9).
+                           cycles at all, so a long recording walks its probes past the ~31-cycle
+                           reproducibility wall (see config.CHI_MAX_CYCLES for the measurement).
     :param nd_idx: ND parameter name -> column. Required only when the box declares ``T`` instead
                    of ``f_scale`` (tier-1 physical consistency, core/SBI/derived.py); ignored
                    otherwise, so every pre-tier-1 caller is unaffected.
