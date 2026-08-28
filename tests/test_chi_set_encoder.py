@@ -528,8 +528,12 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"PASS  {test_name}")
-            except AssertionError as e:
+            # Exception, NOT AssertionError. A test that raises anything else -- a ValueError
+            # from a stale str.index, a CUDA error from a hostile card -- used to abort the
+            # ENTIRE run at that point, silently losing every test after it. That cost 26
+            # tests twice on 2026-08-28. A crash is a failure of THAT test, not of the suite.
+            except Exception as e:
                 failures += 1
-                print(f"FAIL  {test_name}\n      {e}")
+                print(f"FAIL  {test_name}\n      {type(e).__name__}: {e}")
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILURE(S)'}")
     raise SystemExit(1 if failures else 0)
