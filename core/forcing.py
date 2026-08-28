@@ -204,3 +204,40 @@ def build_user_force_tensor(
                 zeros = torch.zeros((batch, n_t), dtype=t_nd.dtype, device=t_nd.device)
             rows.append(zeros)
     return torch.stack(rows, dim=1)
+
+
+def build_nondim_sin_force_tensor(
+    forcing_params: torch.Tensor,
+    t_nd: torch.Tensor,
+    rescale_params: torch.Tensor,
+    forcing_idx: dict,
+    rescale_idx: dict,
+) -> torch.Tensor:
+    """
+    Build a batch of non-dimensional sinusoidal force tensors.
+
+    Constructs F_dim(t_dim) = amp * sin(2pi * freq * t_dim + phase) + offset
+    in dimensional space, then nondimensionalizes via
+    F_nd = (F_dim - f_offset) / f_scale.
+
+    :param forcing_params: Forcing parameter values, shape (batch, n_forcing).
+    :param t_nd: Non-dimensional time vector, shape (T,).
+    :param rescale_params: Rescaling parameter values, shape (batch, n_rescale).
+    :param forcing_idx: Maps forcing param names to column indices in forcing_params,
+                        e.g. {"amp": 0, "freq": 1, "phase": 2, "offset": 3}. If "amp_y"
+                        is present, a second forcing channel is built sharing freq, phase,
+                        and offset with the x-channel but using its own amplitude.
+    :param rescale_idx: Maps rescale param names to column indices in rescale_params,
+                        e.g. {"t_scale": 3, "t_offset": 2, "f_scale": 7, "f_offset": 6}.
+                        If "f_scale" is absent (Hopf-style nondim), f_scale is derived
+                        as x_scale / t_scale and f_offset is taken as 0 — both follow
+                        algebraically from F_ND = F_dim / (l * omega_0) with l = x_scale
+                        and 1/omega_0 = t_scale.
+    :return: Non-dimensional force tensor, shape (batch, n_force_channels, T) where
+             n_force_channels = 2 if "amp_y" in forcing_idx else 1.
+    """
+    # The math now lives in core/forcing.py (shared with the new step/triangular/exponential kinds);
+    # kind="sin" is numerically identical to the original body here (pinned by a golden test).
+    return build_nondim_force_tensor(
+        forcing_params, t_nd, rescale_params, forcing_idx, rescale_idx, kind="sin")
+
