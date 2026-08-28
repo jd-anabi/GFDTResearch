@@ -17,8 +17,9 @@ Getting that wrong is silent: a Fisher built over the single-frequency feature s
 different experiment than the one being run, so V would decorrelate the wrong thing.
 
 No trained posterior is needed -- F comes from the simulator alone, so this generalizes to any
-model. V = I (REPARAM_ROTATE=False) recovers the plain pipeline exactly. Validated end-to-end by
-scripts/reparam_selftest.py (orthogonality, bijection round-trip, decorrelation).
+model. V = I (REPARAM_ROTATE=False) recovers the plain pipeline exactly. Orthogonality, the
+bijection round-trip and the rotation reuse are pinned by tests/test_user_sbi.py's Fisher tests,
+and scripts/smoke_train.py exercises the rotation end to end on the card.
 """
 import math
 

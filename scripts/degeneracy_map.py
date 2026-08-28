@@ -1,7 +1,7 @@
 """
 Step 4 (PRISM_HANDOFF.md, Appendix A): degeneracy / sloppiness map over ALL 16 inferred params.
 
-Generalizes scripts/diagnose_fmax.py Part B. At the cell-file ground truth it builds the
+Generalizes the archived diagnose_fmax.py Part B. At the cell-file ground truth it builds the
 standardized feature-Jacobian
 
     J[j, p] = d<feature_j> / d(param_p)  /  noise_std_j

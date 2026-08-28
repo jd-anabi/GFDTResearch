@@ -406,7 +406,7 @@ REPARAM_FISHER_POINTS = 8
 REPARAM_LOG_PARAMS = []   # ALL-LINEAR box (the keeper posterior_07012026's coordinate). Log-scaling
                           # f_scale (REPARAM_LOG_PARAMS=["f_scale"]) was TRIED as a fix for its mild
                           # linear-box SBC tilt (GT=10 at box-fraction 0.009 = flat sigmoid tail; see
-                          # scripts/diagnose_fscale.py), but the posterior trained under it was WORSE --
+                          # archive/scripts/diagnose_fscale.py), but the posterior trained under it was WORSE --
                           # bad TARP / expected-coverage and a worse f_scale SBC rank -- so it was
                           # discarded and this was reverted to []. Keep the DEGENERACY params
                           # (k, lam, x_scale, t_scale) LINEAR too (log OVER-MIXED those in posterior_6302026).

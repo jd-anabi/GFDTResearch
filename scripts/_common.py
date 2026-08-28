@@ -140,8 +140,8 @@ def script_cfg(cell: str | None = None, *, default_cell: str | None = None,
 
     :param cell:         an explicit cell path. WINS over the ``CELL`` env var -- so a script that
                          wants a different *default* must use ``default_cell``, not this. Passing a
-                         literal here is what made ``reparam_wiring_smoke`` unrunnable when its cell
-                         file was archived: ``CELL=`` could not override it.
+                         literal here is what made the since-archived ``reparam_wiring_smoke``
+                         unrunnable when its cell file was archived: ``CELL=`` could not override it.
     :param default_cell: the fallback when ``CELL`` is unset. For the forced-only diagnostics, see
                          :data:`FORCED_DEFAULT_CELL`.
     :param load_gt: inject the cell's ground-truth VALUES. Off for the handful of checks that only

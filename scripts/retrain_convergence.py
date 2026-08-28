@@ -115,7 +115,7 @@ sbi_prior = sbi_prior_wrapper.SBIPriorWrapper(latent_inferred_prior)
 forcing_dim = orchestrator.expected_forcing_dim(cfg)
 input_dim = statistics.SUMMARY_WIDTH + 1                # 41 stats + 8 valid flags + log(T)
 # ONE construction site, shared with build_posterior -- the sizing arithmetic used to be duplicated
-# here and in reparam_wiring_smoke, so a layout change had three places to be wrong in.
+# here and in the since-archived reparam_wiring_smoke, so a layout change had three places to be wrong in.
 embedded_net = orchestrator.build_embedding_net(cfg, input_dim, forcing_dim)
 
 training_params = {
