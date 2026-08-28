@@ -20,6 +20,13 @@ from ..widgets.anim import crossfade_tab
 
 
 class InferenceScreen(QWidget):
+    """The Parameter Inference section: six stage tabs over one shared SbiSession.
+
+    Drives the Config -> Prior -> Posterior -> Validate -> Infer -> TSNPE workflow and owns the
+    cross-tab gating (refresh_gates' setTabEnabled truth table, re-run after every stage). Persists
+    nothing itself -- each panel saves its own settings group.
+    """
+
     def __init__(self, title="Parameter Inference", parent=None):
         super().__init__(parent)
         self.session = SbiSession()
@@ -39,7 +46,7 @@ class InferenceScreen(QWidget):
         self.validate_panel = ValidatePanel(self)
         self.infer_panel = InferPanel(self)
         # TSNPE sits AFTER Infer, and the order is the workflow: a round needs an observation, and
-        # the Infer tab is what records one (section 11.6 guardrail 1).
+        # the Infer tab is what records one (an amortized posterior has none at save time).
         self.tsnpe_panel = TSNPEPanel(self)
         for label, panel in (("Config", self.config_panel), ("Prior", self.prior_panel),
                              ("Posterior", self.posterior_panel), ("Validate", self.validate_panel),

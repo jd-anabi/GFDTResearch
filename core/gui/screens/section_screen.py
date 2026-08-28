@@ -10,6 +10,11 @@ from ..widgets.anim import crossfade_tab
 
 
 class SectionScreen(QWidget):
+    """Generic section host: a heading over a tab widget of independent panels.
+
+    Drives nothing itself and persists nothing -- the panels it hosts own both.
+    """
+
     def __init__(self, title: str, tabs, parent=None):
         """`tabs` is a list of ``(label, panel)`` pairs, added left to right."""
         super().__init__(parent)

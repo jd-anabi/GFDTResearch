@@ -11,7 +11,7 @@ print() text inside core.
 So instead we snapshot the plot directory when a run starts and pick up whatever appears. That needs
 no core change at all, and -- the real payoff -- it shows figures INCREMENTALLY: the FDT sanity plot
 lands before the production sweep starts, and the S-sweep plot lands at the study's midpoint (which
-core/FDT/cross_validation.py:283 saves early precisely so a long run shows you something). It also
+core/FDT/cross_validation.py saves early precisely so a long run shows you something). It also
 still surfaces whatever a half-failed run managed to produce.
 
 Runs entirely on the GUI thread (a QTimer). The worker is never involved.

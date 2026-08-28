@@ -47,7 +47,7 @@ class SbiSession:
     diagnostics: Any = None         # training diagnostics dict (loss curve etc.)
     posterior_latent: Any = None    # raw latent DirectPosterior, for deferred save
     V: Any = None                   # decorrelating rotation, for the deferred .rot.pt sidecar
-    # ⚠ WHAT THE DEFERRED SAVE MUST NOT FORGET (section 11.6 guardrail 2). A TSNPE posterior is valid
+    # ⚠ WHAT THE DEFERRED SAVE MUST NOT FORGET. A TSNPE posterior is valid
     # only near the observation its region was drawn around. The GUI saves LATER, from a button, so
     # if the region does not travel with the posterior it will be written to disk marked
     # `amortized: True` -- indistinguishable from a real amortized artifact in the same picker, which

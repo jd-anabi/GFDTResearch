@@ -150,7 +150,7 @@ def frame_time_grid(t_now: float, m: int, dt_nd: float, dtype=torch.float32,
     """The ND time grid for one frame: ``m+1`` points spanning ``[t_now, t_now + m*dt_nd]``.
 
     The point count is load-bearing: ``sdeint.euler`` derives ``dt = (t1-t0)/(n-1)`` from ``linspace(t0,
-    t1, n)`` (sdeint.py:42-43), so ``m+1`` points make the Euler step exactly ``dt_nd``; and the grid's
+    t1, n)``, so ``m+1`` points make the Euler step exactly ``dt_nd``; and the grid's
     last point equals the next frame's ``t_now``, so state carried forward stays time-continuous.
     """
     return torch.linspace(t_now, t_now + m * dt_nd, m + 1, dtype=dtype, device=device)
@@ -222,7 +222,7 @@ def run_simulation_stream(cfg, t_obs_s: float, frame_steps: int = 2000, fps: flo
             else:
                 force_chunk = pipeline.build_nondim_sin_force_tensor(
                     plan.forcing_gt, t_chunk, plan.rescale_gt, plan.forcing_idx, plan.rescale_idx)
-            sim.sde.force = force_chunk                           # mirror simulator.py:58 (NOT sim.force=)
+            sim.sde.force = force_chunk    # bare set, mirroring Simulator's per-segment write (NOT sim.force=, which rebuilds the model)
             res = solver.euler(sim.sde, curr_inits,
                                (t_chunk[0].item(), t_chunk[-1].item()), m + 1,
                                state_dep_drift=plan.state_dep_drift)

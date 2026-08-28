@@ -63,9 +63,9 @@ _RATE = re.compile(r"(?P<n>\d+(?:\.\d+)?)(?P<unit>it/s|s/it)")
 # WHAT THIS IS FOR HAS CHANGED. It used to identify the bar whose rendered `it/s` was scraped for the
 # GUI's Solver Performance meter; that number now comes from core.progress.SOLVER, because a bar
 # shorter than its own mininterval never paints a rate (see progress_pane's module docstring). The
-# prefix survives purely to EXCLUDE this bar from the overall-bar election -- trap S3 -- and that use
+# prefix survives purely to EXCLUDE this bar from the overall-bar election, and that use
 # is if anything more load-bearing now: the election is by largest total, and the solver's is in the
-# tens of thousands.
+# tens of thousands, so it would win outright and sweep the bar 0->100% every second.
 _SOLVER_PREFIX = f"{SOLVER_BAR_DESC} (batch="
 
 
@@ -98,7 +98,7 @@ class RowState:
         It used to also mean "this is the row the Solver Performance meter reads". It no longer does:
         the meter differences core.progress.SOLVER instead, because scraping a rendered bar cannot
         work for a call shorter than that bar's mininterval. This predicate is now purely an
-        exclusion (trap S3).
+        exclusion from the overall-bar election.
         """
         return self.desc.startswith(_SOLVER_PREFIX)
 
@@ -121,7 +121,7 @@ def parse_rate(stats: str) -> float | None:
 
     KEPT ON PURPOSE even though the Solver Performance meter stopped reading it: parse_bar's contract
     is a FAITHFUL parse of a tqdm frame, this is one regex against a string already in hand, and the
-    s/it inversion is knowledge that cost a bug to learn (trap S4).
+    s/it inversion is knowledge that cost a bug to learn.
     """
     m = _RATE.search(stats)
     if not m:

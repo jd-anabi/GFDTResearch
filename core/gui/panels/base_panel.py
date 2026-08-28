@@ -331,7 +331,7 @@ class BasePanel(QWidget):
         saveState/restoreState rather than sizes(): restoreState works before the widget is shown or
         polished, which setSizes does not do reliably. The return value MUST be checked -- it is
         False when the stored state does not match the current child count, and silently ignoring
-        that is exactly the bug L9 describes for restoreGeometry.
+        that is the same class of bug as an unchecked restoreGeometry restoring a window off-screen.
         """
         from .. import settings as _settings
         qs = qs or _settings.settings()

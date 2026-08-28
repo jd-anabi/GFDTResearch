@@ -15,7 +15,7 @@ bar plus one caption. The whole live set is on the overall bar's TOOLTIP, one ho
 
     ⚠ THE CAPTION IS NOT DECORATION -- IT IS WHAT KEEPS THE LONGEST PHASE OF A RUN VISIBLE.
     sbi's neural-network training emits NO tqdm bar at all: it prints "\\r" + "Training neural
-    network. Epochs trained: N" (trap P7), which vt turns into an overwrite-mode row with pct=None.
+    network. Epochs trained: N", which vt turns into an overwrite-mode row with pct=None.
     During that phase -- hours of a multi-day build -- the only live rows are that status line and a
     degenerate total=1 bar. With no caption the pane would show an indeterminate bar and nothing
     else. Hence the fallback in _paint_caption: when nothing reports a percentage, show the deepest
@@ -34,7 +34,7 @@ It cannot be a bar in here: a posterior build constructs 10k-30k of those bars, 
     differenced here on the 100 ms tick. That is correct at any speed, including the next speedup.
 
     The solver bar still exists and is still found by `config.SOLVER_BAR_DESC` -- but only to EXCLUDE
-    it from the election that drives the overall bar (trap S3: its total is in the tens of thousands,
+    it from the election that drives the overall bar (its total is in the tens of thousands,
     so it would win every time and sweep the bar 0->100% every second).
 """
 import math
@@ -275,7 +275,7 @@ class ProgressPane(QWidget):
         """`snapshot` is the pump's full set of live rows (a tuple[RowState]), already sorted.
 
         The solver bar is dropped here and nowhere else: it is the one bar whose total (tens of
-        thousands) and depth would otherwise decide the overall bar (trap S3). Its rate does not come
+        thousands) and its largest-in-the-nest total would otherwise decide the overall bar. Its rate does not come
         from this snapshot -- see the module docstring.
         """
         self.heartbeat()
@@ -345,7 +345,8 @@ class ProgressPane(QWidget):
     def _retarget(self, rows) -> None:
         """Drive the overall bar from the non-degenerate bar with the LARGEST total.
 
-        `rows` EXCLUDES the solver bar, and must (trap S3).
+        `rows` EXCLUDES the solver bar, and must: its tens-of-thousands total would win the
+        largest-total election and sweep the overall bar 0->100% every second.
 
         Largest-total, not deepest and not outermost:
           * DEEPEST is what this used to do, and it is one config flip away from being wrong -- the

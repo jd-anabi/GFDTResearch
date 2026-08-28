@@ -106,7 +106,8 @@ HELP = {
     "fisher_points": "Operating points the Fisher is AVERAGED over. 1 is ground-truth-only, which "
                      "re-correlates away from it — averaging is what makes one LINEAR rotation "
                      "valid across the whole prior. ⚠ A resumed run reuses the checkpoint's stored "
-                     "V and ignores all three of these (trap X10).",
+                     "V and ignores all three of these: the rotation is not reproducible across "
+                     "processes, so a resume must reuse the stored one.",
     "flow_hidden": "Flow width: hidden units per spline transform. With a COMPLETE training "
                    "checkpoint on disk this can be re-tried without re-simulating (~46 h against "
                    "~57 h for a full run) — that is what the checkpoint is a cache for.",
@@ -118,7 +119,9 @@ HELP = {
     "cal_scales": "(t_scale, T) operating points those datasets are spread over. ⚠ This is "
                   "t_scale's EFFECTIVE SAMPLE SIZE, not a speed dial: lowering it is a DIFFERENT "
                   "measurement, not a faster one. 'SBC flat on all 13' is strong for 11 of them and "
-                  "materially weaker for t_scale, and this number is why (trap X5).",
+                  "materially weaker for t_scale, and this number is why: every row in a "
+                  "calibration batch shares that batch's t_scale, so their ranks are not "
+                  "independent samples of it.",
     "num_runs": "How many training BATCHES to simulate. Each batch is one Sobol (t_scale, T) "
                 "operating point that every row in it shares — so this is the data budget AND the "
                 "timescale/duration diversity of the training set, and it is what wall-clock scales "
@@ -309,9 +312,9 @@ def _run_experimental_inference_chi(cfg, posterior, spont_path, forced_pairs, T_
     of single-tone forced recordings, each locked in at THE FREQUENCY IT WAS ACTUALLY DRIVEN AT.
 
     ``forced_pairs`` is a list of ``(path, drive_frequency_Hz)``. It used to be a bare list of paths
-    whose frequencies were assumed to be ``chi.chi_multipliers_for(cfg)``, which is what backlog C-2
-    was about: the core has accepted per-probe frequencies at any count for some time, and the GUI
-    was the only thing still forcing a fixed grid on it."""
+    whose frequencies were assumed to be ``chi.chi_multipliers_for(cfg)``: the core has accepted
+    per-probe frequencies at any count for some time, and the GUI was the only thing still forcing
+    a fixed grid on it."""
     x_spont = file_manager.load_experimental_data(spont_path, dtype=cfg.hw.dtype)
     x_forced = [(file_manager.load_experimental_data(p, dtype=cfg.hw.dtype), float(f))
                 for p, f in forced_pairs]
@@ -445,7 +448,7 @@ class ConfigPanel(_StagePanel):
 
         ASSIGNING THE CONSTANT IS ENOUGH HERE, and that is not true of the sweep and flow knobs
         beside it. Those had to become ARGUMENTS because `orchestrator` does `from .config import ...`
-        and binds them at import, so assigning to the constant is a silent no-op (trap X12). This one
+        and binds them at import, so assigning to the constant is a silent no-op. This one
         is read LIVE -- `pipeline.vram_ceiling_gib()` does a `getattr` on the module every time the
         planner asks -- so a plain assignment reaches every stage that simulates, with no plumbing.
 
@@ -913,7 +916,7 @@ def _nvidia_smi_free_gib() -> "float | None":
 
     ⚠ DELIBERATELY NOT ``torch.cuda.mem_get_info``. That reading overstates free VRAM on Windows by
     roughly the size of the desktop -- measured 15037 MiB against nvidia-smi's 5814 at the same
-    instant (trap X6) -- and it is the number that green-lit the batch which killed the first chi
+    instant -- and it is the number that green-lit the batch which killed the first chi
     retrain. Showing it next to a field whose whole purpose is to bound VRAM would be handing the
     user the exact lie the field exists to defend against.
     """
@@ -931,8 +934,8 @@ def _nvidia_smi_free_gib() -> "float | None":
 class _TrainingBudgetMixin:
     """Batches x rows-per-batch, and the three derived lines that say what it will cost.
 
-    EXTRACTED rather than duplicated when the TSNPE tab arrived (section 11.6 guardrail 6:
-    "each round is a simulation campaign, not a click"). A second copy of _budget_memory would
+    EXTRACTED rather than duplicated when the TSNPE tab arrived (each round is a simulation
+    campaign, not a click, so its cost belongs on screen). A second copy of _budget_memory would
     have been a second place for pipeline's cost model to be restated wrongly, and the whole
     point of that method is that it reads the planner's own numbers instead of restating them.
 
@@ -945,8 +948,8 @@ class _TrainingBudgetMixin:
 
         Word-wrapped and PlainText on purpose: these carry generated strings that can be long (a
         checkpoint directory name and the field it differs in), and an unwrapped label widens the
-        whole controls column -- defect L13, which is what put a permanent horizontal scrollbar on the
-        crossval panel.
+        whole controls column -- the same unwrapped-label defect that once put a permanent
+        horizontal scrollbar on the crossval panel.
         """
         lab = QLabel()
         lab.setWordWrap(True)
@@ -1035,7 +1038,7 @@ class _TrainingBudgetMixin:
     def _budget_checkpoint(self, cfg, width: int, n_runs: int) -> str:
         """THE GUARD THAT MAKES THESE TWO FIELDS SAFE TO EXPOSE AT ALL.
 
-        Both are inside the C-11 checkpoint identity, which is DIGESTED into the checkpoint's
+        Both are inside the training-checkpoint identity, which is DIGESTED into the checkpoint's
         directory name. Change either and a resumable multi-day run silently resolves to a different
         directory -- there is no error, just a run that starts from zero. A tooltip is not a strong
         enough guard for that, so the state is stated inline and re-evaluated as you type;
@@ -1431,7 +1434,7 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
         add_help_row(self.chi_form, "Passive", self.chi_spont, HELP["chi_passive"])
         add_help_row(self.chi_form, "T_obs (s)", self.chi_tobs, HELP["tobs"])
         add_help_row(self.chi_form, "Drive F₀ (N)", self.chi_f0_si, HELP["chi_f0_si"])
-        # The probe table (backlog C-2). Rows live in their OWN container rather than as form rows, so
+        # The probe table. Rows live in their OWN container rather than as form rows, so
         # adding and removing one is a local layout edit that cannot disturb the fields above it.
         self._chi_probe_host = QWidget()
         self._chi_probe_layout = QVBoxLayout(self._chi_probe_host)
@@ -1555,7 +1558,7 @@ class InferPanel(_StagePanel, _CellPreviewMixin):
         a bounds file, say) must not silently discard them. Contrast _rebuild_forcing_fields, whose
         rows ARE derivable from the config's forcing schema and so are rebuilt freely.
 
-        Count and placement are both free (handoff 3.6): the encoder is permutation-invariant and
+        Count and placement are both free: the encoder is permutation-invariant and
         carries each probe's frequency explicitly, so the table seeds a suggested number of rows and
         then gets out of the way. `cfg.chi_n_freqs` is a suggestion, NOT a requirement -- the core
         accepts 1..chi_k_pad probes at whatever frequencies the experiment achieved.
@@ -1770,12 +1773,12 @@ class TSNPEPanel(_TrainingBudgetMixin, _StagePanel):
     the flow against the proposal it was trained on, so nothing on the Validate tab would catch it.
     The rule lives in ``core/SBI/truncate.py`` and is pinned by ``tests/test_conditioning_repair.py``.
 
-    Gated on a posterior, the prior it was trained against, AND a persisted observation -- guardrail 1
-    of section 11.6. An amortized posterior has no observation at SAVE time (``default_x`` is None on
+    Gated on a posterior, the prior it was trained against, AND a persisted observation.
+    An amortized posterior has no observation at SAVE time (``default_x`` is None on
     posterior_08232026), so the Infer tab records one at INFERENCE time and this tab keys on that.
 
     The budget group is the Posterior tab's, through ``_TrainingBudgetMixin``: a round is a simulation
-    campaign, not a click, and the number belongs on screen before the button (guardrail 6).
+    campaign, not a click, and the number belongs on screen before the button.
 
     Persists (group "inference_tsnpe"): the observation, the HPD level, the direction count and the
     two budget fields.

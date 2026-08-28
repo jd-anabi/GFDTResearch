@@ -7,7 +7,7 @@ Two window types, one per figure source (see FigureStack):
     figure is UNPICKLED ON THE GUI THREAD and embedded in a live FigureCanvasQTAgg with matplotlib's
     navigation toolbar (zoom-rect / pan / home / save). This is the whole reason the sink ships the
     pickle: a figure BUILT on the worker thread must never be painted by a live canvas -- it deadlocks
-    on matplotlib's global lock (PRISM_HANDOFF.md trap G2). A figure UNPICKLED here is a fresh
+    on matplotlib's global lock -- a silent hang with no traceback. A figure UNPICKLED here is a fresh
     main-thread object, so painting it is safe.
 
   * ImageZoomWindow -- for figures we only have as a PNG on disk (FDT / Reduction / CrossVal, whose

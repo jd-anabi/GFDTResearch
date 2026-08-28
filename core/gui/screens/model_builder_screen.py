@@ -135,8 +135,8 @@ class _ParamRow(QWidget):
     """One parameter's ground-truth value, its SBI inference box, and that box's coordinate.
 
     TWO lines, deliberately: ``value | auto | min | max`` then ``box``. The first line already packs
-    3 fields + 4 labels + a checkbox and is called out in PRISM_HANDOFF 10.2 (L4) as the worst
-    offender in the app for splitting an already-narrow controls column N ways; a fifth control on it
+    3 fields + 4 labels + a checkbox -- the most crowded composite row in the app, the worst
+    offender for splitting an already-narrow controls column N ways; a fifth control on it
     would leave each field a few characters wide again. Both lines are ``LabeledFieldRow``, so the
     minimum widths and growth policy stay in the one place that owns them.
 
@@ -210,6 +210,13 @@ class _ParamRow(QWidget):
 
 
 class ModelBuilderScreen(QWidget):
+    """The user-model builder: equations, variables, parameters, forcing, validate + save.
+
+    Drives sympy compilation, a short on-thread smoke integration, and model_store persistence (the
+    Bounds/Cells/Units triple plus the registry JSON -- written triple-first, JSON last, since the
+    JSON is the commit point). Persists no QSettings of its own; a saved model IS the artifact.
+    """
+
     def __init__(self, on_saved=None, on_back=None, parent=None):
         """``on_saved(name)`` fires after a successful save (MainWindow refreshes the model combos);
         ``on_back()`` returns to the Settings screen."""

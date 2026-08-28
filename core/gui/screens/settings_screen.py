@@ -40,6 +40,13 @@ def _first_paragraph(doc: str) -> str:
 
 
 class SettingsScreen(QWidget):
+    """Settings + Help: appearance mode, accent/Inter toggles, user-model management, per-section help.
+
+    Drives the appearance callbacks it is constructed with; persistence of the chosen values is the
+    callbacks' job (app-level QSettings), not this widget's. The help viewer is assembled from each
+    panel module's docstring and HELP dict at build time.
+    """
+
     def __init__(self, on_mode, current_mode="system", parent=None, *,
                  on_open_builder=None, on_edit_model=None, on_delete_model=None,
                  on_system_accent=None, system_accent=False,
