@@ -1,5 +1,5 @@
 """
-Simulation-based Fisher eigenbasis for the decorrelating reparameterization (Track A).
+Simulation-based Fisher eigenbasis for the decorrelating reparameterization.
 
 V = eigenvectors of the latent Fisher F = J^T J, where J is the standardized feature-Jacobian
 w.r.t. the flow's latent coordinate z at the ground-truth operating point (perturb z -> T(z) ->
@@ -12,7 +12,9 @@ observation mode:
     forced       41 features (Group G populated by the drive response)
     chi          41 + 3K -- Groups A-F (Group G zeroed) plus the chi FISHER block, which is
                  CHI_FISHER_CHANNELS (log|chi|, cos, sin) per probe -- NOT the 6-channel
-                 conditioning block, and no longer the 4-channel set that included logcyc (C-9/C-10)
+                 conditioning block, and no longer the 4-channel set that included logcyc (every
+                 logcyc row was a duplicate of A3_log_fpeak or floor() quantization, never
+                 independent information)
 Getting that wrong is silent: a Fisher built over the single-frequency feature set describes a
 different experiment than the one being run, so V would decorrelate the wrong thing.
 
@@ -149,7 +151,8 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
         t_fine = cfg.t[:n_fine]
         n_segs = max(1, math.ceil(n_fine / CHUNK_LEN))
         rv = res.unsqueeze(0).expand(mm, -1).contiguous()
-        # TIER 1 (section 11.5): the Fisher must be built over the SIMULATED experiment, so the
+        # TIER 1 (a box that declares T instead of f_scale): the Fisher must be built over the
+        # SIMULATED experiment, so the
         # drive amplitude here has to be the derived f_scale rather than the temperature sitting
         # in its column. A no-op for a box that declares f_scale. Note the gradient is still taken
         # with respect to the INFERRED coordinates (T among them) -- feats() is differenced in
@@ -171,7 +174,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
             The flags are BINARY and near-constant across an ensemble at one operating point, which
             is precisely the shape `fnoise = max(std, 1e-9)` turns into an amplifier: a flag that
             happens to step between the +dz and -dz arms writes 1/1e-9 into J. That is the same
-            defect C-9/C-10 removed `logcyc` for, and the reason `mask` is absent from
+            defect that removed `logcyc` from the Fisher set, and the reason `mask` is absent from
             CHI_FISHER_CHANNELS -- see the chi branch below, which spells out why a NEARLY constant
             channel is lethal where an exactly constant one is free. The flags say which features
             are real, which is a statement about the OBSERVATION and carries no gradient in theta.
@@ -207,22 +210,25 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 #
                 # Note the asymmetry, because it is why this hid so well: the 11 Group-G columns are
                 # EXACTLY zero in chi mode and cost nothing (0/1e-9 = 0). It is the NEARLY constant
-                # channel that is lethal, not the constant one. See trap CHI10 and backlog C-9/C-10.
+                # channel that is lethal, not the constant one (measured: a ceiling-pinned logcyc
+                # row reached max|J| 2.0e4 against 289 for the largest real feature and owned the
+                # condition number at 56,000, alone).
                 zero = _forcing.zero_force(mm, n_force_ch, t_fine.shape[0], dtype, device)
                 torch.manual_seed(2)
                 xs_d = xsc * s(zero).double() + xof
                 spont = stats_no_flags(xs_d, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True).numpy()
-                # SEED AGAIN, right here. gen_chi_block runs K MORE simulations that are otherwise
+                # SEED AGAIN, right here. gen_chi_raw runs K MORE simulations that are otherwise
                 # completely unseeded, so the zp/zm arms of the central difference would see different
                 # chi noise and the derivative would be swamped -- a plausible-looking, meaningless V.
-                # Same trap as scripts/degeneracy_map.py (PRISM_HANDOFF trap X3).
+                # scripts/degeneracy_map.py carries the same seed-before-the-chi-block rule.
                 torch.manual_seed(3)
                 # resolution_filter=False is MANDATORY here. The filter depends on f_peak, which
                 # depends on theta, so a probe can CROSS the threshold between the +dz and -dz arms --
                 # a mask step of 1 divided by fnoise's 1e-9 floor puts ~1e9 into J, and V becomes that
                 # discontinuity rather than the Fisher geometry.
-                # All four named, none re-sliced: `[:N]` on this return is what produced trap CHI10.
+                # All four named, none re-sliced: a `[:2]` unpack of this return once bound u to
+                # logcyc's slot and contaminated every chi Jacobian for three commits.
                 chi_v, _u_v, _logcyc_v, _valid_v = pipeline.gen_chi_raw(
                     model=cfg.model, params_nd=nd, rescale=rv, x_spont_dim=xs_d.to(dtype),
                     t_fine=t_fine, inits=base_inits.expand(mm, -1).contiguous(),
@@ -240,7 +246,7 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
                 # neither used nor useful here: with the ceiling clear it is an exact duplicate of
                 # A3_log_fpeak (measured: four of six rows agreeing to 6 significant figures in a real
                 # rotation), and with the ceiling binding it is floor() quantization that a 1e-9-floored
-                # fnoise amplifies. C-9/C-10, trap CHI10.
+                # fnoise amplifies.
                 fisher_block = _chi.fisher_features(chi_v)
                 return np.concatenate([spont, fisher_block.double().cpu().numpy()], axis=1)
             if has_drive:
