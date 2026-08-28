@@ -1123,7 +1123,7 @@ def build_posterior(
     # chi-mode routes the padded probe SET through the EmbeddedNet's second pathway in place of the
     # single-frequency forcing block, as a permutation-invariant set encoder.
     forcing_dim = expected_forcing_dim(cfg)        # shared with the sidecar + the load-side mode guard
-    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    from .SBI.statistics import SUMMARY_WIDTH
     input_dim = SUMMARY_WIDTH + 1            # n_summary_stats + log(T); observation-independent
 
     embedded_net = build_embedding_net(cfg, input_dim, forcing_dim)
@@ -1331,7 +1331,7 @@ def build_embedding_net(cfg: SimConfig, input_dim: int = None, forcing_dim: int 
     (the set encoder's geometry is independent of the pad, or no two pads could share a checkpoint);
     everything else keeps the original forcing_dim-derived sizing byte-for-byte.
     """
-    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    from .SBI.statistics import SUMMARY_WIDTH
     input_dim = (SUMMARY_WIDTH + 1) if input_dim is None else input_dim
     forcing_dim = expected_forcing_dim(cfg) if forcing_dim is None else forcing_dim
     if cfg.chi_mode:
@@ -1427,7 +1427,7 @@ def _assert_mode_matches(cfg: SimConfig, posterior_latent, choice: str) -> None:
     want_mode, want_dim = cfg.observation_mode, expected_forcing_dim(cfg)
     if mode == want_mode and forcing_dim == want_dim:
         return
-    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    from .SBI.statistics import SUMMARY_WIDTH
     summary_w = SUMMARY_WIDTH + 1
     detail = f" (K={k})" if k else ""
     raise ValueError(
@@ -1467,7 +1467,7 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     # trained in. load_eval_bijection rebuilds the box from THIS list, not from the live config, so a
     # divergence here would be invisible until the posterior evaluated in the wrong coordinate.
     log_params_used = resolved_log_params(cfg, log_params=_log_params_for(cfg))
-    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    from .SBI.statistics import SUMMARY_WIDTH
     file_manager.atomic_torch_save({
         "V": V,
         # GUARDRAIL 2 (section 11.6). An amortized posterior serves any observation; a TRUNCATED one
@@ -1949,7 +1949,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     # Conditioning layout, so the zero-variance count can be split by origin rather than reported as
     # one number. See analysis.invalid_breakdown: most of a big "invalid" count is normally empty chi
     # probe slots, which is a fact about the run's K, not a defect.
-    from .SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH
+    from .SBI.statistics import SUMMARY_WIDTH
     ppc_layout = {"input_dim": SUMMARY_WIDTH + 1,
                   "chi_k_pad": cfg.chi_k_pad if cfg.chi_mode else None,
                   "chi_elem_w": config.CHI_ELEM_W if cfg.chi_mode else None,

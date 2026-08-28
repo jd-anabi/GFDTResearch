@@ -22,7 +22,7 @@ from core import config
 from core.config import CHUNK_LEN, N_ND_MAX
 from .Priors import bp_prior, hopf_prior, nadrowski_prior
 from core.Simulator import bp_simulator, nadrowski_simulator, hopf_simulator
-from core.SBI import statistics, chi, reparam, derived
+from core.SBI import statistics, chi, derived
 
 VALID_SIMS: dict = {"bp":        bp_simulator.BPSimulator,
                     "nadrowski": nadrowski_simulator.NadrowskiSimulator,

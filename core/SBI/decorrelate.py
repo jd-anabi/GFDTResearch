@@ -29,7 +29,6 @@ from core import forcing as _forcing
 from core.config import CHUNK_LEN, REPARAM_FISHER_M, REPARAM_FISHER_DZ, REPARAM_FISHER_POINTS
 from core.SBI import chi as _chi
 from core.SBI import pipeline
-from core.SBI import statistics
 from core.SBI import derived
 from core.SBI.reparam import build_inferred_bijection, fisher_eigenbasis
 

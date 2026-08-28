@@ -9,8 +9,6 @@ CONVENTION:
   - Only gen_prior.construct_prior and TransformedPosterior.sample apply T forward.
     Everywhere else that touches T uses T.inv.
 """
-from __future__ import annotations
-
 import warnings
 
 import torch
