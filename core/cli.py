@@ -512,7 +512,7 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         units_dict = file_manager.parse_units_file(str(units_override))
     else:
         units_dict = tuple(str(u) for u in units_override)
-    si_factors, s_to_cell = _units_to_factors(units_dict)
+    _, s_to_cell = _units_to_factors(units_dict)
 
     # convert experimental constants from seconds to cell-file time units (training T-range)
     return SimConfig(
@@ -524,7 +524,6 @@ def make_sim_config(model: str, labels: list[str], state_dep_drift: bool, bounds
         rescale_params=rescale_params,
         force_params_dict=force_params_dict,
         units_dict=units_dict,
-        si_factors=si_factors,
         # multi-frequency chi(omega) conditioning; explicit arg wins, else the live module value
         chi_mode=config.CHI_MODE if chi_mode is None else bool(chi_mode),
         chi_n_freqs=config.CHI_N_FREQS if chi_n_freqs is None else int(chi_n_freqs),
@@ -562,7 +561,7 @@ def make_fdt_config(model: str, state_dep_drift: bool, cell_file: str, *,
     """Build an FDTConfig (no prompts) from a model + cell file + FDT knobs. Shared by build_fdt_config
     (CLI) and the GUI's FDT form."""
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, si_factors, _) = _parse_cell(cell_file, model=model)
+     units_dict, _, _) = _parse_cell(cell_file, model=model)
     return FDTConfig(
         model=model,
         state_dep_drift=state_dep_drift,
@@ -571,7 +570,6 @@ def make_fdt_config(model: str, state_dep_drift: bool, cell_file: str, *,
         rescale_params=rescale_params,
         force_params_dict=force_params_dict,
         units_dict=units_dict,
-        si_factors=si_factors,
         n_freqs=n_freqs,
         ensemble_M=ensemble_M,
         freqs_per_batch=freqs_per_batch,
@@ -624,7 +622,7 @@ def make_reduction_config(cell_file: str, *, F0: float = 0.05) -> FDTConfig:
     """Build a reduction-map FDTConfig (no prompts) from a cell file. Model is fixed to NADROWSKI
     (the reduction is Nadrowski-specific). Shared by build_reduction_config (CLI) and the GUI form."""
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, si_factors, _) = _parse_cell(cell_file, model="NADROWSKI")
+     units_dict, _, _) = _parse_cell(cell_file, model="NADROWSKI")
     return FDTConfig(
         model="NADROWSKI",
         state_dep_drift=True,
@@ -633,7 +631,6 @@ def make_reduction_config(cell_file: str, *, F0: float = 0.05) -> FDTConfig:
         rescale_params=rescale_params,
         force_params_dict=force_params_dict,
         units_dict=units_dict,
-        si_factors=si_factors,
         F0=F0,
         hw=detect_device(),
     )
@@ -722,7 +719,7 @@ def make_param_sweep_config(cell_file: str, *, preset: dict, s_spec: tuple, t_sp
     (min, max, n_points). Model fixed to NADROWSKI. Shared by build_param_sweep_config (CLI) + the GUI."""
     import numpy as np  # local import — keep top-of-file lean
     (inits_dict, params_dict, rescale_params, force_params_dict,
-     units_dict, si_factors, _) = _parse_cell(cell_file, model="NADROWSKI")
+     units_dict, _, _) = _parse_cell(cell_file, model="NADROWSKI")
     s_grid = np.linspace(*s_spec)
     temp_grid = np.linspace(*t_spec)
     cfg = FDTConfig(
@@ -733,7 +730,6 @@ def make_param_sweep_config(cell_file: str, *, preset: dict, s_spec: tuple, t_sp
         rescale_params=rescale_params,
         force_params_dict=force_params_dict,
         units_dict=units_dict,
-        si_factors=si_factors,
         n_freqs=n_freqs,
         freq_bounds=preset["freq_bounds"],
         ensemble_M=ensemble_M,

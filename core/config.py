@@ -670,12 +670,10 @@ class SimConfig:
     rescale_params: OrderedDict # {name: (val, (lo, hi))}
     force_params_dict: OrderedDict # {name: (val, (lo, hi))}
     units_dict: tuple
-    # DEPRECATED and unread. si_factors is built by iterating units_dict, which is SET-derived and
-    # therefore has non-deterministic order, so it could never be safely indexed -- and nothing in the
-    # repo reads it. Kept only so the existing constructor calls (cli + 8 scripts) keep working; use
-    # get_unit_conversion_factor / freq_si_to_cell / the *_unit properties instead, which match by
-    # DIMENSION rather than position. Do not add new readers.
-    si_factors: list[float]
+    # si_factors was removed here: built by iterating SET-derived units_dict it had non-deterministic
+    # order, so it could never be safely indexed, and nothing ever read it. Unit conversions go
+    # through get_unit_conversion_factor / freq_si_to_cell / the *_unit properties, which match by
+    # DIMENSION rather than position.
 
     # Multi-frequency susceptibility mode: replace the single-frequency forced conditioning with a
     # K-frequency chi(omega) curve (see config.CHI_MODE). Threads like has_forcing; set at build time
@@ -1151,7 +1149,6 @@ class FDTConfig:
     rescale_params: OrderedDict       # {name: (val, (lo, hi))}
     force_params_dict: OrderedDict    # {name: (val, (lo, hi))}
     units_dict: tuple
-    si_factors: list[float]
 
     # FDT-specific knobs (sensible defaults; overrideable in build_fdt_config)
     n_freqs: int = 60
