@@ -1,5 +1,6 @@
 import contextlib
 import math
+import os
 import shutil
 import sys
 import time
@@ -230,17 +231,35 @@ def _log_memory(device: torch.device, tag: str) -> None:
 
     Reported-free is printed with its health warning attached: under WDDM other processes' evictable
     surfaces count as free -- measured 15037 MiB against nvidia-smi's 5814 on this machine (trap X6).
+
+    ⚠ A DIAGNOSTIC MUST NEVER BE ABLE TO KILL THE RUN, and this one could. All four device calls here
+    -- mem_get_info, max_memory_allocated, max_memory_reserved, reset_peak_memory_stats -- go to the
+    driver or the allocator and can raise on a starved card. This function is called on the SUCCESS
+    path (every _MEM_LOG_EVERY batches) but that is precisely the moment after a batch has clawed its
+    way through all three OOM ladders, i.e. when the card is at its most degraded. Losing a
+    multi-day run because a log line could not be formatted is not a trade anyone would make, so the
+    whole body is best-effort and a failure degrades to a one-line note.
     """
     if device.type != "cuda":
         return
-    free_b, total_b = torch.cuda.mem_get_info(device)
-    cap = ("none" if _BUDGET_CAP_ELEMENTS is None
-           else f"{_BUDGET_CAP_ELEMENTS * 4 / 2 ** 30:.2f} GiB")
-    print(f"[mem] {tag}: peak allocated {torch.cuda.max_memory_allocated(device) / 2 ** 30:.2f} GiB, "
-          f"peak reserved {torch.cuda.max_memory_reserved(device) / 2 ** 30:.2f} GiB, "
-          f"{free_b / 2 ** 30:.2f}/{total_b / 2 ** 30:.2f} GiB reported free (optimistic on Windows), "
-          f"learned cap {cap}", file=sys.stderr, flush=True)
-    torch.cuda.reset_peak_memory_stats(device)
+    try:
+        free_b, total_b = torch.cuda.mem_get_info(device)
+        cap = ("none" if _BUDGET_CAP_ELEMENTS is None
+               else f"{_BUDGET_CAP_ELEMENTS * 4 / 2 ** 30:.2f} GiB")
+        line = (f"[mem] {tag}: peak allocated "
+                f"{torch.cuda.max_memory_allocated(device) / 2 ** 30:.2f} GiB, peak reserved "
+                f"{torch.cuda.max_memory_reserved(device) / 2 ** 30:.2f} GiB, "
+                f"{free_b / 2 ** 30:.2f}/{total_b / 2 ** 30:.2f} GiB reported free "
+                f"(optimistic on Windows), learned cap {cap}")
+    except Exception as e:                   # noqa: BLE001 -- see the docstring
+        line = f"[mem] {tag}: memory statistics unavailable ({_short_err(e, 120)})"
+    print(line, file=sys.stderr, flush=True)
+    # Outside the try on purpose: if the reads above failed, the peak was never reported, so
+    # resetting it would discard the interval's high-water mark and the NEXT line would understate.
+    try:
+        torch.cuda.reset_peak_memory_stats(device)
+    except Exception:                        # noqa: BLE001
+        pass
 
 
 _ZSCORE_CHECK_MAX_ROWS = 200_000
@@ -409,8 +428,7 @@ def _release_device_memory(device: torch.device, *, plans: bool = True,
             fn()
         except Exception as e:               # noqa: BLE001 -- see the docstring
             print(f"{_batch_tag()}: {what} failed during recovery and was ignored "
-                  f"({type(e).__name__}: {str(e).splitlines()[0][:120]})",
-                  file=sys.stderr, flush=True)
+                  f"({_short_err(e, 120)})", file=sys.stderr, flush=True)
 
     _try(torch.cuda.empty_cache, "empty_cache()")
     if plans:
@@ -448,6 +466,67 @@ def _cancellable_wait(seconds: float, why: str) -> None:
                   file=sys.stderr, flush=True)
 
 
+def _short_err(err: BaseException, limit: int = 200) -> str:
+    """``"TypeName: first line of the message"``, safely, for a log line.
+
+    ``str(err).splitlines()[0]`` RAISES IndexError ON AN EMPTY MESSAGE, because "".splitlines() is
+    [] rather than [""]. That is not hypothetical here: _is_oom returns True on the TYPE test alone
+    (torch.OutOfMemoryError), so a zero-message OOM reaches the retry ladders' note lines -- where an
+    IndexError would REPLACE the out-of-memory with a confusing traceback from inside the handler,
+    and where _release_device_memory's own error path would violate its "never raises" contract.
+    """
+    text = str(err)
+    first = text.splitlines()[0] if text.splitlines() else ""
+    return f"{type(err).__name__}: {first[:limit]}" if first else type(err).__name__
+
+
+def _try_rng_snapshot(tc, device, chi_gen):
+    """``rng_snapshot`` that returns None instead of raising. See _try_rng_restore for why.
+
+    ``torch.cuda.get_rng_state_all()`` enters a device context and reads each generator's state, so
+    it is a driver call like any other and it fails like any other on a starved card -- and it runs
+    at the TOP OF EVERY BATCH. A run must not die because it could not record where its random
+    streams were.
+    """
+    try:
+        return tc.rng_snapshot(device, chi_gen)
+    except Exception as e:                   # noqa: BLE001
+        print(f"{_batch_tag()}: could not snapshot the RNG ({_short_err(e, 120)}); this batch has no "
+              f"restore point and will not be checkpointed until the next successful snapshot",
+              file=sys.stderr, flush=True)
+        return None
+
+
+def _try_rng_restore(tc, rng, device, chi_gen) -> bool:
+    """``rng_restore`` that reports failure instead of raising. Returns whether it restored.
+
+    WHY THIS IS SAFE TO SKIP, which is not what an earlier version of this comment claimed.
+    Restoring before a retry makes the re-run reproduce the batch exactly; NOT restoring makes it a
+    different but equally valid iid draw -- the same licence _rows_with_oom_retry already takes when
+    it re-draws SDE noise in smaller blocks. It does NOT desynchronise the checkpoint, because the
+    checkpoint always stores the ACTUAL state at a batch boundary (the cadence write snapshots
+    fresh, the rescue write uses that batch's own opening snapshot), and rows already on disk are
+    never regenerated. Trap X8 rules out seed-level reproducibility of this function anyway.
+
+    WHY IT MUST NOT RAISE. ``torch.cuda.set_rng_state_all`` copies each generator's state into
+    device memory, so it is an ALLOCATION -- small, but an allocation. On 2026-08-28 the retrain
+    died here at batch 3990/10000: the recovery block had just released every cached block and slept
+    15 s on a contended card, so the few KB this needs was the one request the driver could not
+    serve. Dying in the recovery step of a mechanism whose entire purpose is not to die is the
+    second instance of trap X13.
+    """
+    if not rng:
+        return False
+    try:
+        tc.rng_restore(rng, device, chi_gen)
+        return True
+    except Exception as e:                   # noqa: BLE001 -- see the docstring
+        print(f"{_batch_tag()}: could not restore the RNG before re-running ({_short_err(e, 120)}); "
+              f"the re-run proceeds with a fresh draw -- statistically equivalent, not bit-identical",
+              file=sys.stderr, flush=True)
+        return False
+
+
 def sim_keep_elements(n_fine: int, steady_idx: int, n_out: int) -> int:
     """Elements ONE simulated row keeps until gen_obs returns: the post-transient output copy."""
     return n_out * max(0, n_fine - steady_idx)
@@ -472,6 +551,24 @@ def peak_sim_elements(batch_size: int, n_fine: int, steady_idx: int, n_vars: int
             + max(n_vars * seg, sim_keep_elements(n_fine, steady_idx, n_out))) * batch_size
 
 
+VRAM_CEILING_ENV = "PRISM_VRAM_CEILING_GIB"
+
+
+def _vram_ceiling_gib() -> float:
+    """The hard per-batch VRAM ceiling in GiB: the env override if set, else the config constant.
+
+    0 means off. See sim_memory_budget_elements for what it does and does not buy.
+    """
+    raw = os.environ.get(VRAM_CEILING_ENV)
+    if raw is not None and raw.strip():
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"{VRAM_CEILING_ENV}={raw!r} is not a number; ignoring it and using "
+                  f"config.SIM_VRAM_CEILING_GIB instead", file=sys.stderr, flush=True)
+    return float(getattr(config, "SIM_VRAM_CEILING_GIB", 0.0) or 0.0)
+
+
 def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
     """The element budget `_max_sim_batch` actually plans against -- free-memory reading, the 0.85
     headroom fraction, and the LEARNED cap, all folded in.
@@ -484,13 +581,24 @@ def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
 
     THREE TERMS, AND EACH ANSWERS A DIFFERENT QUESTION. The reading says what the driver claims is
     free (optimistic). The LEARNED cap says what has actually failed (reactive -- it can only know
-    after something died). `config.SIM_VRAM_CEILING_GIB` says what the OPERATOR knows in advance:
-    on a day the desktop will be busy, it makes the planner split from batch 0 rather than discover
-    the ceiling hours in. Read live off the module, never imported, so it can be set per run without
-    tripping trap X12's snapshot-at-import problem.
+    after something died). The CEILING says what the OPERATOR knows in advance: on a day the desktop
+    will be busy, it makes the planner split from batch 0 rather than discover the ceiling hours in.
+    Read live off the module, never imported, so it can be set per run without tripping trap X12's
+    snapshot-at-import problem.
+
+    ⚠ THE CEILING NEEDS HEADROOM TO CAP TO, and it is not a substitute for freeing VRAM. On a card
+    with 115 MiB actually free it changes nothing: _max_sim_batch finds that not even a floor-sized
+    chunk fits alongside the result and runs the batch as asked. What it buys is stopping a run that
+    HAS headroom from silently spilling into WDDM's shared-memory pool, where a batch does not fail
+    -- it pages, at up to a 9x wall-clock penalty (measured 2026-08-27: 21.67 GiB completed on this
+    15.92 GiB card). Free the memory first, then set this to about (nvidia-smi free) - 1 GiB.
+
+    ``PRISM_VRAM_CEILING_GIB`` overrides the config constant, so a single run can be throttled
+    without editing a tracked file -- the same shape as PRISM_CHI_OVERRIDE. An unparsable value is
+    ignored with a note rather than crashing a multi-day run on a typo.
     """
     budget = min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION), _budget_cap())
-    ceiling_gib = float(getattr(config, "SIM_VRAM_CEILING_GIB", 0.0) or 0.0)
+    ceiling_gib = _vram_ceiling_gib()
     if ceiling_gib > 0:
         bytes_per_elem = 4 if dtype == torch.float32 else 8
         budget = min(budget, int(ceiling_gib * 2 ** 30) // bytes_per_elem)
@@ -678,7 +786,7 @@ def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dic
         # can lower the floor by rebinding it.
         if batch_size < 2 * _MIN_SIM_CHUNK or not _is_oom(err):
             raise                    # a real failure, or the floor: fail loudly, traceback intact
-        note = f"{type(err).__name__}: {str(err).splitlines()[0][:200]}"
+        note = _short_err(err)
         n_keep = (1 if var_idx is not None else inits.shape[-1]) * max(0, t.shape[0] - steady_idx)
         _budget_note_oom(batch_size * (inits.shape[-1] * t.shape[0]
                                        + (force.shape[1] if force.dim() > 2 else 1) * t.shape[0]
@@ -777,7 +885,7 @@ def _rows_with_oom_retry(fn, lo: int, hi: int, *, per_row_elements: int,
         # purpose) sailing through to Worker.run rather than becoming a retry storm on every cancel.
         if n_rows < 2 * _MIN_SIM_CHUNK or not _is_oom(err):
             raise                    # a real failure, or the floor: fail loudly, traceback intact
-        note = f"{type(err).__name__}: {str(err).splitlines()[0][:200]}"
+        note = _short_err(err)
         # Feed the learned budget even though this OOM may not have come from a simulator allocation.
         # It is still literally true that a block of this WIDTH at this GEOMETRY did not fit, and that
         # is the currency _max_sim_batch plans in -- so the next plan is wiser for the right reason.
@@ -1649,6 +1757,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     _patho = dict.fromkeys(("rows", "nonfinite", "constant", "overflow"), 0)
     _patho_seen = 0              # count already reported, so each line is NEW rows
     _pending_rng = None          # RNG as of the TOP of batch_k -- see the checkpoint write below
+    _pending_rng_at = -1         # ...and WHICH batch it describes; see the rescue write
     _ck_from = _start_k          # first batch not yet committed to disk
     batch_k = _start_k           # bound up front: the except handler reads it, and an exception
     try:                         # before the first iteration would otherwise raise NameError there
@@ -1665,7 +1774,14 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # a ~20 s batch. Snapshot-and-restore, never replay: the OOM retries redraw SDE noise, so
             # per-batch RNG consumption is a function of what the desktop was doing.
             if _ck_dir is not None:
-                _pending_rng = _tc.rng_snapshot(device, chi_gen)
+                # PAIRED WITH ITS BATCH INDEX, and set together. `batch_k` is bound by the `for`
+                # before this runs, so a snapshot that FAILS here would otherwise leave the previous
+                # batch's state sitting in `_pending_rng` while the rescue write records `batch_k` --
+                # committing rows [.., k) with a restore point describing the top of k-1, so a resume
+                # would restart batch k with the streams where k-1 began. Recording nothing is
+                # correct; recording the wrong thing is not.
+                _pending_rng = _try_rng_snapshot(_tc, device, chi_gen)
+                _pending_rng_at = batch_k
             # --- Batch-level scale and duration (unchanged) ---
             t_scale_k = batch_t_scales[batch_k].item()
             T_k = batch_Ts[batch_k].item()
@@ -1926,25 +2042,25 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # are evictable, so mem_get_info reported them to us as free and the driver then lost
             # the eviction race (trap X6). Shrinking does not help; WAITING does.
             #
-            # THE RE-RUN IS EXACT, and that is a correctness requirement rather than a nicety.
-            # Restoring the RNG puts every stream back where this call began, so the re-run consumes
-            # randomness identically and produces the batch that would have been produced. Without
-            # it the retry is silently a DIFFERENT batch -- still a valid draw, but no longer the
-            # batch the checkpoint's stored RNG describes, so a later resume would replay a different
-            # run than the rows on disk came from. A corruption no test catches and no log shows.
+            # THE RE-RUN REPRODUCES THE BATCH, which is worth having but is NOT a correctness gate
+            # -- an earlier version of this comment claimed it was, and that was wrong. Restoring the
+            # RNG makes the re-run consume randomness identically, so it produces the batch that
+            # would have been produced. Skipping it makes the re-run a DIFFERENT but equally valid
+            # iid draw, which is the same licence _rows_with_oom_retry already takes when it re-draws
+            # SDE noise in smaller blocks. It does not desynchronise the checkpoint: the checkpoint
+            # records the ACTUAL state at each batch boundary, and rows already on disk are never
+            # regenerated. So this is best-effort -- see _try_rng_restore.
             #
             # ⚠ IT IS *THIS* SNAPSHOT, NOT `_pending_rng`. `_pending_rng` is the state at the TOP of
             # the iteration -- before the theta draw, the chi multipliers and the durations -- which
             # is what a RESUME needs, because a resume re-runs all of those. The retry does not: the
             # thetas are already drawn and are reused as they stand, so restoring `_pending_rng` here
             # would rewind past draws the retry never repeats and feed `_rows` the noise the THETA
-            # draw should have consumed. The batch would then differ from the one an uninterrupted
-            # run produces, which is the exact defect this restore exists to prevent. Snapshot
-            # immediately before the call instead, and the retry reproduces that call exactly.
+            # draw should have consumed. Snapshot immediately before the call instead.
             #
             # A few KB of memcpy against a ~20 s batch, so it is taken unconditionally rather than
             # only when a retry is configured -- one code path, and no way for the two to disagree.
-            _rows_rng = _tc.rng_snapshot(device, chi_gen)
+            _rows_rng = _try_rng_snapshot(_tc, device, chi_gen)
             _attempts = int(getattr(config, "TRAINING_BATCH_RETRY_ATTEMPTS", 0) or 0)
             _delays = tuple(getattr(config, "TRAINING_BATCH_RETRY_DELAYS_S", ()) or (60.0,))
             for _attempt in range(_attempts + 1):
@@ -1959,7 +2075,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 except RuntimeError as _err:
                     if _attempt >= _attempts or not _is_oom(_err):
                         raise
-                    _note = f"{type(_err).__name__}: {str(_err).splitlines()[0][:200]}"
+                    _note = _short_err(_err)
                     _budget_note_oom(run_size * _per_row)
                 # OUTSIDE THE HANDLER, for the reason spelled out in _rows_with_oom_retry: while
                 # `_err` is bound its traceback owns every frame of the failed attempt and the
@@ -1969,9 +2085,23 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                       f"({_attempt + 1}/{_attempts + 1}){_free_gib_note(device)}. Waiting "
                       f"{_delay:.0f}s and re-running the whole batch. Original: {_note}",
                       file=sys.stderr, flush=True)
+                # ⚠ RESTORE FIRST, RELEASE SECOND, WAIT LAST. The order is the fix, not decoration.
+                #
+                # This block used to run release -> wait -> restore, and on 2026-08-28 that killed
+                # the run at batch 3990/10000. The release hands every cached block back to the
+                # driver; we then sleep for up to three minutes on a CONTENDED card, during which the
+                # desktop takes the memory; and the restore -- which needs only a few KB, but needs
+                # them on the device -- is left asking for a fresh cudaMalloc at the exact moment we
+                # have the weakest claim on the card. We donated our working set and then asked for
+                # it back.
+                #
+                # Restoring first inverts that. The failed attempt's tensors were dropped when the
+                # except clause closed, so the allocator is holding them as CACHED BLOCKS and a
+                # KB-sized request is served without touching the driver at all. Only then is it
+                # worth handing that cache back, and only then worth sleeping.
+                _try_rng_restore(_tc, _rows_rng, device, chi_gen)
                 _release_device_memory(device)
                 _cancellable_wait(_delay, "waiting for device memory before re-running this batch")
-                _tc.rng_restore(_rows_rng, device, chi_gen)
 
             # 6. Collect LATENT targets (not physical). OUTSIDE the retry on purpose: the targets are
             # computed before any simulation and are already at full width, so a retry neither
@@ -2024,17 +2154,35 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # Hence the write below uses the snapshot taken at the top of the following iteration; we
             # take a fresh one here for exactly that reason.
             if _ck_dir is not None and _ck_every and (batch_k + 1) % _ck_every == 0:
-                _tc.save(_ck_dir, from_batch=_ck_from, batch_k=batch_k + 1,
-                         rng=_tc.rng_snapshot(device, chi_gen),
-                         x_buf=x_buf, th_buf=th_buf, run_size=run_size)
-                _ck_from = batch_k + 1
+                # The snapshot is a driver call and can fail on a starved card. DEFER rather than
+                # die: the rows are already in x_buf, _ck_from is not advanced, and the next cadence
+                # boundary writes the whole span. The only cost is a longer crash window.
+                _ck_rng = _try_rng_snapshot(_tc, device, chi_gen)
+                if _ck_rng is None:
+                    print(f"[checkpoint] deferring the write at batch {batch_k + 1}: no RNG "
+                          f"snapshot. The rows are still held and go out at the next boundary.",
+                          file=sys.stderr, flush=True)
+                else:
+                    _tc.save(_ck_dir, from_batch=_ck_from, batch_k=batch_k + 1, rng=_ck_rng,
+                             x_buf=x_buf, th_buf=th_buf, run_size=run_size)
+                    _ck_from = batch_k + 1
 
     except BaseException:
         # WorkerCancelled (a BaseException by design, so `except Exception` would miss it) and
         # KeyboardInterrupt both land here, and a GUI cancel is the MOST likely way a multi-day run
         # ends -- MainWindow.closeEvent reaches request_cancel_all(), so closing the window stops it.
         # Before this, that discarded every completed batch.
-        if _ck_dir is not None and _pending_rng is not None and batch_k > _ck_from:
+        # THE ROWS MATTER MORE THAN THE RESTORE POINT. If the snapshot for THIS batch failed or
+        # belongs to another one, commit the completed batches with no RNG rather than skipping the
+        # write: a checkpoint that resumes without restoring the streams draws fresh noise from
+        # batch_k onward -- statistically equivalent, the same licence the OOM ladders take -- while
+        # a skipped write throws away hours of simulation outright.
+        if _ck_dir is not None and batch_k > _ck_from:
+            _rescue_rng = _pending_rng if _pending_rng_at == batch_k else None
+            if _rescue_rng is None:
+                print(f"[checkpoint] no valid RNG snapshot for batch {batch_k}; saving the rows "
+                      f"without a restore point (a resume will draw fresh noise from there)",
+                      file=sys.stderr, flush=True)
             try:
                 # Announced BEFORE the write, so a multi-second flush is not an unexplained hang after
                 # Cancel. Safe to print here even under a cancel: CancelToken.fired is a one-shot
@@ -2043,7 +2191,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 print(f"[checkpoint] stopping: saving {batch_k - _ck_from} completed batches "
                       f"({_ck_from} -> {batch_k}) before unwinding…", flush=True)
                 _tc.save(_ck_dir, from_batch=_ck_from, batch_k=batch_k,
-                         rng=_pending_rng, x_buf=x_buf, th_buf=th_buf, run_size=run_size)
+                         rng=_rescue_rng, x_buf=x_buf, th_buf=th_buf, run_size=run_size)
             except Exception as _e:              # noqa: BLE001
                 # A failed rescue write must never REPLACE the cancel/crash with an I/O error.
                 print(f"[checkpoint] could not save on the way out: {_e}", file=sys.stderr, flush=True)
@@ -2067,8 +2215,12 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
         # deliberately not deleted: it is a several-GiB cache of a multi-day simulation, and it is what
         # lets the flow be retrained (different capacity, learning rate, epochs) without re-simulating.
         if n_runs > _ck_from:
+            # ⚠ THIS IS AFTER THE `finally`, i.e. OUTSIDE the try -- nothing rescues a failure here,
+            # and what would be lost is the whole run's product minus the last cadence boundary. The
+            # snapshot is therefore best-effort: a COMPLETE checkpoint short-circuits generation and
+            # returns its stored rows, so its restore point is never read and None costs nothing.
             _tc.save(_ck_dir, from_batch=_ck_from, batch_k=n_runs,
-                     rng=_tc.rng_snapshot(device, chi_gen),
+                     rng=_try_rng_snapshot(_tc, device, chi_gen),
                      x_buf=x_buf, th_buf=th_buf, run_size=run_size)
         _tc.mark_complete(_ck_dir, n_runs)
         print(f"[checkpoint] complete: {n_runs} batches in {_ck_dir}. Safe to delete once the "

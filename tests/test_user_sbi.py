@@ -3023,7 +3023,11 @@ def test_the_batch_retry_waits_releases_and_restores_the_rng():
     and the driver lost the eviction race (trap X6); shrinking does not help, waiting does.
 
     The re-run must be EXACT. gen_training_data restores the batch's opening RNG snapshot first, so
-    the retried batch is the batch that would have been produced.
+    the retried batch is the batch that would have been produced. That is worth having but is NOT a
+    correctness gate -- an earlier version of this docstring said it was, and that was wrong. The
+    checkpoint records the ACTUAL state at every batch boundary and rows already on disk are never
+    regenerated, so a re-run that skips the restore is simply a different valid draw. Which is why
+    the restore is best-effort; see test_the_batch_retry_survives_a_failing_rng_restore.
 
     ⚠ IT MUST BE THE SNAPSHOT TAKEN IMMEDIATELY BEFORE `_rows`, NOT `_pending_rng`. `_pending_rng` is
     the state at the TOP of the iteration -- before the theta draw and the chi multipliers -- which
@@ -3042,8 +3046,8 @@ def test_the_batch_retry_waits_releases_and_restores_the_rng():
         ("not _is_oom(_err)", "a non-OOM RuntimeError is a bug and must not be retried in a loop"),
         ("_release_device_memory(device)", "the full release, graphs included, on the OOM path"),
         ("_cancellable_wait(", "a plain sleep cannot be cancelled -- see core/gui/streams.py"),
-        ("_rows_rng = _tc.rng_snapshot(", "snapshot the state _rows itself starts from"),
-        ("_tc.rng_restore(_rows_rng", "the re-run must resume THAT state, not the iteration's top"),
+        ("_rows_rng = _try_rng_snapshot(", "snapshot the state _rows itself starts from"),
+        ("_try_rng_restore(_tc, _rows_rng", "the re-run must resume THAT state, best-effort"),
     ):
         assert needle in src, f"batch retry: {needle!r} missing -- {why}"
     # The release must follow the notice, not precede it (the 2026-08-27 ordering bug).
@@ -3061,6 +3065,176 @@ def test_cancellable_wait_returns_and_stays_short():
         pipeline_mod._cancellable_wait(0.2, "unit test")
     assert 0.15 <= _time.monotonic() - t0 < 3.0, "wait did not sleep about the requested time"
     pipeline_mod._cancellable_wait(0.0, "zero")          # must not hang or raise
+
+
+# ── 2026-08-28: the recovery step that fixed round 1 became the next failure point ───────────────
+def test_short_err_survives_an_empty_message():
+    """`str(err).splitlines()[0]` raises IndexError when the message is empty, because "".splitlines()
+    is [] and not [""]. That is reachable: _is_oom returns True on the TYPE test alone, so a
+    zero-message torch.OutOfMemoryError reaches the ladders' note lines -- and reached the error path
+    of _release_device_memory, the one function documented never to raise."""
+    assert pipeline_mod._short_err(torch.OutOfMemoryError("")) == "OutOfMemoryError"
+    assert pipeline_mod._short_err(RuntimeError("boom")) == "RuntimeError: boom"
+    assert pipeline_mod._short_err(RuntimeError("first\nsecond")) == "RuntimeError: first"
+    assert pipeline_mod._short_err(RuntimeError("x" * 500), 10) == "RuntimeError: xxxxxxxxxx"
+    # And the guard that uses it must survive an exception with no message at all.
+    saved = torch.cuda.empty_cache
+    try:
+        def _blank():
+            raise torch.AcceleratorError("")
+        torch.cuda.empty_cache = _blank
+        _cuda_release_probe(pipeline_mod._release_device_memory)   # must not raise
+    finally:
+        torch.cuda.empty_cache = saved
+
+
+def test_log_memory_can_never_kill_a_run():
+    """A DIAGNOSTIC MUST NOT BE ABLE TO END A MULTI-DAY RUN. _log_memory makes four device calls --
+    mem_get_info, max_memory_allocated, max_memory_reserved, reset_peak_memory_stats -- and runs on
+    the SUCCESS path every _MEM_LOG_EVERY batches, which is exactly the moment after a batch has
+    fought its way through all three OOM ladders and the card is at its most degraded."""
+    import contextlib as _ctx
+
+    class _FakeDevice:
+        type = "cuda"
+
+    saved = (torch.cuda.mem_get_info, torch.cuda.max_memory_allocated,
+             torch.cuda.reset_peak_memory_stats)
+    buf = io.StringIO()
+    try:
+        def _boom(*a, **k):
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        torch.cuda.mem_get_info = _boom
+        torch.cuda.max_memory_allocated = _boom
+        torch.cuda.reset_peak_memory_stats = _boom
+        with _ctx.redirect_stderr(buf):
+            pipeline_mod._log_memory(_FakeDevice(), "training batch 1/5000")
+    finally:
+        (torch.cuda.mem_get_info, torch.cuda.max_memory_allocated,
+         torch.cuda.reset_peak_memory_stats) = saved
+    assert "unavailable" in buf.getvalue(), (
+        f"a failed memory read must degrade to a note, not an exception:\n{buf.getvalue()}")
+
+
+def test_the_batch_retry_survives_a_failing_rng_restore():
+    """THE 2026-08-28 REGRESSION. The retrain reached batch 3990/10000 and died inside the batch-level
+    retry added the day before: `rng_restore` -> `torch.cuda.set_rng_state_all` copies each
+    generator's state into DEVICE memory, so it is an allocation, and it was unguarded.
+
+    Skipping the restore is safe -- the re-run becomes a different but equally valid iid draw, the
+    same licence _rows_with_oom_retry already takes, and the checkpoint still records the ACTUAL
+    state at every batch boundary. Dying is not safe. So this asserts the helper reports failure
+    rather than raising, and says so."""
+    import contextlib as _ctx
+
+    class _FakeTC:
+        def rng_restore(self, rng, device, chi_gen):
+            raise torch.AcceleratorError("CUDA error: out of memory")
+
+        def rng_snapshot(self, device, chi_gen):
+            raise torch.AcceleratorError("CUDA error: out of memory")
+
+    buf = io.StringIO()
+    with _ctx.redirect_stderr(buf):
+        ok = pipeline_mod._try_rng_restore(_FakeTC(), {"cpu": b"x"}, torch.device("cpu"), None)
+    assert ok is False, "a failed restore must report failure, not raise"
+    assert "fresh draw" in buf.getvalue(), f"the fallback must be announced:\n{buf.getvalue()}"
+
+    buf2 = io.StringIO()
+    with _ctx.redirect_stderr(buf2):
+        snap = pipeline_mod._try_rng_snapshot(_FakeTC(), torch.device("cpu"), None)
+    assert snap is None, "a failed snapshot must return None, not raise"
+    assert "could not snapshot" in buf2.getvalue()
+
+    # An empty/None rng is "nothing to restore", not a failure to shout about.
+    assert pipeline_mod._try_rng_restore(_FakeTC(), None, torch.device("cpu"), None) is False
+
+
+def test_the_rng_restore_happens_before_the_release_and_the_wait():
+    """ORDER IS THE FIX, not the guard alone.
+
+    The block used to run release -> wait -> restore. The release hands every cached block back to
+    the driver; the wait then sleeps up to three minutes on a contended card while the desktop takes
+    the memory; and the restore -- which needs only a few KB, but needs them on the device -- was
+    left asking for a fresh cudaMalloc at the moment we had the weakest claim on the card.
+
+    Restoring first serves that request from the allocator's own cache: the failed attempt's tensors
+    were dropped when the except clause closed, so they are sitting there as free blocks.
+
+    Asserted on PARSED source -- the comments in this region name all three calls, so a raw-text
+    check would match the prose rather than the code (the lesson recorded for _local_map)."""
+    src = _unparsed(pipeline_mod.gen_training_data)
+    i_restore = src.find("_try_rng_restore(")
+    i_release = src.find("_release_device_memory(device)")
+    i_wait = src.find("_cancellable_wait(")
+    assert i_restore != -1 and i_release != -1 and i_wait != -1, "the recovery block changed shape"
+    assert i_restore < i_release, (
+        "the RNG restore must happen BEFORE the release, while the allocator still holds the failed "
+        "attempt's blocks -- releasing first is what killed the 2026-08-28 run")
+    assert i_release < i_wait, (
+        "release before the wait: sleeping while holding a cache we are not using starves the "
+        "process we are waiting for")
+
+
+def test_a_failed_snapshot_never_writes_a_stale_restore_point():
+    """`batch_k` is bound by the `for` before the snapshot is taken, so a snapshot that fails at the
+    top of batch k would leave batch k-1's state in `_pending_rng` while the rescue write records
+    `batch_k = k`. A resume would then restart batch k with the streams positioned where k-1 began.
+
+    Recording nothing is correct; recording the wrong thing is not -- but the ROWS must still be
+    written either way, because they are hours of simulation and a checkpoint that resumes without
+    restoring streams merely draws fresh noise from that point."""
+    src = _unparsed(pipeline_mod.gen_training_data)
+    assert "_pending_rng_at = batch_k" in src, (
+        "the snapshot must be paired with the batch index it describes")
+    assert "_rescue_rng = _pending_rng if _pending_rng_at == batch_k else None" in src, (
+        "the rescue write must validate the snapshot against the batch it is committing")
+    # The rows are saved regardless: the guard on the rescue write must NOT require an rng.
+    assert "if _ck_dir is not None and batch_k > _ck_from:" in src, (
+        "the rescue write must not be conditional on having an RNG snapshot -- that would throw "
+        "away the completed batches to avoid an imperfect restore point")
+
+
+def test_the_vram_ceiling_env_override_wins_and_tolerates_junk():
+    """A per-run throttle has to be settable without editing a tracked file, so it follows
+    PRISM_CHI_OVERRIDE's shape. A typo in an env var must not end a multi-day run."""
+    import os as _os
+    saved_env = _os.environ.get(pipeline_mod.VRAM_CEILING_ENV)
+    saved_cfg = config.SIM_VRAM_CEILING_GIB
+    try:
+        _os.environ.pop(pipeline_mod.VRAM_CEILING_ENV, None)
+        config.SIM_VRAM_CEILING_GIB = 3.0
+        assert pipeline_mod._vram_ceiling_gib() == 3.0, "the config constant is the fallback"
+        _os.environ[pipeline_mod.VRAM_CEILING_ENV] = "6.5"
+        assert pipeline_mod._vram_ceiling_gib() == 6.5, "the env override must win"
+        _os.environ[pipeline_mod.VRAM_CEILING_ENV] = "not-a-number"
+        assert pipeline_mod._vram_ceiling_gib() == 3.0, "junk must fall back, not raise"
+        _os.environ[pipeline_mod.VRAM_CEILING_ENV] = ""
+        assert pipeline_mod._vram_ceiling_gib() == 3.0, "empty means unset"
+    finally:
+        _os.environ.pop(pipeline_mod.VRAM_CEILING_ENV, None)
+        if saved_env is not None:
+            _os.environ[pipeline_mod.VRAM_CEILING_ENV] = saved_env
+        config.SIM_VRAM_CEILING_GIB = saved_cfg
+
+
+def test_the_planner_budget_survives_an_unreadable_card():
+    """Every OOM retry re-enters _max_sim_batch to re-plan, so config.memory_budget_elements' driver
+    reads run on a card that is already refusing service. pipeline._free_gib_note guards the
+    identical mem_get_info call; this one was bare. Falling back to a small budget is the safe
+    direction -- it makes the planner split more, which costs wall-clock and cannot lose data."""
+    class _FakeDevice:
+        type = "cuda"
+
+    saved = torch.cuda.mem_get_info
+    try:
+        def _boom(*a, **k):
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        torch.cuda.mem_get_info = _boom
+        got = config.memory_budget_elements(_FakeDevice(), torch.float32)
+    finally:
+        torch.cuda.mem_get_info = saved
+    assert got == (1 * 1024 ** 3) // 4, f"expected the conservative fallback budget, got {got}"
 
 
 if __name__ == "__main__":

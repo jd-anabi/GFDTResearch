@@ -1831,6 +1831,20 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   rather than "the card is full". Both retries now print the notice **before** releasing, and all
   releases go through `pipeline._release_device_memory`, which never raises. **If you add a release
   anywhere, it is best-effort by definition** — its caller is already recovering.
+  **ROUND 2 (2026-08-28), and it fired again 3639 batches later.** The retry added to fix the above
+  died on `_tc.rng_restore` → `torch.cuda.set_rng_state_all`, which copies each generator's state
+  into *device* memory and is therefore an allocation. Two lessons on top of the first:
+  **(a) a recovery block must not release and then sleep.** The order was release → wait 15 s →
+  restore; the release hands every cached block back to the driver and the wait then sleeps on a
+  contended card while the desktop takes it, so the few KB the restore needed was the one request
+  the driver could not serve. We donated the working set and asked for it back. Restoring *first*
+  serves it from the allocator's own cache, because the failed attempt's blocks are still sitting
+  there. **(b) guard the class, not the instance** — this was the second time the newly-guarded step
+  simply moved the failure to its neighbour. An audit of every recovery window found five more:
+  `_log_memory`'s four device calls (a *diagnostic* able to kill a 5000-batch run),
+  `config.memory_budget_elements`' bare `mem_get_info` (re-entered by every retry when it re-plans),
+  the per-batch and cadence/final `rng_snapshot`s, and `str(e).splitlines()[0]` — an `IndexError` on
+  a zero-message exception, inside the very function documented never to raise.
 - **X7. An UNWRAPPED CUDA OOM rules out the solver — and that is the fastest thing to check.**
   `Simulator.__sols` wraps everything raised inside `euler`/`euler_compiled` into a `SimulationError`
   reading `"<Model> <method> failed after N steps (batch=..., segs=..., device=..., dtype=...)"`. So a
@@ -3214,6 +3228,87 @@ the difference between "mildly uneven" and "nine of thirteen parameters are prio
 
 # Appendix A — Change history
 
+## 2026-08-28 — the retry died in its own recovery, 3639 batches further on
+
+The retrain reached **batch 3990/10000**, against 351 the day before, and stopped with an
+`AcceleratorError: CUDA error: out of memory` raised from `_tc.rng_restore` — inside the batch-level
+retry added the previous day *to stop exactly this class of failure*.
+
+### The same defect, in the step that fixed the same defect
+
+`rng_restore` → `torch.cuda.set_rng_state_all` copies each generator's state into device memory, so
+it is an allocation, and it was the one step of the recovery block left unguarded. But the guard is
+only half the fix. **The order was wrong.**
+
+The block ran `release → wait 15 s → restore`. `_release_device_memory` hands every cached block back
+to the driver; the wait then sleeps up to three minutes on a *contended* card, during which the
+desktop takes the memory; and the restore — a few KB, but a few KB **on the device** — was left
+asking for a fresh `cudaMalloc` at the exact moment the process had the weakest claim on the card.
+The recovery donated its working set and then asked for it back.
+
+Restoring **first** inverts that. By then the failed attempt's tensors have been dropped (the
+`except` clause has closed), so the allocator is holding them as cached blocks and a KB-sized request
+never reaches the driver. Only then is it worth handing that cache back, and only then worth
+sleeping. `test_the_rng_restore_happens_before_the_release_and_the_wait` pins the ordering on parsed
+source.
+
+### What the run got right, and it is worth recording
+
+- The batch-level retry **engaged in production for the first time**: the notice printed, the release
+  ran, the wait completed. It failed on its last statement, not its design.
+- **`batches_done = 3989`** — the `except BaseException` rescue write fired and cost about one batch.
+  That write is CUDA-free precisely because it uses the pre-captured `_pending_rng` rather than
+  taking a fresh snapshot; the cadence and final writes did *not* share that property and have been
+  fixed to.
+- Pace was 5.86 s/batch (3989 batches in 6 h 29 m).
+
+### Five more recovery windows, found by audit rather than by crashing
+
+Guarding one step twice in a row moved the failure to its neighbour twice in a row, so the whole
+recovery surface was walked instead:
+
+| site | why it can kill a run |
+|---|---|
+| `_log_memory` (4 CUDA calls) | a **diagnostic**, on the success path every 250 batches — i.e. right after a batch clawed through all three ladders. Now best-effort; a failed read prints "statistics unavailable". |
+| `config.memory_budget_elements` | bare `mem_get_info` / `memory_reserved`, and **every retry re-enters it** to re-plan. `_free_gib_note` guards the identical call. Now falls back to a deliberately small budget — the safe direction, since it only causes more splitting. |
+| `rng_snapshot` ×4 (per-batch, before-retry, cadence, final) | all driver calls. The **final** one sits *after* the `finally`, outside the `try` entirely — a failure there would lose the whole run's product. All best-effort now; the cadence write defers to the next boundary rather than dying. |
+| `str(e).splitlines()[0]` ×4 | `IndexError` on a zero-message exception — `"".splitlines()` is `[]`. Reachable, because `_is_oom` returns True on the *type* test alone. One of the four was inside `_release_device_memory`, the function whose docstring says it never raises. Now `_short_err`. |
+| stale `_pending_rng` | `batch_k` is bound by the `for` before the snapshot, so a snapshot failing at the top of batch *k* left *k-1*'s state paired with `batch_k = k` — a resume would restart *k* with the streams where *k-1* began. Now paired with its index, and the rescue write commits the rows with **no** restore point rather than a wrong one. |
+
+> **The rows outrank the restore point.** Every one of these fixes resolves the same way: a
+> checkpoint that resumes without restoring streams draws fresh noise from that point, which is a
+> reproducibility loss. A write that is skipped, or a run that dies, throws away hours of simulation.
+> Those are not the same size of mistake.
+
+### Three that were found and deliberately NOT fixed
+
+1. **`_gen_obs_retry`'s `out = torch.empty(...)` preallocation** sits in the recovery window and is a
+   multi-GiB device allocation on a card that just proved it is short. It is left to propagate, and
+   that is correct: if the full result cannot be allocated, the caller must reduce the ROW count,
+   which is exactly what `_rows_with_oom_retry` does when it catches this. **But the PPC bin loop
+   (`orchestrator.py:1841-1877`) and `decorrelate.py` have no outer ladder**, so there the same
+   failure is fatal. That is the real gap, and it is a missing ladder rather than a missing guard.
+2. **`decorrelate.py:193`'s `torch.random.fork_rng(devices=[device])`** wraps ~216 Fisher evaluations
+   and calls `get_rng_state_all()` on entry and `set_rng_state_all()` on exit — the identical pair
+   that crashed here. Its `__exit__` restore runs *while unwinding* any exception raised inside the
+   block, so an OOM in `feats()` would be followed by a device call on a starved card and the
+   secondary failure would replace the original traceback. Same shape as trap X13, different
+   subsystem, and not touched because the Fisher path was not what failed.
+3. **`gen_training_data:1550/1560`** (the resume path's `.to(device)` and `rng_restore`) run *before*
+   the `try`, so they have no rescue write. Tolerable: nothing has been generated yet, so a failure
+   there costs only a restart.
+
+### The ceiling is now settable per run
+
+`PRISM_VRAM_CEILING_GIB` overrides `config.SIM_VRAM_CEILING_GIB` (the `PRISM_CHI_OVERRIDE` shape), so
+a single run can be throttled without editing a tracked file; junk values are ignored with a note.
+⚠ **It needs headroom to cap to.** With the card at 115 MiB actually free it does nothing —
+`_max_sim_batch` finds that not even a floor-sized chunk fits and runs the batch as asked. What it
+buys is keeping a run that *has* headroom out of the 9× shared-memory paging regime measured on
+2026-08-27. Free the memory first, then set it to about `(nvidia-smi free) − 1 GiB`.
+
+---
+
 ## 2026-08-27 (later) — the OOM retry fired for the first time, and died on its own cleanup
 
 The Phase-1 retrain reached batch 351/5000 and stopped with a bare
@@ -3263,10 +3358,13 @@ the failure that started it all left **no record at all**. That is now trap **X1
 5. **A batch-level retry that WAITS instead of shrinking.** Both existing ladders answer "this is too
    big"; neither can answer the failure that actually kills runs here, which is a reasonable batch on
    a card momentarily full of somebody else's evictable surfaces. It restores the batch's opening RNG
-   snapshot (`_pending_rng`, already taken every iteration for the checkpoint) and re-runs — so the
-   retried batch is **the batch that would have been produced**. Without the restore the retry is a
-   different draw, and the checkpoint's stored RNG would no longer describe the rows written beside
-   it: a corruption no test catches and no log shows. Delays 15 s / 60 s / 180 s, and the wait is
+   snapshot and re-runs — so the retried batch is **the batch that would have been produced**.
+   ⚠ **Corrected 2026-08-28:** this entry originally called that a *correctness requirement*, and it
+   is not. The checkpoint always records the ACTUAL state at a batch boundary (the cadence write
+   snapshots fresh, the rescue write uses that batch's own opening snapshot) and rows already on
+   disk are never regenerated, so a retry that skips the restore is simply a different valid iid
+   draw — the same licence the halving ladders take. It is a reproducibility nicety, which is what
+   makes it safe to be best-effort. Delays 15 s / 60 s / 180 s, and the wait is
    sliced and printed, because **cancellation is raised from a stream `write()` on the worker thread
    — a plain `time.sleep()` cannot be cancelled.**
 

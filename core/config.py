@@ -76,13 +76,22 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
     """
     bytes_per_elem = 4 if dtype == torch.float32 else 8
     if device.type == "cuda":
-        free_bytes, _ = torch.cuda.mem_get_info(device)
-        # mem_get_info reports the DRIVER's view, in which every block PyTorch has cached counts as
-        # used -- even the ones it has already freed and will hand straight back. Add that reusable
-        # pool back, or the budget collapses as soon as the caching allocator has warmed up, and a
-        # loop that re-plans against it degenerates to a batch of one (slow enough to look hung).
-        reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-        budget_bytes = int((free_bytes + max(0, reusable)) * fraction)
+        # EVERY READ HERE IS A DRIVER CALL AND EVERY ONE CAN FAIL on a card that is already refusing
+        # service -- which is exactly when this runs, because each OOM retry re-enters _max_sim_batch
+        # to re-plan. pipeline._free_gib_note guards the identical mem_get_info call for the same
+        # reason; this one was bare, so a failed reading killed the run instead of producing a
+        # conservative plan. Falling back to the CPU cap is the safe direction: it makes the planner
+        # split more, which costs wall-clock and cannot lose data.
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(device)
+            # mem_get_info reports the DRIVER's view, in which every block PyTorch has cached counts
+            # as used -- even the ones it has already freed and will hand straight back. Add that
+            # reusable pool back, or the budget collapses as soon as the caching allocator has warmed
+            # up, and a loop that re-plans against it degenerates to a batch of one (looks hung).
+            reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+            budget_bytes = int((free_bytes + max(0, reusable)) * fraction)
+        except Exception:                    # noqa: BLE001 -- see above
+            budget_bytes = 1 * 1024 ** 3     # a deliberately small, always-safe plan
     elif device.type == "cpu":
         budget_bytes = 4 * 1024 ** 3   # 4 GB conservative cap for CPU
     else:
@@ -113,6 +122,8 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
 # identity digest would rename the checkpoint directory every time the knob moved, and a resumable
 # multi-day run would silently restart from zero -- the exact failure that orphaned 884 batches on
 # 2026-08-27.
+# Override for one run without editing this file: PRISM_VRAM_CEILING_GIB=6.5 (pipeline reads it
+# live via pipeline._vram_ceiling_gib, the same shape as orchestrator's PRISM_CHI_OVERRIDE).
 SIM_VRAM_CEILING_GIB = 0.0
 
 
