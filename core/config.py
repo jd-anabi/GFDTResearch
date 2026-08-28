@@ -89,6 +89,33 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
         budget_bytes = 1 * 1024 ** 3   # 1 GB for MPS / other
     return max(1, budget_bytes // bytes_per_elem)
 
+
+# Hard ceiling, in GiB, on what ONE simulation batch may plan to hold on the GPU. 0 = off, which is
+# the historical behaviour: trust memory_budget_elements' reading and let pipeline's learned cap
+# tighten it after the fact.
+#
+# WHY A MANUAL CEILING EXISTS ALONGSIDE A LEARNED ONE. The learned cap (pipeline._BUDGET_CAP_ELEMENTS)
+# is REACTIVE: it only tightens once something has already failed, and on a card shared with a
+# Windows desktop the first failure can land hours into a multi-day run. mem_get_info cannot warn it
+# in advance, because under WDDM other processes' surfaces are evictable and get reported to you as
+# free -- measured 15037 MiB reported against nvidia-smi's 5814 on this machine (trap X6). This knob
+# is the PROACTIVE half: on a day you know the desktop will be busy, state the real budget up front
+# and the planner splits from batch 0 instead of discovering it the hard way.
+#
+# Set it to roughly (what nvidia-smi reports free) - 1 GiB for the CUDA context. Costs wall-clock --
+# splitting is k x time on the batches it touches -- and buys a run that does not die.
+#
+# READ LIVE via `config.SIM_VRAM_CEILING_GIB`, never `from .config import SIM_VRAM_CEILING_GIB`:
+# an imported name is a SNAPSHOT and assigning to it later is a silent no-op (trap X12).
+#
+# DELIBERATELY NOT PART OF THE TRAINING CHECKPOINT IDENTITY. It changes the memory PLAN, not the
+# rows: a split batch is row-aligned and produces the same training distribution. Putting it in the
+# identity digest would rename the checkpoint directory every time the knob moved, and a resumable
+# multi-day run would silently restart from zero -- the exact failure that orphaned 884 batches on
+# 2026-08-27.
+SIM_VRAM_CEILING_GIB = 0.0
+
+
 # === PATHS ===
 # Resources live at <repo-root>/Resources. The run scripts (run.bat/run.sh) cd to the repo root, so the
 # cwd-relative form is correct in normal use; the __file__ fallback keeps paths valid if the app is ever
@@ -210,6 +237,27 @@ TRAINING_NUM_RUNS = 5000  # number of (t_scale_k, T_k) batches per training roun
 # Anything from 25 to 100 is defensible; 50 sits in the flat part of both curves. Checkpointing every
 # batch is 100x the write volume to buy back 8 minutes on a multi-day run, which is not a trade.
 TRAINING_CHECKPOINT_EVERY = 50
+
+# --- Batch-level OOM retry (2026-08-27) --------------------------------------------------------
+# The LAST line of defence, below _gen_obs_retry (halves the simulator batch) and _rows_with_oom_retry
+# (halves the training batch's rows). Both of those shrink the work; this one instead WAITS and runs
+# the same batch again, because the failure they cannot fix is the one where the card is simply full
+# of somebody else's surfaces right now -- a browser opening a video, a game launcher waking up. That
+# is transient by nature and the correct response is a pause, not a smaller batch.
+#
+# The re-run is EXACT: gen_training_data restores the batch's opening RNG snapshot first, so the
+# retried batch is the batch that would have been produced. See the retry loop for why that matters
+# to the checkpoint rather than merely being tidy.
+#
+# 0 attempts disables it and restores the pre-2026-08-27 behaviour (fail as soon as both halving
+# ladders are exhausted).
+TRAINING_BATCH_RETRY_ATTEMPTS = 3
+# Seconds to wait before each retry. Escalating, because a desktop that is busy now is usually busy
+# for seconds-to-minutes: 15 s catches a transient, 3 min catches a browser finishing a page load.
+# Longer than the last entry is not worth it -- at that point the card is genuinely committed
+# elsewhere and a human should decide, which is what the failure lets them do. The list is indexed by
+# attempt and the last value repeats if ATTEMPTS exceeds its length.
+TRAINING_BATCH_RETRY_DELAYS_S = (15.0, 60.0, 180.0)
 
 TRAINING_RUN_SIZE = 0   # CEILING on simulations per training batch; 0 = follow DeviceConfig.batch_size.
                         #
@@ -496,6 +544,34 @@ PRIOR_SWEEP_ITERATIONS = 50     # sweep ROUNDS inside gen_prior's global stabili
                                 # construction -- do not rely on it to catch a bad value here.)
 
 PRIOR_SWEEP_BATCH = 0           # candidates per prior sweep; 0 = follow HardwareConfig.batch_size
+
+# --- the LOCAL sweep (the flood-fill), promoted out of hiding 2026-08-27 ------------------------
+# Both were invisible: n_max was a LITERAL inside pipeline.gen_prior that silently overrode
+# construct_prior's own default, and `step` was never threaded through gen_prior at all, so
+# construct_prior's default always won no matter what a caller asked for. Same defect class C-7
+# promoted PRIOR_SWEEP_ITERATIONS out of.
+PRIOR_SWEEP_MAX_SETS = 175_000  # accepted parameter sets that STOP the local flood-fill. This is the
+                                # point cloud HDBSCAN clusters and the GMM is fitted to, so it buys
+                                # COVERAGE of the stable manifold rather than statistical precision --
+                                # a 10-D GMM with a few components needs nothing like this many points.
+PRIOR_SWEEP_STEP = 0.01         # random-walk stride, in PHYSICAL parameter units, for the flood-fill's
+                                # perturbation. Too small and the walk never leaves its seed points;
+                                # too large and it steps across the manifold instead of tracing it.
+# The local sweep runs on the same device as the global one. It used to be pinned to the CPU by a
+# hardcode in every subclass (they were @staticmethod, so they could not see self.device) -- measured
+# 6.32 s per iteration on the CPU against 0.357 s on CUDA, 17.7x, and the local sweep is the dominant
+# cost of a prior build. Falls back to the CPU automatically when CUDA is not available.
+PRIOR_SWEEP_ON_ACCELERATOR = True
+
+# --- the CLUSTERING stage, which is not the sweep -------------------------------------------
+# HDBSCAN runs over the accepted point cloud in LATENT space and its label count becomes the
+# GMM's component count -- so these two decide how many modes the prior has, which is a
+# different question from how the manifold was mapped. Both were hardcoded in
+# prior.construct_prior. min_cluster_size is the floor on what counts as an island of stable
+# parameters; min_samples is how conservative the density estimate is (higher = more points
+# declared noise, which HDBSCAN then leaves unassigned and the GMM never sees).
+PRIOR_CLUSTER_MIN_SIZE = 50
+PRIOR_CLUSTER_MIN_SAMPLES = 10
                                 # (the historical behaviour, and still the right default -- the sweep
                                 # wants the largest batch that fits).
                                 #

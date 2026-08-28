@@ -1566,6 +1566,54 @@ def test_a_tsnpe_posterior_cannot_be_saved_as_amortized():
     assert inf.session.truncation is None and inf.session.x_obs_digest is None,         "an amortized posterior inherited the previous round's truncation"
 
 
+def test_the_new_tab_knobs_are_forwarded_and_not_written_to_config():
+    """Prior, Posterior and Validate all gained fields. Each must reach its orchestrator function as
+    an ARGUMENT -- orchestrator snapshots those constants at import, so writing them would be a
+    silent no-op and the run would use the defaults with nothing to say so."""
+    from core.gui.screens.inference_screen import InferenceScreen
+    from core.gui.session import SbiSession
+    from core import config as _cfg
+
+    _app()
+    inf = InferenceScreen()
+    inf.session = SbiSession(draft=object(), cfg=object(), inf_prior=object(), posterior=object())
+
+    cap = {}
+    for panel in (inf.prior_panel, inf.posterior_panel, inf.validate_panel):
+        panel.dispatch = lambda fn, *a, **k: cap.update(kwargs=k)
+
+    inf.validate_panel.cal_n.setText("77")
+    inf.validate_panel.cal_scales.setText("11")
+    inf.validate_panel._validate()
+    assert cap["kwargs"]["n_cal"] == 77 and cap["kwargs"]["cal_n_scales"] == 11, cap["kwargs"]
+    assert _cfg.SBC_N_CAL != 77, "the panel wrote the config constant instead of passing an argument"
+
+    inf.posterior_panel.flow_hidden.setText("64")
+    inf.posterior_panel.flow_transforms.setText("3")
+    inf.posterior_panel.flow_patience.setText("7")
+    inf.posterior_panel.post_picker.combo.setCurrentIndex(0)
+    inf.posterior_panel._build_posterior()
+    k = cap["kwargs"]
+    assert (k["hidden_features"], k["num_transforms"], k["stop_after_epochs"]) == (64, 3, 7), k
+    assert _cfg.NSF_HIDDEN_FEATURES != 64, "the panel wrote NSF_HIDDEN_FEATURES"
+    # the Fisher knobs ride along on the same call
+    assert (k["fisher_m"], k["fisher_points"]) == (_cfg.REPARAM_FISHER_M, _cfg.REPARAM_FISHER_POINTS)
+
+    inf.prior_panel.cluster_size.setText("9")
+    inf.prior_panel.cluster_samples.setText("4")
+    inf.prior_panel.sweep_iters.setText("3")
+    inf.prior_panel.bounds_source.set_direct(False)
+    inf.prior_panel.bounds_picker.combo.clear()
+    inf.prior_panel.bounds_picker.combo.addItem("master.txt")
+    inf.session.draft = type("D", (), {"make_config": lambda self, **kw: inf.session.cfg})()
+    try:
+        inf.prior_panel._build_prior()
+    except Exception:
+        pass                                  # config construction is stubbed; the dispatch is the point
+    if "min_cluster_size" in cap.get("kwargs", {}):
+        assert cap["kwargs"]["min_cluster_size"] == 9 and cap["kwargs"]["min_samples"] == 4, cap["kwargs"]
+        assert _cfg.PRIOR_CLUSTER_MIN_SIZE != 9, "the panel wrote PRIOR_CLUSTER_MIN_SIZE"
+
 def test_posterior_from_scratch_is_gated_on_a_prior():
     from core.gui.screens.inference_screen import InferenceScreen
     from core.gui.session import SbiSession

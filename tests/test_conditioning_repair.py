@@ -98,7 +98,7 @@ def test_a_structurally_dead_channel_passes_through_as_zero():
 def test_the_contaminated_channel_becomes_visible_to_the_network():
     """THE PHASE-1 GATE, in miniature. A channel whose distribution carries an extreme outlier is
     annihilated by a mean/std affine (measured on posterior_08232026: A1_mean fitted at std 4.19e11,
-    so its whole physical range moved the embedding by 6.6e-7). Under the rank transform its response
+    so its whole physical range moved the embedding by 3.2e-7). Under the rank transform its response
     must be the same order as a healthy channel's."""
     torch.manual_seed(2)
     n_sum = statistics.SUMMARY_WIDTH + 1
@@ -456,6 +456,51 @@ def test_the_region_survives_a_sidecar_round_trip():
     assert back.dims == r.dims and back.level == r.level and back.n_latent == r.n_latent
     assert torch.equal(back.lo, r.lo) and torch.equal(back.hi, r.hi)
 
+
+# ── the prior sweep's device and its knobs ───────────────────────────────────────────────────────
+def test_the_local_sweep_falls_back_to_the_cpu_without_an_accelerator():
+    """The flood-fill now runs on the accelerator (measured 6.32 s per inner-loop iteration on the
+    CPU against 0.357 s on CUDA, 17.7x, and it is the dominant cost of a prior build). It must
+    DEGRADE on a machine with no CUDA rather than raise halfway through a sweep."""
+    from core.SBI.Priors import prior as prior_mod
+
+    assert prior_mod.resolve_sweep_device(torch.device("cpu")).type == "cpu"
+    real = torch.cuda.is_available
+    torch.cuda.is_available = lambda: False
+    try:
+        got = prior_mod.resolve_sweep_device(torch.device("cuda"))
+    finally:
+        torch.cuda.is_available = real
+    assert got.type == "cpu", f"a cuda device with no CUDA resolved to {got}, not the CPU"
+    if real():
+        assert prior_mod.resolve_sweep_device(torch.device("cuda")).type == "cuda", \
+            "the sweep refused the accelerator that IS present"
+
+
+def test_the_local_sweep_is_no_longer_a_staticmethod_pinned_to_the_cpu():
+    """The regression this guards is the original defect: every _local_map was a @staticmethod, so
+    none of them could see self.device, so all four silently simulated on the CPU while the global
+    sweep used the accelerator."""
+    import ast
+    import inspect
+    import textwrap
+    from core.SBI.Priors import bp_prior, hopf_prior, nadrowski_prior, user_prior
+
+    for mod, cls in ((nadrowski_prior, "NadrowskiPrior"), (bp_prior, "BPPrior"),
+                     (hopf_prior, "HopfPrior"), (user_prior, "UserPrior")):
+        fn = getattr(getattr(mod, cls), "_local_map")
+        params = list(inspect.signature(fn).parameters)
+        assert params and params[0] == "self", f"{cls}._local_map is not an instance method"
+        # ast.unparse, not the raw source: the comment that DOCUMENTS this fix necessarily contains
+        # the string it forbids, so a naive text search flags the explanation instead of the code.
+        # Same false positive the TSNPE runner check hit -- see test_gui_progress.
+        code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(fn))))
+        assert "torch.device('cpu')" not in code and 'torch.device("cpu")' not in code, \
+            f"{cls}._local_map still hardcodes the CPU"
+        assert "self.sweep_device" in code, f"{cls}._local_map does not use self.sweep_device"
+        # and the accept loop must not sync per row -- that would hand back most of the device move
+        assert "for i in range(batch_size)" not in code, \
+            f"{cls}._local_map still walks rows one at a time (a device-to-host sync per row)"
 
 if __name__ == "__main__":
     failures = 0

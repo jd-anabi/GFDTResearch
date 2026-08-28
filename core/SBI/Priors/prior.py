@@ -7,11 +7,31 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from abc import ABC, abstractmethod
 from torch.distributions import TransformedDistribution
+from core import config
 from core.SBI.reparam import build_box_bijection, clamp_to_box
 
 # Fixed k-means init for the latent GMM. A prior must be reproducible or no posterior trained from it
 # can be: sklearn defaults random_state to the global NumPy RNG, which nothing in this pipeline pins.
 GMM_RANDOM_STATE = 0
+
+
+def resolve_sweep_device(device: torch.device) -> torch.device:
+    """The device the LOCAL sweep simulates on, degrading to the CPU when there is no accelerator.
+
+    Every subclass used to pin the flood-fill to ``torch.device('cpu')`` with a hardcode -- they were
+    ``@staticmethod``, so they could not see ``self.device`` -- while the GLOBAL sweep ran on the
+    accelerator. Measured 6.32 s per inner-loop iteration on the CPU against 0.357 s on CUDA (17.7x),
+    and the flood-fill is the dominant cost of a prior build, so that hardcode was most of the wait.
+
+    A caller's device is normally already CPU on a machine without CUDA (``config.detect_device``
+    sees to it). This exists for the case where one is handed a cuda device anyway: it must DEGRADE
+    with a note rather than raise halfway through a sweep.
+    """
+    if device.type == "cuda" and not torch.cuda.is_available():
+        print("[prior] CUDA was requested for the parameter sweep but is not available; "
+              "falling back to the CPU.", flush=True)
+        return torch.device("cpu")
+    return device
 
 
 class Prior(ABC):
@@ -23,7 +43,9 @@ class Prior(ABC):
     def construct_prior(self, t: torch.Tensor, n_params: int, global_batch_size: int, local_batch_size: int,
                         segs: int, prior_bounds: list[tuple], t_global_scale: int = 1, num_iterations: int = 25,
                         steady: bool = True, n_max: int = 200000, step: float = 0.01,
-                        state_dep_drift: bool = False, log_mask: torch.Tensor | None = None) -> TransformedDistribution:
+                        state_dep_drift: bool = False, log_mask: torch.Tensor | None = None,
+                        min_cluster_size: int | None = None,
+                        min_samples: int | None = None) -> TransformedDistribution:
         """
         Build a stability-screened prior over ND parameters.
 
@@ -36,6 +58,8 @@ class Prior(ABC):
         nonphysical θ. HDBSCAN's island topology and the GMM's covariance structure are
         preserved; they just live in unbounded latent coordinates.
         """
+        self.sweep_device = resolve_sweep_device(self.device)
+
         n_sims = global_batch_size * num_iterations
 
         # Global sweep: broad Sobol census of the physical box
@@ -71,7 +95,14 @@ class Prior(ABC):
         # --- Cluster in latent space (still StandardScaled for HDBSCAN's density metric) ---
         scaler = StandardScaler()
         latent_scaled = scaler.fit_transform(latent_params)
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=50, min_samples=10)
+        # Both were LITERALS here. They set the GMM's component count -- HDBSCAN's label count
+        # is passed straight to n_components -- so they decide how many modes the prior has,
+        # which nothing outside this line could influence.
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=(config.PRIOR_CLUSTER_MIN_SIZE if min_cluster_size is None
+                              else max(2, int(min_cluster_size))),
+            min_samples=(config.PRIOR_CLUSTER_MIN_SAMPLES if min_samples is None
+                         else max(1, int(min_samples))))
         labels = clusterer.fit_predict(latent_scaled)
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         if n_clusters < 1:
@@ -113,7 +144,10 @@ class Prior(ABC):
     def _global_map(self, t: torch.Tensor, n_params: int, prior_bounds: list[tuple], segs: int, batch_size: int, num_iterations: int, steady: bool, state_dep_drift: bool) -> list:
         pass
 
-    @staticmethod
     @abstractmethod
-    def _local_map(t: torch.Tensor, stable_params: list, batch_size: int, n_params: int, n_max: int, step: float, segs: int, steady: bool, state_dep_drift: bool) -> list:
+    def _local_map(self, t: torch.Tensor, stable_params: list, batch_size: int, n_params: int,
+                   n_max: int, step: float, segs: int, steady: bool, state_dep_drift: bool) -> list:
+        """The flood-fill. An INSTANCE method -- it was a @staticmethod in every subclass, which
+        is exactly why all four pinned themselves to the CPU: they could not see self.device.
+        Implementations must simulate on ``self.sweep_device``."""
         pass

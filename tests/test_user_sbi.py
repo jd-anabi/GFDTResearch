@@ -11,6 +11,7 @@ Group-G-populated conditioning vector, so the spontaneous-only branching did not
 
 Run:  python tests/test_user_sbi.py      (or under pytest)
 """
+import io
 import math
 import os
 import sys
@@ -28,6 +29,7 @@ import torch                                                      # noqa: E402
 from core import config, registry, orchestrator, cli, forcing    # noqa: E402
 from core.Helpers import model_store                             # noqa: E402
 from core.SBI import chi as chi_mod, pipeline as pipeline_mod    # noqa: E402
+from core.Solvers import sdeint as _sdeint_mod              # noqa: E402
 from core.SBI.Priors.user_prior import UserPrior                 # noqa: E402
 from core.SBI.statistics import FEATURE_LABELS, SUMMARY_WIDTH    # noqa: E402
 from core.config import VALID_MODELS, VALID_LABELS               # noqa: E402
@@ -61,8 +63,17 @@ _CKPT_DIRS_AT_IMPORT = frozenset(
 
 def _tiny_gen_prior(model, t, global_batch_size, local_batch_size, segs, prior_bounds,
                     state_dep_drift=False, num_iterations=25, log_mask=None,
-                    dtype=torch.float32, device=torch.device("cpu")):
-    """A tiny stand-in for pipeline.gen_prior: the same UserPrior.construct_prior, small sizes."""
+                    dtype=torch.float32, device=torch.device("cpu"), **_kw):
+    """A tiny stand-in for pipeline.gen_prior: the same UserPrior.construct_prior, small sizes.
+
+    ``**_kw`` IS LOAD-BEARING AND THERE ARE TWO OF THESE STUBS. A stub installed over a function must
+    tolerate arguments added to that function later, or the suite dies ~40 tests in with a TypeError
+    raised deep inside build_prior -- which names only the stub it hit first, so fixing that one
+    reveals the second on the next run. Adding n_max/step upstream cost an hour this way on
+    2026-08-27. Deliberately NOT a hand-mirrored signature: that never checked anything (it failed as
+    a TypeError, not an assertion), and gen_prior's real signature is asserted directly by
+    test_n_max_and_step_are_no_longer_hidden_inside_gen_prior.
+    """
     p = UserPrior(registry.get(model), dtype, device)
     return p.construct_prior(t, len(prior_bounds), 32, 8, segs, prior_bounds,
                              t_global_scale=2, num_iterations=2, n_max=120, steady=False,
@@ -146,7 +157,7 @@ def test_builtin_forcing_path_unperturbed():
 
 def _tiny_nadrowski_gen_prior(model, t, global_batch_size, local_batch_size, segs, prior_bounds,
                               state_dep_drift=False, num_iterations=25, log_mask=None,
-                              dtype=torch.float32, device=torch.device("cpu")):
+                              dtype=torch.float32, device=torch.device("cpu"), **_kw):
     """Tiny stand-in for pipeline.gen_prior on the built-in Nadrowski: same construct_prior, small sizes."""
     from core.SBI.Priors import nadrowski_prior
     p = nadrowski_prior.NadrowskiPrior(dtype, device)
@@ -1485,10 +1496,23 @@ def test_cufft_plan_cache_is_cleared_between_training_batches():
     allocator -- so torch.cuda.empty_cache() cannot reclaim it and exhaustion surfaces as a raw driver
     cudaErrorMemoryAllocation. N_points_k changes every training batch, so cross-batch reuse is zero
     and the default 4096-entry cache would accumulate ~2 MB apiece until it OOMs mid-run."""
-    import inspect
-    src = inspect.getsource(pipeline_mod.gen_training_data)
-    assert "cufft_plan_cache.clear()" in src, (
-        "gen_training_data must clear the cuFFT plan cache per batch; empty_cache() does NOT free it")
+    import ast as _ast, inspect as _inspect, textwrap as _textwrap
+
+    # The clear moved into pipeline._release_device_memory (2026-08-27), so this asks the question
+    # structurally rather than by grepping for a literal that a refactor can move: gen_training_data
+    # must reach the release, and must NOT be the caller that turns the plan clear off. That flag
+    # exists for the HOT loops -- gen_stats' sub-batches and gen_chi_raw's probes, where the whole
+    # point is intra-batch plan reuse -- and using it here would silently reinstate the leak.
+    fn = _ast.parse(_textwrap.dedent(_inspect.getsource(pipeline_mod.gen_training_data)))
+    calls = [n for n in _ast.walk(fn)
+             if isinstance(n, _ast.Call) and getattr(n.func, "id", None) == "_release_device_memory"]
+    assert calls, ("gen_training_data must release device memory per batch through "
+                   "_release_device_memory; empty_cache() alone does NOT free the cuFFT plans")
+    assert any(not any(k.arg == "plans" and getattr(k.value, "value", None) is False
+                       for k in c.keywords) for c in calls), (
+        "gen_training_data's per-batch release passes plans=False, so the cuFFT plan cache is never "
+        "cleared: N_points_k changes every batch, cross-batch reuse is zero, and ~2 MB per signature "
+        "accumulates until the run dies on a raw driver cudaErrorMemoryAllocation")
 
     if not torch.cuda.is_available():
         return                                       # mechanism check below is CUDA-only
@@ -1497,8 +1521,10 @@ def test_cufft_plan_cache_is_cleared_between_training_batches():
     for n in (4096, 4097, 5003, 6151):               # distinct lengths -> distinct plans
         chi_mod.peak_freq(torch.randn(8, n, device="cuda"), 1e-3)
     assert cache.size > 0, "expected distinct transform lengths to mint distinct cuFFT plans"
-    cache.clear()
-    assert cache.size == 0, "cufft_plan_cache.clear() did not release the cached plans"
+    # END TO END: the helper itself must really free them, which is the property the structural
+    # check above can only point at. This is what the old literal-string assertion stood in for.
+    pipeline_mod._release_device_memory(torch.device("cuda"))
+    assert cache.size == 0, "_release_device_memory did not release the cached cuFFT plans"
 
 
 def test_summary_statistics_rejects_a_non_uniform_dt():
@@ -2603,6 +2629,438 @@ def test_the_graph_cache_is_not_hung_off_the_solver_class():
         print("      (no CUDA -- cache-bound check is structural only)")
         return
     assert len(_sd._GRAPH_CACHE) <= _cfg.SOLVER_GRAPH_CACHE_MAX, "graph cache exceeded its bound"
+
+
+def _unparsed(obj) -> str:
+    """``ast.unparse(ast.parse(source))`` for a function/method -- source with comments REMOVED.
+
+    IF YOU ASSERT ON SOURCE TEXT, PARSE IT FIRST. A check that "_local_map no longer hardcodes the
+    CPU" failed on its first run against the very COMMENT that documents the fix, because the comment
+    necessarily contains the string it forbids. The same false positive had already cost time once on
+    the TSNPE runner check. ast.unparse drops comments and docstrings by construction.
+    """
+    import ast as _ast, inspect as _inspect, textwrap as _textwrap
+    return _ast.unparse(_ast.parse(_textwrap.dedent(_inspect.getsource(obj))))
+
+
+def test_n_max_and_step_are_no_longer_hidden_inside_gen_prior():
+    """Two of gen_prior's four "constants" were not constants at all.
+
+    ``n_max`` was the literal 175000 written inside the function body, silently overriding
+    construct_prior's own n_max=200000 default -- nothing named it, so nothing could change it. Worse,
+    ``step`` (the flood-fill's random-walk stride) was never threaded through gen_prior at all, so
+    construct_prior's default won no matter what any caller asked for. Both are arguments now, and
+    both default to a named config constant.
+
+    HDBSCAN's two come with them, and they are NOT a tuning preference: the label count is handed
+    straight to the GMM's n_components, so min_cluster_size decides how many MODES the prior has
+    (measured on one small build: 5 -> 15 components, 60 -> 1). A prior with a different component
+    count is a different prior, not a faster one.
+    """
+    import inspect as _inspect
+    params = _inspect.signature(pipeline_mod.gen_prior).parameters
+    for knob in ("n_max", "step", "min_cluster_size", "min_samples"):
+        assert knob in params, f"gen_prior must accept {knob!r} rather than hiding it in the body"
+        assert params[knob].default is None, (
+            f"gen_prior's {knob!r} must default to None so the CALLER resolves it against config -- "
+            f"a literal default here is the hardcode this test exists to prevent")
+
+    body = _unparsed(pipeline_mod.gen_prior)
+    assert "175000" not in body and "175_000" not in body, (
+        "the 175000 max-sets literal is back inside gen_prior; it belongs in "
+        "config.PRIOR_SWEEP_MAX_SETS, reached through the n_max argument")
+    for knob in ("n_max", "step", "min_cluster_size", "min_samples"):
+        assert body.count(knob) >= 2, (
+            f"gen_prior accepts {knob!r} but never uses it -- accepted-and-dropped is exactly the "
+            f"failure a signature check alone would miss")
+
+
+def test_the_local_sweep_is_not_pinned_to_the_cpu_in_any_prior():
+    """THE FLOOD-FILL HAD BEEN ON THE CPU IN ALL FOUR PRIORS while the global census ran on the GPU --
+    which is backwards, because the flood-fill is the larger half of the work.
+
+    ``_local_map`` was a @staticmethod in NadrowskiPrior, BPPrior and HopfPrior, so it could not see
+    self.device even in principle, and every one of them opened by hardcoding torch.device('cpu').
+    UserPrior's was an instance method and hardcoded it anyway. Measured on the real inner loop
+    (1024 trajectories x 40,000 steps): 6.32 s per iteration on the CPU against 0.357 s on CUDA, a
+    17.7x difference; end to end on a small build, 9.01 s -> 2.83 s.
+
+    Asserted on PARSED source, never raw text -- see _unparsed.
+    """
+    from core.SBI.Priors import bp_prior, hopf_prior, nadrowski_prior
+    from core.SBI.Priors.user_prior import UserPrior as _UserPrior
+    import inspect as _inspect
+
+    for cls in (nadrowski_prior.NadrowskiPrior, bp_prior.BPPrior,
+                hopf_prior.HopfPrior, _UserPrior):
+        fn = cls.__dict__.get("_local_map")
+        assert fn is not None, f"{cls.__name__} has no _local_map of its own"
+        assert not isinstance(fn, staticmethod), (
+            f"{cls.__name__}._local_map is a @staticmethod, so it cannot see self.sweep_device -- "
+            f"that is how the CPU hardcode survived in three priors at once")
+        assert "self" in _inspect.signature(fn).parameters, \
+            f"{cls.__name__}._local_map must be an instance method"
+        body = _unparsed(fn)
+        for bad in ("torch.device('cpu')", 'torch.device("cpu")'):
+            assert bad not in body, (
+                f"{cls.__name__}._local_map hardcodes {bad} again -- it must simulate on "
+                f"self.sweep_device, which resolve_sweep_device already degrades to the CPU")
+        assert "sweep_device" in body, (
+            f"{cls.__name__}._local_map must simulate on self.sweep_device")
+
+
+def test_the_sweep_device_degrades_to_the_cpu_instead_of_raising():
+    """A caller's device is normally already CPU on a machine without CUDA, so this is for the case
+    where one is handed a cuda device anyway: it must DEGRADE with a printed note rather than raise
+    halfway through a multi-minute sweep."""
+    from core.SBI.Priors import prior as _prior_mod
+    import contextlib as _ctx
+
+    assert _prior_mod.resolve_sweep_device(torch.device("cpu")).type == "cpu"
+
+    saved = torch.cuda.is_available
+    buf = io.StringIO()
+    try:
+        torch.cuda.is_available = lambda: False
+        with _ctx.redirect_stdout(buf):
+            got = _prior_mod.resolve_sweep_device(torch.device("cuda"))
+    finally:
+        torch.cuda.is_available = saved
+    assert got.type == "cpu", "a cuda device with no CUDA must fall back, not raise"
+    assert "falling back" in buf.getvalue().lower(), (
+        "the fallback must SAY so -- a sweep silently running 17.7x slower than asked is the "
+        "failure this whole change removed")
+
+
+def test_the_sweep_and_flow_knobs_are_ARGUMENTS_because_the_constants_are_snapshotted():
+    """EVERY KNOB MUST BE AN ARGUMENT, and it must reach the thing it configures.
+
+    orchestrator does `from .config import PRIOR_SWEEP_ITERATIONS, NSF_HIDDEN_FEATURES, ...`, which
+    binds all of them at IMPORT (trap X12). So a panel that "configured" a run by assigning to
+    config.PRIOR_SWEEP_ITERATIONS would change nothing, the run would use the default, and there
+    would be nothing in the log to say so. That is the trap the training budget was made a parameter
+    for, and it applies to every knob the GUI now exposes.
+
+    THE SIGNATURE CHECK ALONE IS NOT ENOUGH. A parameter that is accepted and then never read is
+    indistinguishable from the bug, from the caller's side -- so each knob is also required to be
+    USED in the body it was added to. That is the accepted-and-dropped failure mode.
+    """
+    import inspect as _inspect
+
+    for fn, knobs in (
+        (orchestrator.build_prior,
+         ("num_iterations", "sweep_batch", "max_sets", "walk_step",
+          "min_cluster_size", "min_samples")),
+        (orchestrator.build_posterior,
+         ("hidden_features", "num_transforms", "learning_rate", "stop_after_epochs",
+          "fisher_m", "fisher_dz", "fisher_points")),
+    ):
+        params = _inspect.signature(fn).parameters
+        body = _unparsed(fn)
+        for knob in knobs:
+            assert knob in params, (
+                f"{fn.__name__} must accept {knob!r} as an ARGUMENT -- assigning to the config "
+                f"constant is a silent no-op, because orchestrator snapshots it at import (X12)")
+            assert params[knob].default is None, (
+                f"{fn.__name__}'s {knob!r} must default to None, so 'not supplied' is distinct from "
+                f"a value and the config constant is resolved inside the function")
+            # >= 2: once binding it in the signature, at least once reading it in the body.
+            assert body.count(knob) >= 2, (
+                f"{fn.__name__} accepts {knob!r} and never reads it -- accepted-and-dropped, the "
+                f"failure a signature check alone misses")
+
+
+def test_the_prior_sweep_constants_are_named_in_config():
+    """The literals that used to be buried now have names, and the GUI binds to these."""
+    for name in ("PRIOR_SWEEP_MAX_SETS", "PRIOR_SWEEP_STEP", "PRIOR_SWEEP_ON_ACCELERATOR",
+                 "PRIOR_CLUSTER_MIN_SIZE", "PRIOR_CLUSTER_MIN_SAMPLES"):
+        assert hasattr(config, name), f"config.{name} is missing; the GUI field has nothing to bind to"
+    assert config.PRIOR_SWEEP_MAX_SETS == 175_000, "the historical max-sets value must be preserved"
+    assert config.PRIOR_CLUSTER_MIN_SIZE == 50 and config.PRIOR_CLUSTER_MIN_SAMPLES == 10, (
+        "HDBSCAN's two decide the GMM's component count, so changing their defaults changes what "
+        "prior a default build produces -- keep them at the measured historical values")
+
+
+# ── 2026-08-27: the recovery path was the thing that killed the run ──────────────────────────────
+def _raising_empty_cache(calls):
+    """A torch.cuda.empty_cache stand-in that fails the way the real one did on 2026-08-27.
+
+    A RAW driver torch.AcceleratorError, not torch.OutOfMemoryError -- that distinction is the whole
+    of trap X6/X7 and the reason `_is_oom` carries a message test as well as a type test.
+    """
+    def fake():
+        calls.append(1)
+        raise torch.AcceleratorError("CUDA error: out of memory")
+    return fake
+
+
+def _cuda_release_probe(fn):
+    """Run ``fn`` with device.type == 'cuda' faked past the guards in _release_device_memory.
+
+    _release_device_memory returns early on a non-CUDA device, so on a CPU test box the guarded body
+    would never execute and the regression would go unpinned. A tiny stand-in device object gets the
+    body to run while the torch entry points it calls are themselves monkeypatched.
+    """
+    class _FakeDevice:
+        type = "cuda"
+    return fn(_FakeDevice())
+
+
+def test_the_release_path_survives_a_failing_empty_cache():
+    """THE 2026-08-27 REGRESSION. The retrain caught a real OOM at batch 351/5000, exited its except
+    block, and was then killed by `torch.cuda.empty_cache()` raising an AcceleratorError of its own
+    from OUTSIDE any handler -- so the run died on its own RECOVERY, and because the except clause
+    had already closed, Python attached no context and the traceback said nothing about the OOM.
+
+    A release is best-effort by definition: every caller is already recovering and its next act is to
+    retry smaller. This asserts the whole ladder still completes when all three releases fail."""
+    # torch.backends.cuda.cufft_plan_cache is a DEVICE-PROXYING descriptor: assigning to its .clear
+    # raises before the test starts. It is left real, which costs nothing -- whatever it does, the
+    # guard under test absorbs it, and that is precisely the behaviour being asserted.
+    saved_empty = torch.cuda.empty_cache
+    saved_drop = _sdeint_mod.drop_graph_cache
+    saved_floor = pipeline_mod._MIN_SIM_CHUNK
+    calls = []
+    try:
+        torch.cuda.empty_cache = _raising_empty_cache(calls)
+        _sdeint_mod.drop_graph_cache = _raising_empty_cache(calls)
+        # 1. the helper absorbs every failing release and returns normally
+        _cuda_release_probe(pipeline_mod._release_device_memory)
+        assert len(calls) == 2, f"both patched releases must be attempted, got {len(calls)}"
+        # 2. and the retry ladder it sits inside still reconstructs the batch.
+        #    _MIN_SIM_CHUNK is lowered so 8 rows can actually halve -- at the production floor of 256
+        #    an 8-row range is below 2*floor and re-raises by design.
+        pipeline_mod._MIN_SIM_CHUNK = 1
+        seen = []
+        out = pipeline_mod._rows_with_oom_retry(
+            _oom_at(4, seen), 0, 8, per_row_elements=10, device=torch.device("cpu"))
+        assert torch.equal(out, torch.arange(0, 8, dtype=torch.float32).unsqueeze(1).repeat(1, 3)), \
+            "a release that fails throughout must still leave the batch exactly reconstructed"
+    finally:
+        torch.cuda.empty_cache = saved_empty
+        _sdeint_mod.drop_graph_cache = saved_drop
+        pipeline_mod._MIN_SIM_CHUNK = saved_floor
+
+
+def test_the_oom_notice_is_printed_before_the_release():
+    """The notice has to reach the log even when the release that follows it explodes.
+
+    On 2026-08-27 the order was the other way round: `note` was captured, the release raised, and the
+    only record of the ORIGINAL failure died with it. Ordering, not wording, is what this pins -- so
+    it asserts the notice is present after a release that raises."""
+    import contextlib as _ctx
+    saved_empty = torch.cuda.empty_cache
+    saved_floor = pipeline_mod._MIN_SIM_CHUNK
+    buf = io.StringIO()
+    try:
+        torch.cuda.empty_cache = _raising_empty_cache([])
+        pipeline_mod._MIN_SIM_CHUNK = 1
+        seen = []
+        with _ctx.redirect_stderr(buf):
+            pipeline_mod._rows_with_oom_retry(
+                _oom_at(4, seen), 0, 8, per_row_elements=10, device=torch.device("cpu"))
+    finally:
+        torch.cuda.empty_cache = saved_empty
+        pipeline_mod._MIN_SIM_CHUNK = saved_floor
+    text = buf.getvalue()
+    assert "OUTSIDE the simulator retry" in text, f"the OOM notice was not printed:\n{text}"
+    assert "out of memory" in text, f"the original error text was not carried into the notice:\n{text}"
+
+
+def test_the_budget_credits_once_per_training_batch_not_once_per_gen_obs():
+    """_BUDGET_RECOVER_AFTER is 32 and every description of it says "32 clean BATCHES". But gen_obs
+    is what called _budget_note_ok, and a chi batch makes 1 + K of those -- one spontaneous run plus
+    one per probe -- so at the production K the cap probed upward every ~3 batches instead of every
+    32. An 0.8x backoff unwound in three batches and kept climbing: the throttle never held, which is
+    why a busy card produced repeated OOMs rather than settling into a slower surviving state."""
+    saved_cap, saved_clean = pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs
+    saved_tag = pipeline_mod._BATCH_TAG
+    try:
+        pipeline_mod._BUDGET_CAP_ELEMENTS, pipeline_mod._budget_clean_runs = 1_000_000, 0
+        pipeline_mod._BATCH_TAG = "training batch 1/5000 [t_scale=1, T=1, n_fine=1, N_points=1, rows=1]"
+        for _ in range(1 + 11):                     # a chi batch at K=11
+            pipeline_mod._budget_note_ok()
+        assert pipeline_mod._budget_clean_runs == 0, (
+            f"gen_obs' own calls must not count inside a batch, got "
+            f"{pipeline_mod._budget_clean_runs} credits from 12 calls")
+        pipeline_mod._budget_note_ok(batch_level=True)
+        assert pipeline_mod._budget_clean_runs == 1, "the batch tail must credit exactly once"
+
+        # Outside gen_training_data there is no batch, so the historical per-call credit stands.
+        pipeline_mod._BATCH_TAG = ""
+        pipeline_mod._budget_note_ok()
+        assert pipeline_mod._budget_clean_runs == 2, (
+            "outside a training batch every call must still count -- the PPC and the prior sweeps "
+            "have no batch to key on and would otherwise never recover the cap")
+    finally:
+        pipeline_mod._BUDGET_CAP_ELEMENTS = saved_cap
+        pipeline_mod._budget_clean_runs = saved_clean
+        pipeline_mod._BATCH_TAG = saved_tag
+
+
+def test_dropping_the_graph_cache_is_available_and_empties_it():
+    """The OOM path drops captured graphs because their memory lives in a PRIVATE pool that
+    empty_cache() cannot reclaim -- and the halving retry that follows is about to capture ANOTHER
+    at the reduced width, since the batch shape is part of the graph key."""
+    _sdeint_mod._GRAPH_CACHE[("fake", (1, 2), 1, 50, "f32", "cuda", 0.1)] = {"graph": object()}
+    assert len(_sdeint_mod._GRAPH_CACHE) >= 1
+    dropped = _sdeint_mod.drop_graph_cache()
+    assert dropped >= 1, "drop_graph_cache must report what it dropped"
+    assert len(_sdeint_mod._GRAPH_CACHE) == 0, "the cache must be empty afterwards"
+
+
+def test_the_vram_ceiling_bounds_the_plan_and_stays_out_of_the_identity():
+    """SIM_VRAM_CEILING_GIB is the PROACTIVE half of the memory budget: the learned cap can only
+    tighten after something has already died, and on a shared Windows card that can be hours in.
+
+    It must NOT reach training_identity. The identity digest names the checkpoint DIRECTORY, so a
+    memory knob inside it would rename the directory whenever it moved and silently restart a
+    resumable multi-day run from zero -- which is exactly how 884 batches were orphaned on
+    2026-08-27. A split batch is row-aligned and produces the same training distribution, so the
+    knob genuinely does not describe the data."""
+    dev, dt = torch.device("cpu"), torch.float32
+    saved = getattr(config, "SIM_VRAM_CEILING_GIB", 0.0)
+    # The LEARNED cap is a module global and the OOM tests above leave one behind; it is the other
+    # term in the same min(), so without neutralising it this measures that instead of the ceiling.
+    saved_cap = pipeline_mod._BUDGET_CAP_ELEMENTS
+    try:
+        pipeline_mod._BUDGET_CAP_ELEMENTS = None
+        config.SIM_VRAM_CEILING_GIB = 0.0
+        base = pipeline_mod.sim_memory_budget_elements(dev, dt)
+        config.SIM_VRAM_CEILING_GIB = 2.0
+        capped = pipeline_mod.sim_memory_budget_elements(dev, dt)
+        assert capped == (2.0 * 2 ** 30) // 4, f"ceiling not applied in elements: {capped}"
+        assert capped < base, "a 2 GiB ceiling must bind below the CPU default budget"
+        config.SIM_VRAM_CEILING_GIB = 0.0
+        assert pipeline_mod.sim_memory_budget_elements(dev, dt) == base, "0 must mean off"
+    finally:
+        config.SIM_VRAM_CEILING_GIB = saved
+        pipeline_mod._BUDGET_CAP_ELEMENTS = saved_cap
+
+    import inspect as _inspect
+    src = _inspect.getsource(orchestrator.training_identity)
+    assert "SIM_VRAM_CEILING" not in src, (
+        "the VRAM ceiling must never enter the checkpoint identity -- it would rename the "
+        "checkpoint directory and silently restart a resumable run")
+
+
+def test_the_drive_is_charged_at_its_build_peak():
+    """Section 8.2 recorded the planner under-counting the drive 4x -- a 2.16 GiB result with an
+    8.64 GiB transient -- and named it a plausible source of trap X7's unwrapped OOMs. `_per_row` is
+    where that bites: it is the number _budget_note_oom teaches the learned cap, so under-counting
+    taught the cap something smaller than what actually failed.
+
+    The multiple is derived by counting the builder's eager allocations (see the constant's comment);
+    on CUDA this measures it instead."""
+    assert pipeline_mod._FORCE_BUILD_PEAK_MULTIPLE >= 2, "the drive costs more than its result"
+    import inspect as _inspect
+    src = _inspect.getsource(pipeline_mod.gen_training_data)
+    assert "_FORCE_BUILD_PEAK_MULTIPLE * n_force_ch * n_fine_total" in src, (
+        "_per_row must charge the drive at its build peak, not at its result size")
+
+    if not torch.cuda.is_available():
+        print("      (no CUDA -- the 4x multiple is derived, not measured, on this box)")
+        return
+    dev = torch.device("cuda")
+    B, T = 64, 20_000
+    fparams = torch.tensor([[1.0, 0.5, 0.0, 0.0]], device=dev).expand(B, -1).contiguous()
+    rparams = torch.tensor([[1.0, 0.0, 1.0, 0.0]], device=dev).expand(B, -1).contiguous()
+    t_nd = torch.linspace(0, 1.0, T, device=dev)
+    fidx = {"amp": 0, "freq": 1, "phase": 2, "offset": 3}
+    ridx = {"t_scale": 0, "t_offset": 1, "f_scale": 2, "f_offset": 3}
+    torch.cuda.synchronize(); torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(dev)
+    before = torch.cuda.memory_allocated(dev)
+    out = pipeline_mod.build_nondim_sin_force_tensor(fparams, t_nd, rparams, fidx, ridx)
+    peak = torch.cuda.max_memory_allocated(dev) - before
+    measured = peak / max(1, out.numel() * out.element_size())
+    print(f"      measured drive build peak = {measured:.2f}x the result")
+    assert measured <= pipeline_mod._FORCE_BUILD_PEAK_MULTIPLE + 0.5, (
+        f"the builder now peaks at {measured:.2f}x, above the planner's charged "
+        f"{pipeline_mod._FORCE_BUILD_PEAK_MULTIPLE}x -- raise the constant")
+
+
+def test_an_unsaved_prior_cannot_start_a_long_checkpointed_run():
+    """training_identity fingerprints the prior's fitted GMM, and that fingerprint names the
+    checkpoint DIRECTORY. A prior that was never written to disk therefore produces a directory
+    nothing can ever resolve again once the process exits -- so the checkpoint it spends hours
+    writing is unresumable by construction, and a crash costs the entire run.
+
+    That happened: on 2026-08-27 a run reached 884 committed batches under fingerprint
+    bd307c079d14db0b, for which no file in Resources/Priors exists. Those rows are unrecoverable."""
+    # A REAL MixtureSameFamily, because _find_nd_gmm isinstance-checks for one and
+    # component_distribution is a read-only property. Random means guarantee it collides with
+    # nothing on disk.
+    _k, _d = 4, 3
+    unsaved = torch.distributions.MixtureSameFamily(
+        torch.distributions.Categorical(probs=torch.rand(_k, dtype=torch.float64)),
+        torch.distributions.MultivariateNormal(
+            torch.randn(_k, _d, dtype=torch.float64),
+            covariance_matrix=torch.eye(_d, dtype=torch.float64).expand(_k, _d, _d)))
+    fp = orchestrator._gmm_fingerprint(unsaved)
+    assert fp is not None, "the probe prior must be fingerprintable, or the test proves nothing"
+    assert fp not in orchestrator._saved_prior_fingerprints(), "random prior collided with a saved one"
+    try:
+        orchestrator._assert_prior_is_saved(unsaved, n_runs=5000, run_size=2048)
+    except ValueError as e:
+        assert "not saved" in str(e) and "unresumable" in str(e), f"unhelpful message: {e}"
+    else:
+        raise AssertionError("an unsaved prior must be refused before a long checkpointed run")
+
+    # A prior that IS on disk must pass, or the guard blocks the very run it exists to protect.
+    saved = orchestrator._saved_prior_fingerprints()
+    if saved:
+        import core.Helpers.file_manager as _fm
+        name = sorted(saved.values())[0]
+        dist = _fm.load_mix_dist(str(config.PRIOR_PATH / name), device=torch.device("cpu"))
+        orchestrator._assert_prior_is_saved(dist, n_runs=5000, run_size=2048)
+
+
+def test_the_batch_retry_waits_releases_and_restores_the_rng():
+    """The outermost retry does not shrink the work -- it waits and runs the SAME batch again,
+    because the failure the halving ladders cannot fix is a card that is momentarily full of
+    somebody else's surfaces. Under WDDM those are evictable, so mem_get_info reported them as free
+    and the driver lost the eviction race (trap X6); shrinking does not help, waiting does.
+
+    The re-run must be EXACT. gen_training_data restores the batch's opening RNG snapshot first, so
+    the retried batch is the batch that would have been produced.
+
+    ⚠ IT MUST BE THE SNAPSHOT TAKEN IMMEDIATELY BEFORE `_rows`, NOT `_pending_rng`. `_pending_rng` is
+    the state at the TOP of the iteration -- before the theta draw and the chi multipliers -- which
+    is what a RESUME needs, because a resume repeats those. The retry does not: it reuses the thetas
+    as drawn. Restoring `_pending_rng` would therefore hand `_rows` the noise the theta draw should
+    have consumed, and the batch would differ from the one an uninterrupted run produces -- the exact
+    defect the restore exists to prevent.
+
+    This pins the structure of that loop, which a full end-to-end OOM cannot be staged for on a CPU
+    box."""
+    import inspect as _inspect
+    src = _inspect.getsource(pipeline_mod.gen_training_data)
+    for needle, why in (
+        ("TRAINING_BATCH_RETRY_ATTEMPTS", "the retry must be configurable, and disable-able"),
+        ("except RuntimeError as _err", "narrow, so a GUI cancel (a BaseException) still escapes"),
+        ("not _is_oom(_err)", "a non-OOM RuntimeError is a bug and must not be retried in a loop"),
+        ("_release_device_memory(device)", "the full release, graphs included, on the OOM path"),
+        ("_cancellable_wait(", "a plain sleep cannot be cancelled -- see core/gui/streams.py"),
+        ("_rows_rng = _tc.rng_snapshot(", "snapshot the state _rows itself starts from"),
+        ("_tc.rng_restore(_rows_rng", "the re-run must resume THAT state, not the iteration's top"),
+    ):
+        assert needle in src, f"batch retry: {needle!r} missing -- {why}"
+    # The release must follow the notice, not precede it (the 2026-08-27 ordering bug).
+    assert src.index("Waiting") < src.index("_release_device_memory(device)\n                _cancellable_wait"), \
+        "the batch-retry notice must be printed BEFORE the release that may itself fail"
+
+
+def test_cancellable_wait_returns_and_stays_short():
+    """It sleeps in slices so the cooperative cancel -- which is raised from a stream write on the
+    worker thread -- gets a chance to fire, and prints so a multi-minute pause is not read as a hang."""
+    import contextlib as _ctx, time as _time
+    buf = io.StringIO()
+    t0 = _time.monotonic()
+    with _ctx.redirect_stderr(buf):
+        pipeline_mod._cancellable_wait(0.2, "unit test")
+    assert 0.15 <= _time.monotonic() - t0 < 3.0, "wait did not sleep about the requested time"
+    pipeline_mod._cancellable_wait(0.0, "zero")          # must not hang or raise
 
 
 if __name__ == "__main__":

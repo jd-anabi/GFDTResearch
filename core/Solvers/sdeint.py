@@ -100,6 +100,29 @@ def _graph_key(step, x0, force, dt, chunk):
             str(x0.dtype), str(x0.device), float(dt))
 
 
+def drop_graph_cache() -> int:
+    """Release every captured graph and its private pool. Returns how many entries were dropped.
+
+    WHY THIS IS WORTH CALLING ON AN OOM PATH. A captured graph's memory lives in a PRIVATE pool that
+    ``torch.cuda.empty_cache()`` cannot reclaim -- which is why SOLVER_GRAPH_CACHE_MAX bounds this
+    cache rather than letting it grow. At an out-of-memory up to that many pools are pinned, and the
+    halving retry that follows is about to capture ANOTHER one: ``tuple(x0.shape)`` is part of
+    _graph_key, so 2048 -> 1024 -> 512 -> 256 is four distinct keys. Dropping the cache is therefore
+    the one release that acts on the retry's OWN next allocation rather than on the failed attempt's.
+
+    THE DROP IS A REQUEST, NOT A GUARANTEE. Clearing the dict removes our reference; the pool comes
+    back when the CUDAGraph object is actually collected, so an entry still pinned by a live
+    traceback frame is freed later rather than now. That is one more reason a release belongs OUTSIDE
+    an ``except`` block, where the failed attempt's frames have already been dropped.
+
+    Recapture costs three warm-up passes of SOLVER_GRAPH_CHUNK steps plus one device synchronize --
+    nothing against the batch that just failed, and only paid if the run continues.
+    """
+    n = len(_GRAPH_CACHE)
+    _GRAPH_CACHE.clear()
+    return n
+
+
 def _acquire_graph(step, params, x0, force, dt, sqrt_dt, chunk):
     """Capture (or fetch) a graph replaying ``chunk`` Euler steps. None => caller runs eager."""
     global _GRAPH_DISABLED

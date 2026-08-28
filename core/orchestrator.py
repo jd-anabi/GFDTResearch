@@ -319,6 +319,74 @@ def _gmm_fingerprint(obj) -> str | None:
     return h.hexdigest()[:16]
 
 
+
+# Below this many batches a generation run is short enough that losing it is an inconvenience rather
+# than a day, so the unsaved-prior guard stays out of the way of smoke runs and experiments.
+_UNSAVED_PRIOR_MIN_RUNS = 100
+
+
+def _saved_prior_fingerprints() -> dict:
+    """``{fingerprint: filename}`` over every saved ND prior in Resources/Priors.
+
+    Reads the stored ``means``/``weights`` directly rather than rebuilding a distribution: those are
+    exactly the two tensors `_gmm_fingerprint` digests (file_manager.save_prior writes them), so the
+    digests are comparable by construction, and this stays cheap enough to run before every training
+    round -- the files are tens of kilobytes.
+    """
+    out = {}
+    try:
+        candidates = sorted(PRIOR_PATH.glob("*.pt"))
+    except Exception:                        # noqa: BLE001 -- a missing directory is "none saved"
+        return out
+    for f in candidates:
+        try:
+            d = torch.load(str(f), map_location="cpu", weights_only=False)
+            if not (isinstance(d, dict) and "means" in d and "weights" in d):
+                continue
+            h = hashlib.sha256()
+            h.update(d["means"].detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+            h.update(d["weights"].detach().cpu().to(torch.float64).contiguous().numpy().tobytes())
+            out.setdefault(h.hexdigest()[:16], f.name)
+        except Exception:                    # noqa: BLE001 -- a stale or foreign .pt is not our problem
+            continue
+    return out
+
+
+def _assert_prior_is_saved(prior, n_runs: int, run_size: int) -> None:
+    """Refuse to start a long generation run from a prior that exists only in memory.
+
+    WHY THIS IS A HARD ERROR AND NOT A WARNING. `training_identity` fingerprints the prior's GMM, and
+    that fingerprint names the checkpoint DIRECTORY. A prior that was fitted but never written to
+    disk therefore produces a directory nobody can ever resolve again: the moment the process ends,
+    the fingerprint is unreproducible, so the checkpoint it has been faithfully writing for hours can
+    never be resumed by anything. It is not a degraded resume -- it is a guaranteed total loss of the
+    run, discovered only when you try to recover from a crash.
+
+    That is not hypothetical. On 2026-08-27 a run reached 884 committed batches under fingerprint
+    bd307c079d14db0b, for which no file in Resources/Priors exists; those rows are unrecoverable, and
+    a second run started minutes later under a third fingerprint. The cost of the check is reading a
+    few 30 KB files; the cost of not having it is a day of simulation.
+
+    Silent for short runs (see _UNSAVED_PRIOR_MIN_RUNS) and for anything with checkpointing off,
+    which is where the tests and the smoke train live.
+    """
+    fp = _gmm_fingerprint(prior)
+    if fp is None:
+        return                               # no GMM to identify (a stub or hand-built prior)
+    saved = _saved_prior_fingerprints()
+    if fp in saved:
+        return
+    raise ValueError(
+        f"This prior (fingerprint {fp}) is not saved anywhere in {PRIOR_PATH}. Training would "
+        f"write a {n_runs}-batch checkpoint ({n_runs * run_size:,} rows) into a directory named "
+        f"after that fingerprint -- and because the fingerprint is computed from the fitted GMM, "
+        f"nothing could ever reproduce it once this process exits. The checkpoint would be "
+        f"unresumable and a crash would cost the whole run.\n"
+        f"Save the prior first (it is what SBC later draws theta* from in any case), then train. "
+        f"Saved priors currently on disk: "
+        f"{', '.join(sorted(saved.values())) if saved else '(none)'}.")
+
+
 def _assert_prior_used_matches_posterior(posterior, inferred_prior, what: str) -> None:
     """Refuse to run a posterior against a prior it was not trained with.
 
@@ -566,7 +634,12 @@ def _assert_chi_config_is_deliberate(cfg: SimConfig) -> None:
 
 
 def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
-                *, save: bool = True, save_name: str | None = None, fig_sink=None) -> tuple[Distribution, Distribution]:
+                *, save: bool = True, save_name: str | None = None, fig_sink=None,
+                num_iterations: int | None = None, sweep_batch: int | None = None,
+                max_sets: int | None = None, walk_step: float | None = None,
+                stability_units: float | None = None,
+                min_cluster_size: int | None = None,
+                min_samples: int | None = None) -> tuple[Distribution, Distribution]:
     """
     Load an existing prior from disk, or construct a new product prior:
         ProductPrior = ND parameter prior x rescaling prior x forcing prior
@@ -578,7 +651,25 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
                  Pass False to defer saving (e.g. a GUI that saves via an explicit control).
     :param save_name: Name to save under; when None (and save=True) the CLI prompt is used.
     :param fig_sink: Optional (title, fig) -> None display callback for the corner plot; None => plt.show().
+    :param num_iterations: GLOBAL sweep rounds; None = config.PRIOR_SWEEP_ITERATIONS.
+    :param sweep_batch: candidates per global round; None = config.PRIOR_SWEEP_BATCH (0 = follow the
+                     hardware batch). ⚠ NOT a speed knob -- see the C-7 note at the constant.
+    :param max_sets: accepted sets that stop the LOCAL flood-fill; None = config.PRIOR_SWEEP_MAX_SETS.
+    :param walk_step: flood-fill random-walk stride; None = config.PRIOR_SWEEP_STEP.
+    :param stability_units: ND time units the stability screen integrates over; None =
+                     config.STABILITY_SWEEP_ND_UNITS. This defines what "stable" MEANS, so changing
+                     it changes the prior's support, not just how long the sweep takes.
+    :param min_cluster_size: HDBSCAN floor on an island; None = config.PRIOR_CLUSTER_MIN_SIZE.
+    :param min_samples: HDBSCAN density conservatism; None = config.PRIOR_CLUSTER_MIN_SAMPLES.
+                     ⚠ These two are the CLUSTERING stage, not the sweep: HDBSCAN's label count is
+                     handed straight to the GMM's n_components, so they set how many modes the
+                     prior has. A prior with a different component count is a different prior.
     :return: A Distribution that can be sampled and scored.
+
+    ⚠ WHY THESE ARE PARAMETERS AND NOT "JUST SET THE CONFIG CONSTANT" -- the same reason
+    build_posterior's budget is: this module does `from .config import PRIOR_SWEEP_ITERATIONS, ...`,
+    which SNAPSHOTS them at import, so a caller writing `config.PRIOR_SWEEP_ITERATIONS = 10` is a
+    silent no-op and the sweep runs at 50 anyway with nothing to say otherwise.
     """
     # FIRST, before the ~9-minute stability sweep: is this chi configuration the one you meant? The
     # prior itself is chi-independent, so this is here purely to fail at the START of a session
@@ -624,7 +715,8 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     # Stability is a per-parameter property — screen on a short fixed-length trajectory
     # (STABILITY_SWEEP_ND_UNITS) rather than the full master grid. Global sweep uses
     # half this (t_global_scale=2 inside gen_prior), local sweep uses the full t_stab.
-    n_stab_fine = int(STABILITY_SWEEP_ND_UNITS / cfg.dt_nd_min)
+    stab_units = STABILITY_SWEEP_ND_UNITS if stability_units is None else float(stability_units)
+    n_stab_fine = int(stab_units / cfg.dt_nd_min)
     t_stab = cfg.t[:n_stab_fine]
     prior_segs = max(1, math.ceil(n_stab_fine / CHUNK_LEN))
     # The sweep's batch is its OWN knob (C-7), not the training batch. They were the same number,
@@ -632,7 +724,10 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     # a cheap run made the prior worse WITHOUT making it faster -- 527 s at batch 2048 against >70 min
     # and unfinished at batch 32. PRIOR_SWEEP_BATCH = 0 keeps the historical behaviour (follow the
     # hardware batch), which is still what a real run wants; see config for when to set it.
-    sweep_batch = PRIOR_SWEEP_BATCH or cfg.hw.batch_size
+    sweep_batch = (PRIOR_SWEEP_BATCH if sweep_batch is None else int(sweep_batch)) or cfg.hw.batch_size
+    n_iter = PRIOR_SWEEP_ITERATIONS if num_iterations is None else int(num_iterations)
+    if n_iter < 1:
+        raise ValueError(f"num_iterations must be at least 1, got {n_iter}")
     nd_prior = pipeline.gen_prior(
         model=cfg.model, t=t_stab,
         global_batch_size=sweep_batch,
@@ -640,7 +735,9 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
         segs=prior_segs,
         prior_bounds=cfg.nd_params_bounds,
         state_dep_drift=cfg.state_dep_drift,
-        num_iterations=PRIOR_SWEEP_ITERATIONS,
+        num_iterations=n_iter,
+        n_max=max_sets, step=walk_step,
+        min_cluster_size=min_cluster_size, min_samples=min_samples,
         # geometric/log box on the ND params that asked for one: a user model's own per-parameter
         # choice, else config.REPARAM_LOG_PARAMS. See _log_params_for.
         log_mask=nd_log_mask(cfg, log_params=_log_params_for(cfg)),
@@ -713,6 +810,10 @@ def build_posterior(
     *, save: bool = True, save_name: str | None = None, fig_sink=None,
     num_runs: int | None = None, run_size_cap: int | None = None,
     truncation=None, x_obs_digest: str | None = None,
+    hidden_features: int | None = None, num_transforms: int | None = None,
+    learning_rate: float | None = None, stop_after_epochs: int | None = None,
+    fisher_m: int | None = None, fisher_dz: float | None = None,
+    fisher_points: int | None = None,
 ) -> tuple[TransformedPosterior, dict | None]:
     """
     Load an existing latent DirectPosterior from disk and wrap with T, or train a new one
@@ -733,6 +834,26 @@ def build_posterior(
                      its sidecar and the load path refuses it for general inference.
     :param x_obs_digest: the observation the region was drawn around (``observation_digest``), so the
                      artifact records what it is valid near.
+    :param hidden_features: flow width per transform; None = config.NSF_HIDDEN_FEATURES.
+    :param num_transforms: flow depth; None = config.NSF_NUM_TRANSFORMS.
+    :param learning_rate: Adam LR; None = config.TRAINING_LEARNING_RATE.
+    :param stop_after_epochs: early-stopping patience; None = config.TRAINING_STOP_AFTER_EPOCHS.
+    :param fisher_m: ensemble per latent perturbation for the rotation; None =
+                     config.REPARAM_FISHER_M.
+    :param fisher_dz: latent central-difference step; None = config.REPARAM_FISHER_DZ.
+    :param fisher_points: operating points the Fisher is averaged over; None =
+                     config.REPARAM_FISHER_POINTS. n_points=1 is GT-only, which re-correlates
+                     off-GT -- averaging is what makes ONE linear rotation valid prior-wide.
+                     ⚠ A RESUMED run reuses the checkpoint's stored V and ignores all three
+                     (trap X10): V is not reproducible across processes, so a fresh one would
+                     put the reused rows in a different coordinate than their stored targets.
+
+    ⚠ THESE FOUR ARE WHAT A COMPLETE C-11 CHECKPOINT IS FOR. Its own docstring says a finished
+    checkpoint "is a cache of the whole simulation run, so you can retrain the flow at a different
+    capacity/learning rate without re-simulating" -- and until 2026-08-27 there was no way to do that
+    without editing config.py. Re-trying capacity costs ~46 h against ~57 h for a full run.
+    ⚠ And note §4.6 ruled out more capacity on the BROKEN conditioning; that verdict is worth
+    re-testing once §11's Phase 1 has landed, not inherited.
 
     ⚠ WHY THESE ARE PARAMETERS AND NOT "JUST SET THE CONFIG CONSTANT". This module does
     `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE`, which SNAPSHOTS both at import -- so a
@@ -882,6 +1003,9 @@ def build_posterior(
     # pre-training cost.
     ckpt_dir = ckpt_resumed = None
     if TRAINING_CHECKPOINT_EVERY and train_new:
+        # BEFORE the digest is computed, because the digest is the thing an unsaved prior poisons.
+        if n_runs >= _UNSAVED_PRIOR_MIN_RUNS:
+            _assert_prior_is_saved(prior, n_runs, run_size)
         ident = training_identity(cfg, prior, run_size, n_runs)
         ckpt_dir = training_checkpoint.resolve_dir(ident)
         _st = training_checkpoint.peek(ckpt_dir)
@@ -920,7 +1044,8 @@ def build_posterior(
         # Average the Fisher over the prior (not just GT) so the linear rotation is valid prior-wide.
         # GT-free: the rotation anchors on the prior median with a representative drive (force_prior).
         V, fisher_evals = decorrelate.build_latent_fisher_rotation(
-            cfg, T, latent_prior=latent_inferred_prior, force_prior=force_prior, with_values=True)
+            cfg, T, latent_prior=latent_inferred_prior, force_prior=force_prior, with_values=True,
+            m=fisher_m, dz=fisher_dz, n_points=fisher_points)
         # The eigenvalues ride into the sidecar with V. Without them the saved rotation only says
         # WHICH direction is least constrained, never BY HOW MUCH -- and recovering them afterwards
         # costs a full Fisher re-run. See scripts/identifiability.py.
@@ -1016,8 +1141,12 @@ def build_posterior(
         x_obs=None, theta_obs=theta_obs_latent, num_rounds=TRAINING_NUM_ROUNDS,
         return_diagnostics=True,
         theta_transform=T_train,
-        hidden_features=NSF_HIDDEN_FEATURES, num_transforms=NSF_NUM_TRANSFORMS, num_bins=NSF_NUM_BINS,
-        learning_rate=TRAINING_LEARNING_RATE, stop_after_epochs=TRAINING_STOP_AFTER_EPOCHS,
+        hidden_features=NSF_HIDDEN_FEATURES if hidden_features is None else int(hidden_features),
+        num_transforms=NSF_NUM_TRANSFORMS if num_transforms is None else int(num_transforms),
+        num_bins=NSF_NUM_BINS,
+        learning_rate=TRAINING_LEARNING_RATE if learning_rate is None else float(learning_rate),
+        stop_after_epochs=(TRAINING_STOP_AFTER_EPOCHS if stop_after_epochs is None
+                           else int(stop_after_epochs)),
         max_num_epochs=TRAINING_MAX_NUM_EPOCHS, show_train_summary=TRAINING_SHOW_SUMMARY,
         batch_size=TRAINING_BATCH_SIZE, device=cfg.hw.device,
     )
@@ -1468,7 +1597,8 @@ def _emit(fig_sink, title: str, fig) -> None:
 
 def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | TransformedPosterior,
                          inferred_prior: Distribution, force_prior: Distribution,
-                         *, fig_sink=None) -> None:
+                         *, fig_sink=None, n_cal: int | None = None,
+                         cal_n_scales: int | None = None) -> None:
     """
     Data-free posterior calibration: SBC (Talts 2018, marginals) + expected coverage (TARP, Lemos
     2023). Both draw their calibration set from the PRIOR (theta_star ~ prior, x_cal simulated), so
@@ -1476,6 +1606,13 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
 
     :param inferred_prior: the actual training prior (ND x rescale product prior) — SBC draws
                            theta_star from it, not from the posterior.
+    :param n_cal: calibration datasets for SBC/TARP; None = config.SBC_N_CAL.
+    :param cal_n_scales: (t_scale, T) operating points the calibration set is spread over; None =
+                     config.CAL_N_SCALES.
+                     ⚠ TRAP X5: this is `t_scale`'s EFFECTIVE SAMPLE SIZE, not a speed dial. Lowering
+                     it is a DIFFERENT measurement, not a faster one -- "SBC flat on all 13" is
+                     strong for 11 of them and materially weaker for `t_scale` and anything the probe
+                     design controls, and this number is why.
     """
     _assert_prior_used_matches_posterior(posterior, inferred_prior, "SBC/TARP calibration")
     t = cfg.t
@@ -1493,7 +1630,9 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
     x_cal, theta_star = analysis.gen_cal_data(
         model=cfg.model, prior=val_latent_prior,
         forcing_prior=force_prior,
-        t=t, steady_idx=cfg.steady_idx, dt_nd_min=cfg.dt_nd_min, n_cal=SBC_N_CAL,
+        t=t, steady_idx=cfg.steady_idx, dt_nd_min=cfg.dt_nd_min,
+        n_cal=SBC_N_CAL if n_cal is None else int(n_cal),
+        cal_n_scales=cal_n_scales,
         nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,
         dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
         t_scale_bounds=cfg.t_scale_bounds,
@@ -1732,8 +1871,10 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
                     probe, cfg.chi_f0, k_pad=cfg.chi_k_pad, bounds=cfg.chi_freq_bounds,
                     absolute_freqs=absolute, max_cycles=cfg.chi_max_cycles,
                     state_dep_drift=cfg.state_dep_drift, dtype=dtype, device=device)[0]
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+            # Guarded, and hygiene-only: a PPC bin that succeeded is not short of memory, so the
+            # cuFFT plans and the captured graphs are worth keeping. An empty_cache() that raises
+            # must not take the run down -- see pipeline._release_device_memory (2026-08-27).
+            pipeline._release_device_memory(device, plans=False, graphs=False)
 
     # Restore original sample order
     x_spont = x_spont_sorted[inv_sort_idx]

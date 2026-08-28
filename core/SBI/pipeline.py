@@ -2,6 +2,7 @@ import contextlib
 import math
 import shutil
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -93,6 +94,29 @@ _SIM_MEM_FRACTION = 0.85
 # through a 5000-batch round at that width would take days.
 _MIN_SIM_CHUNK = 256
 
+# Peak device residency of forcing.build_nondim_force_tensor, as a multiple of the (batch, n_ch, T)
+# tensor it RETURNS. Section 8.2 flagged the planner as under-counting the drive and named 4x; this
+# is that number, written where the planner can use it.
+#
+# DERIVED BY COUNTING THE EAGER ALLOCATIONS on the "sin" path (core/forcing.py), each of which is a
+# full (batch, T) block -- call it R, the same size as the result:
+#     t_dim    = rescale(t_nd, ...)                      -> R, LIVE to the end
+#     sin_term = sin(2*pi*freq*t_dim + phase)            -> R, LIVE to the end
+#                (with a transient product/sum alongside while it is computed)
+#     f_x_nd   = (amp*carrier + offset - f_offset)/f_scale
+#                four elementwise ops, each allocating R and freeing the previous one
+# so the high-water mark is t_dim + sin_term + two elementwise temporaries = 4R. The returned
+# `unsqueeze(1)` is a view and costs nothing.
+#
+# MEASURED 4.10x on the 5070 Ti (2026-08-27, B=64/T=20000, max_memory_allocated around the call),
+# against the 4x derived above and section 8.2's independently-recorded "2.16 GiB result with an
+# 8.64 GiB transient". The 0.10 is the handful of (batch, 1) parameter columns, which do not scale
+# with T and are negligible at the production geometry -- so 4 is charged, not 5: the elementwise
+# blocks are what the planner needs to see, and over-charging would split batches that fit.
+# tests/test_user_sbi.py re-measures it on any box with CUDA and fails if a rewrite of the builder
+# changes the shape of this count.
+_FORCE_BUILD_PEAK_MULTIPLE = 4
+
 
 # ── The LEARNED memory budget ─────────────────────────────────────────────────────────────────────
 #
@@ -138,16 +162,32 @@ def _budget_note_oom(elements: int) -> None:
     _BUDGET_CAP_ELEMENTS = cap if _BUDGET_CAP_ELEMENTS is None else min(_BUDGET_CAP_ELEMENTS, cap)
 
 
-def _budget_note_ok() -> None:
-    """Record a clean batch; after enough of them, probe the cap upward.
+def _budget_note_ok(*, batch_level: bool = False) -> None:
+    """Record a clean unit of work; after enough of them, probe the cap upward.
 
     The recovery half matters as much as the backoff: a desktop that was holding 6 GB when the first
     OOM landed may have closed a browser since, and without this the run would stay throttled to that
     moment for days. It probes multiplicatively but is re-clamped by memory_budget_elements on every
     call to _max_sim_batch, so it can never climb past what the (optimistic) reading allows anyway --
     the cap only ever makes the plan MORE conservative than that reading, never less.
+
+    THE UNIT IS THE TRAINING BATCH, NOT THE gen_obs CALL, and getting that wrong silently disabled
+    the throttle. _BUDGET_RECOVER_AFTER is 32 and every description of it -- here, in the block
+    comment above, and in the handoff -- says "32 clean BATCHES". But gen_obs is what calls this, and
+    a chi batch makes 1 + K of them: one spontaneous run plus one per probe in gen_chi_raw's loop. At
+    the production K that is ~7-12 calls per batch, so the cap probed upward every ~3 batches
+    instead of every 32 -- an 0.8x backoff fully unwound in three batches and climbing from there.
+    The throttle never held, which is why a busy card produced repeated OOMs rather than settling
+    into a slower but surviving steady state.
+
+    So: inside gen_training_data (``_BATCH_TAG`` non-empty) only the batch-level call counts, and
+    gen_training_data makes exactly one per completed batch. Outside it -- the PPC, decorrelate, the
+    prior sweeps -- ``_BATCH_TAG`` is "" and every call still counts, which is both the historical
+    behaviour and the right one there, since those callers have no batch to speak of.
     """
     global _BUDGET_CAP_ELEMENTS, _budget_clean_runs
+    if _BATCH_TAG and not batch_level:
+        return                   # inside a training batch: the batch tail does the accounting
     if _BUDGET_CAP_ELEMENTS is None:
         return
     _budget_clean_runs += 1
@@ -294,6 +334,120 @@ def _is_oom(err: BaseException) -> bool:
     return False
 
 
+def _free_gib_note(device: torch.device) -> str:
+    """", 3.71 GiB reported free (optimistic on Windows)" -- or "" if the reading is unavailable.
+
+    Decoration on a log line, and nothing more, so it must never be the thing that raises. On a card
+    that is already refusing allocations ``mem_get_info`` is itself a driver call that can fail, and
+    it sits in the OOM notices -- i.e. on the one path where an extra exception is most expensive.
+    The health warning rides along because the reading OVERSTATES free VRAM on Windows by roughly the
+    size of the desktop (trap X6: 15037 MiB reported against nvidia-smi's 5814 at the same instant).
+    """
+    if device.type != "cuda":
+        return ""
+    try:
+        return (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free "
+                f"(optimistic on Windows -- see the learned-budget note)")
+    except Exception:                        # noqa: BLE001 -- see the docstring
+        return ", free memory unreadable"
+
+
+def _release_device_memory(device: torch.device, *, plans: bool = True,
+                           graphs: bool = True) -> None:
+    """Hand back everything reclaimable on ``device``. BEST EFFORT: this function NEVER raises.
+
+    ``plans`` and ``graphs`` select the two resources that live OUTSIDE the caching allocator, and
+    they default to on because the callers that matter are RECOVERY paths. Turn them off in a hot
+    loop -- see "NOT EVERY CALLER WANTS ALL THREE" below.
+
+    WHY THE GUARD EXISTS, AND IT IS NOT DEFENSIVE PROGRAMMING. On 2026-08-27 the retrain died at
+    batch 351/5000 with a raw ``AcceleratorError: CUDA error: out of memory`` raised BY
+    ``torch.cuda.empty_cache()`` inside _rows_with_oom_retry -- i.e. the OOM was caught correctly and
+    the run was then killed by its own RECOVERY. Every caller here is already recovering and its next
+    act is to retry smaller; a release that cannot free anything is INFORMATION, not a reason to
+    abandon a multi-day run. Worse, because the release deliberately sits OUTSIDE the ``except``
+    block (see below), Python has already cleared the exception context by then -- so the secondary
+    failure arrives with ``__context__`` of None and the traceback contains NOTHING about the OOM
+    that started it. That is exactly the traceback the 2026-08-27 crash produced.
+
+    ``except Exception``, NEVER ``BaseException``: streams.WorkerCancelled derives from BaseException
+    precisely so a cooperative cancel sails through handlers like this one to reach Worker.run.
+
+    THREE RESOURCES, THREE SEPARATE GUARDS, because they fail independently and each is worth having
+    even if the others could not run:
+      * the caching allocator's cached-but-unused segments (``empty_cache``);
+      * the cuFFT plan cache, which lives OUTSIDE that allocator so empty_cache cannot touch it --
+        ~2 MB per distinct transform shape, ~7 new signatures per training batch, zero cross-batch
+        reuse (the 2026-07-28 leak);
+      * the captured CUDA graphs, whose memory lives in PRIVATE pools that empty_cache also cannot
+        reclaim. At an OOM up to SOLVER_GRAPH_CACHE_MAX of them are pinned and the halving retry is
+        about to capture ANOTHER at the reduced width, since the batch shape is part of the graph
+        key. Dropping them is the one release that addresses the retry's own next allocation.
+
+    CALL IT OUTSIDE THE ``except`` BLOCK, always. While the caught error is still bound its traceback
+    owns the frames of the failed attempt, which own their tensors -- the solver's (n_vars, batch, T)
+    buffer among them -- so releasing there frees nothing. Python drops the error when the clause
+    ends; only then is this worth asking for.
+
+    NOT EVERY CALLER WANTS ALL THREE, and the defaults are tuned for the recovery paths:
+      * a hot loop (gen_stats' sub-batches, gen_chi_raw's probes) passes ``plans=False,
+        graphs=False``. Clearing the plan cache there would destroy the INTRA-batch cuFFT reuse
+        those loops exist to get, and dropping graphs would force a recapture per probe -- against
+        a solver whose graph replay is an ~8x speedup, that is a large regression bought for
+        nothing, because a loop that is not failing is not short of memory.
+      * gen_training_data's per-batch tail passes ``graphs=False`` for the same reason but keeps
+        ``plans=True``: N_points_k changes every batch so cross-batch plan reuse is exactly zero,
+        and the cache would otherwise saturate mid-run.
+      * the OOM retries take the default, all three, because the card is provably short and the
+        retry's own next allocation is a graph capture at the halved width.
+    """
+    if device.type != "cuda":
+        return
+
+    def _try(fn, what):
+        try:
+            fn()
+        except Exception as e:               # noqa: BLE001 -- see the docstring
+            print(f"{_batch_tag()}: {what} failed during recovery and was ignored "
+                  f"({type(e).__name__}: {str(e).splitlines()[0][:120]})",
+                  file=sys.stderr, flush=True)
+
+    _try(torch.cuda.empty_cache, "empty_cache()")
+    if plans:
+        _try(torch.backends.cuda.cufft_plan_cache.clear, "cuFFT plan-cache clear")
+    if graphs:
+        def _drop():
+            from core.Solvers import sdeint as _sdeint
+            _sdeint.drop_graph_cache()
+        _try(_drop, "CUDA-graph cache drop")
+
+
+def _cancellable_wait(seconds: float, why: str) -> None:
+    """Sleep ``seconds``, in slices, staying responsive to a GUI cancel and saying why we are idle.
+
+    A PLAIN time.sleep() CANNOT BE CANCELLED HERE. Cancellation in this app is cooperative and is
+    raised from CancelToken.check() inside the redirected stream's write() on the worker thread
+    (core/gui/streams.py) -- so a run that is sleeping is a run that cannot notice the Cancel button
+    until it wakes. Sleeping in ~1 s slices and PRINTING between them gives the latch its chance,
+    and a multi-minute silent pause in a run that has already logged an OOM would otherwise read as
+    a hang at precisely the moment the user is most likely to reach for Cancel.
+    """
+    end = time.monotonic() + max(0.0, seconds)
+    last_note = 0.0
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(1.0, left))
+        # One line every ~5 s: enough to drive the cancel check and to show progress, few enough
+        # that a 180 s wait costs 36 log rows rather than 180.
+        now = time.monotonic()
+        if now - last_note >= 5.0:
+            last_note = now
+            print(f"{_batch_tag()}: {why} -- {max(0.0, end - now):.0f}s remaining",
+                  file=sys.stderr, flush=True)
+
+
 def sim_keep_elements(n_fine: int, steady_idx: int, n_out: int) -> int:
     """Elements ONE simulated row keeps until gen_obs returns: the post-transient output copy."""
     return n_out * max(0, n_fine - steady_idx)
@@ -327,8 +481,20 @@ def sim_memory_budget_elements(device: torch.device, dtype: torch.dtype) -> int:
     still overstates free VRAM on Windows by roughly the size of the desktop (measured 15037 MiB
     against nvidia-smi's 5814), which is why the learned cap exists -- so treat anything derived from
     this as an UPPER bound on what is really available.
+
+    THREE TERMS, AND EACH ANSWERS A DIFFERENT QUESTION. The reading says what the driver claims is
+    free (optimistic). The LEARNED cap says what has actually failed (reactive -- it can only know
+    after something died). `config.SIM_VRAM_CEILING_GIB` says what the OPERATOR knows in advance:
+    on a day the desktop will be busy, it makes the planner split from batch 0 rather than discover
+    the ceiling hours in. Read live off the module, never imported, so it can be set per run without
+    tripping trap X12's snapshot-at-import problem.
     """
-    return min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION), _budget_cap())
+    budget = min(config.memory_budget_elements(device, dtype, _SIM_MEM_FRACTION), _budget_cap())
+    ceiling_gib = float(getattr(config, "SIM_VRAM_CEILING_GIB", 0.0) or 0.0)
+    if ceiling_gib > 0:
+        bytes_per_elem = 4 if dtype == torch.float32 else 8
+        budget = min(budget, int(ceiling_gib * 2 ** 30) // bytes_per_elem)
+    return budget
 
 
 def _max_sim_batch(batch_size: int, n_fine: int, steady_idx: int, n_vars: int, n_ch: int,
@@ -524,29 +690,25 @@ def _gen_obs_retry(model, params, t, inits, force, n_segs, steady_idx, fixed_dic
     # Calling empty_cache() while `err` is still bound frees NOTHING, so the retry OOMs again at half
     # the width and the whole mechanism reads as "the retry does not work". Python drops `err` at the
     # end of the except clause; only then is a release worth asking for. Hence `note` is a STRING.
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-        # The plan cache lives OUTSIDE the caching allocator, so empty_cache() cannot touch it -- see
-        # the per-batch clear in gen_training_data. It is not this call's memory, but at the one moment
-        # we are provably short it is the cheapest few hundred MB on the card and every plan is
-        # re-mintable. This is also the real defragmentation step: handing every cached segment back to
-        # the driver is what expandable_segments would buy, and cannot buy on Windows.
-        torch.backends.cuda.cufft_plan_cache.clear()
-
     half = batch_size // 2
+    # ANNOUNCED BEFORE THE RELEASE, AND THE ORDER IS THE FIX FOR A REAL FAILURE. The release is a
+    # device call that can itself raise on a starved card, and it runs outside the except clause --
+    # so Python has already cleared the exception context and a secondary failure would carry no
+    # trace of the OOM at all. Printing first puts the original on the record no matter what the
+    # recovery does. (2026-08-27: a run died exactly this way and `note` was never seen.)
+    #
     # NOT SILENT, and on stderr rather than warnings.warn. This repo has no silent caps: a run that
     # halves on a large fraction of its batches has its geometry or its card wrong, and the only way
     # anyone learns that is if it says so EVERY time. warnings.warn cannot -- the default filter
     # ("once per location") would collapse hundreds of events into one line, and parts of
     # gen_training_data run under simplefilter("ignore"). stderr also lands in the GUI log as a
     # WARNING row, which is the right weight for an event that costs 2x on this batch.
-    free = (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free (optimistic on "
-            f"Windows -- see the learned-budget note)") if device.type == "cuda" else ""
     print(f"{_batch_tag()}: OOM at simulation batch {batch_size}; retrying in chunks of "
-          f"{half}{free}. Original: {note}", file=sys.stderr, flush=True)
+          f"{half}{_free_gib_note(device)}. Original: {note}", file=sys.stderr, flush=True)
+    _release_device_memory(device)
 
     # Same preallocation as gen_obs' predictive split, for the same reason -- and note it happens
-    # AFTER the empty_cache above, i.e. at the one moment in this function when the card is least
+    # AFTER the release above, i.e. at the one moment in this function when the card is least
     # full. When a splitting caller already handed us a destination, `out` is non-None and this level
     # merely sub-divides that view, so the full result is allocated exactly ONCE however deep the
     # halving recursion goes.
@@ -628,19 +790,17 @@ def _rows_with_oom_retry(fn, lo: int, hi: int, *, per_row_elements: int,
     # `err` is still bound frees NONE of it, the retry OOMs again at half the width, and the whole
     # mechanism reads as "the retry does not work". Python drops `err` at the end of the except
     # clause; only then is a release worth asking for. Hence `note` is a STRING.
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-        # The cuFFT plan cache lives OUTSIDE the caching allocator, so empty_cache() cannot touch it.
-        # gen_stats mints several plan signatures per batch and chi.peak_freq another; at the one
-        # moment we are provably short they are the cheapest few hundred MB on the card, and every
-        # plan is re-mintable.
-        torch.backends.cuda.cufft_plan_cache.clear()
-
+    #
+    # THIS IS THE LINE THE 2026-08-27 RETRAIN DIED ON. The OOM was caught correctly and the run was
+    # then killed by `torch.cuda.empty_cache()` raising a raw AcceleratorError of its OWN -- carrying
+    # no exception chain, because the except clause above had already closed and Python had cleared
+    # the context. The release is now best-effort (_release_device_memory never raises) and the
+    # notice is printed BEFORE it, so the original failure is on the record whatever the recovery
+    # manages to free.
     half = n_rows // 2
-    free = (f", {torch.cuda.mem_get_info(device)[0] / 2 ** 30:.2f} GiB reported free (optimistic on "
-            f"Windows -- see the learned-budget note)") if device.type == "cuda" else ""
     print(f"{_batch_tag()}: OOM with {n_rows} rows OUTSIDE the simulator retry; re-running this batch "
-          f"in halves of {half}{free}. Original: {note}", file=sys.stderr, flush=True)
+          f"in halves of {half}{_free_gib_note(device)}. Original: {note}", file=sys.stderr, flush=True)
+    _release_device_memory(device)
 
     parts = []
     for s in range(lo, hi, half):
@@ -817,8 +977,11 @@ def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.T
         result = stats.compute_statistics(spontaneous_only=spontaneous_only)
         results.append(result.cpu())
         del stats, xs_sub, xf_sub, result
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
+        # plans/graphs OFF: this loop's whole point is intra-batch cuFFT plan reuse across
+        # sub-batches, and a graph recapture per sub-batch would cost far more than the segments
+        # this hands back. Guarded all the same -- an empty_cache() that raises must not take the
+        # run down (2026-08-27).
+        _release_device_memory(device, plans=False, graphs=False)
     feats = torch.cat(results, dim=0)
     # [features | valid flags]. Appended HERE rather than at each call site: every conditioning
     # vector in the project is assembled as `cat([gen_stats(...), log_T, forcing-or-chi])`, in eight
@@ -846,6 +1009,8 @@ def gen_stats_features(*args, **kwargs) -> torch.Tensor:
 
 def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_size: int, segs: int, prior_bounds: list,
               state_dep_drift: bool = False, num_iterations: int = 25, log_mask: torch.Tensor | None = None,
+              n_max: int | None = None, step: float | None = None,
+              min_cluster_size: int | None = None, min_samples: int | None = None,
               dtype: torch.dtype = torch.float32, device: torch.device = torch.device('cpu')) -> torch.distributions.MixtureSameFamily:
     """
     Generates a prior distribution based on the given model and parameters.
@@ -869,6 +1034,15 @@ def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_s
     :param state_dep_drift: Boolean flag indicating whether to include state-dependent drift in the prior.
     :param num_iterations: Number of iterations to be performed in the process.
                            Defaults to 25.
+    :param n_max: accepted parameter sets that STOP the local flood-fill; None reads
+                  ``config.PRIOR_SWEEP_MAX_SETS``. This is the point cloud HDBSCAN clusters and the
+                  GMM is fitted to, so it buys COVERAGE of the stable manifold, not precision.
+    :param step: random-walk stride for the flood-fill's perturbation, in PHYSICAL parameter units;
+                 None reads ``config.PRIOR_SWEEP_STEP``.
+    :param min_cluster_size: HDBSCAN's floor on an island of stable parameters; None reads
+                 ``config.PRIOR_CLUSTER_MIN_SIZE``. Its label count IS the GMM's component count.
+    :param min_samples: HDBSCAN's density conservatism; None reads
+                 ``config.PRIOR_CLUSTER_MIN_SAMPLES``. Higher declares more points noise.
     :param dtype: Data type to be used for tensor computations.
                   Defaults to torch.float32.
     :param device: Device on which the computation should run.
@@ -896,8 +1070,16 @@ def gen_prior(model: str, t: torch.Tensor, global_batch_size: int, local_batch_s
     n_params = len(prior_bounds)
 
     with torch.no_grad():
+        # n_max and step were INVISIBLE before 2026-08-27: n_max was the literal 175000 right here,
+        # silently overriding construct_prior's own default, and `step` was not threaded at all so
+        # that default always won whatever a caller asked for. Both are config constants now and both
+        # arrive as arguments -- the same fix C-7 applied to num_iterations.
         prior = prior.construct_prior(t, n_params, global_batch_size, local_batch_size, segs, prior_bounds,
-                                      t_global_scale=2, num_iterations=num_iterations, n_max=175000, steady=False,
+                                      t_global_scale=2, num_iterations=num_iterations,
+                                      n_max=config.PRIOR_SWEEP_MAX_SETS if n_max is None else int(n_max),
+                                      step=config.PRIOR_SWEEP_STEP if step is None else float(step),
+                                      steady=False,
+                                      min_cluster_size=min_cluster_size, min_samples=min_samples,
                                       state_dep_drift=state_dep_drift, log_mask=log_mask)
 
     return prior
@@ -1119,8 +1301,9 @@ def gen_chi_raw(model: str, params_nd: torch.Tensor, rescale: torch.Tensor, x_sp
         u_list.append(torch.log(freq_k / f_peak.clamp(min=1e-30)))
         logcyc_list.append(torch.log(torch.clamp(freq_k.double() * T_row, min=1e-30)).to(freq_k.dtype))
         del x_dim
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        # plans/graphs OFF -- see gen_stats. Every probe replays the same captured graph, so
+        # dropping it here would recapture K times per batch.
+        _release_device_memory(device, plans=False, graphs=False)
 
     return (torch.stack(chis, dim=1), torch.stack(u_list, dim=1),
             torch.stack(logcyc_list, dim=1), valid)
@@ -1336,10 +1519,13 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     # checkpoint rather than rebuild it: SobolEngine(scramble=True) consumes the torch global RNG at
     # CONSTRUCTION and _draw_and_filter's accept count depends on the geometry, so it cannot be
     # re-derived from a seed. Rebuilding it would silently re-stratify the second half of the run.
+    # Imported unconditionally: the checkpoint needs it, and so does the batch-level OOM retry
+    # below, which snapshots the RNG whether or not anything is being written to disk.
+    from core.SBI import training_checkpoint as _tc
+
     _ck_dir = _ck_every = _ck_resumed = None
     _start_k = 0
     if checkpoint is not None:
-        from core.SBI import training_checkpoint as _tc
         _ck_dir = Path(checkpoint["dir"])
         _ck_every = checkpoint.get("every")
         _ck_every = config.TRAINING_CHECKPOINT_EVERY if _ck_every is None else int(_ck_every)
@@ -1717,12 +1903,75 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             # Per-ROW element cost at THIS geometry, in the same currency _max_sim_batch plans in, so
             # an OOM here tightens the SAME learned cap the predictive guard reads rather than
             # inventing a second, incompatible notion of "too big".
+            #
+            # THE DRIVE IS CHARGED AT ITS BUILD PEAK, NOT AT ITS RESULT SIZE. This term used to be a
+            # bare `n_force_ch * n_fine_total`, i.e. the tensor the builder returns -- but building it
+            # costs _FORCE_BUILD_PEAK_MULTIPLE times that, and in chi mode the builder runs again for
+            # every probe, inside the K loop, alongside x_spont_dim and idx_c. Section 8.2 named this
+            # 4x under-count as a plausible source of the unwrapped OOMs of trap X7, and this is the
+            # place it actually bites: `_per_row` is what _budget_note_oom charges the learned cap
+            # with, so under-counting here taught the cap a number smaller than what really failed.
             _seg = min(n_fine_total, CHUNK_LEN)
             _n_keep = max(0, n_fine_total - steady_idx)              # var_idx=0 on every path here
-            _per_row = (inits.shape[-1] * n_fine_total + n_force_ch * n_fine_total
+            _per_row = (inits.shape[-1] * n_fine_total
+                        + _FORCE_BUILD_PEAK_MULTIPLE * n_force_ch * n_fine_total
                         + max(inits.shape[-1] * _seg, _n_keep))
-            _rows_out = _rows_with_oom_retry(
-                _rows, 0, run_size, per_row_elements=_per_row, device=device)
+            # THE OUTERMOST OF THREE RETRIES, AND THE ONLY ONE THAT DOES NOT SHRINK THE WORK.
+            #
+            # _gen_obs_retry halves the simulator batch; _rows_with_oom_retry halves this batch's
+            # rows. Both answer "this is too big". They cannot answer the other failure mode, which
+            # is what actually kills runs on a desktop card: the batch is a perfectly reasonable
+            # size and the card is momentarily full of somebody ELSE's surfaces -- a browser opening
+            # a video, a game launcher waking up, the compositor after an unlock. Under WDDM those
+            # are evictable, so mem_get_info reported them to us as free and the driver then lost
+            # the eviction race (trap X6). Shrinking does not help; WAITING does.
+            #
+            # THE RE-RUN IS EXACT, and that is a correctness requirement rather than a nicety.
+            # Restoring the RNG puts every stream back where this call began, so the re-run consumes
+            # randomness identically and produces the batch that would have been produced. Without
+            # it the retry is silently a DIFFERENT batch -- still a valid draw, but no longer the
+            # batch the checkpoint's stored RNG describes, so a later resume would replay a different
+            # run than the rows on disk came from. A corruption no test catches and no log shows.
+            #
+            # ⚠ IT IS *THIS* SNAPSHOT, NOT `_pending_rng`. `_pending_rng` is the state at the TOP of
+            # the iteration -- before the theta draw, the chi multipliers and the durations -- which
+            # is what a RESUME needs, because a resume re-runs all of those. The retry does not: the
+            # thetas are already drawn and are reused as they stand, so restoring `_pending_rng` here
+            # would rewind past draws the retry never repeats and feed `_rows` the noise the THETA
+            # draw should have consumed. The batch would then differ from the one an uninterrupted
+            # run produces, which is the exact defect this restore exists to prevent. Snapshot
+            # immediately before the call instead, and the retry reproduces that call exactly.
+            #
+            # A few KB of memcpy against a ~20 s batch, so it is taken unconditionally rather than
+            # only when a retry is configured -- one code path, and no way for the two to disagree.
+            _rows_rng = _tc.rng_snapshot(device, chi_gen)
+            _attempts = int(getattr(config, "TRAINING_BATCH_RETRY_ATTEMPTS", 0) or 0)
+            _delays = tuple(getattr(config, "TRAINING_BATCH_RETRY_DELAYS_S", ()) or (60.0,))
+            for _attempt in range(_attempts + 1):
+                try:
+                    _rows_out = _rows_with_oom_retry(
+                        _rows, 0, run_size, per_row_elements=_per_row, device=device)
+                    break
+                # RuntimeError, NOT Exception -- the same narrowing the two inner ladders use, and
+                # for the same reason: streams.WorkerCancelled is a BaseException so a GUI cancel
+                # sails through, and a non-OOM RuntimeError is a real bug that must not be retried
+                # into a loop.
+                except RuntimeError as _err:
+                    if _attempt >= _attempts or not _is_oom(_err):
+                        raise
+                    _note = f"{type(_err).__name__}: {str(_err).splitlines()[0][:200]}"
+                    _budget_note_oom(run_size * _per_row)
+                # OUTSIDE THE HANDLER, for the reason spelled out in _rows_with_oom_retry: while
+                # `_err` is bound its traceback owns every frame of the failed attempt and the
+                # tensors they hold, so releasing here is what makes the release mean anything.
+                _delay = _delays[min(_attempt, len(_delays) - 1)]
+                print(f"{_batch_tag()}: batch FAILED after both halving retries "
+                      f"({_attempt + 1}/{_attempts + 1}){_free_gib_note(device)}. Waiting "
+                      f"{_delay:.0f}s and re-running the whole batch. Original: {_note}",
+                      file=sys.stderr, flush=True)
+                _release_device_memory(device)
+                _cancellable_wait(_delay, "waiting for device memory before re-running this batch")
+                _tc.rng_restore(_rows_rng, device, chi_gen)
 
             # 6. Collect LATENT targets (not physical). OUTSIDE the retry on purpose: the targets are
             # computed before any simulation and are already at full width, so a retry neither
@@ -1736,18 +1985,24 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             x_buf[_lo:_hi] = _rows_out
             th_buf[_lo:_hi] = _th_out
             del _rows_out, _th_out
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-                # cuFFT caches a plan per distinct transform SHAPE, outside PyTorch's caching
-                # allocator -- so empty_cache() above cannot touch it and it surfaces as a RAW
-                # driver cudaErrorMemoryAllocation rather than torch.cuda.OutOfMemoryError.
-                # N_points_k changes every batch, so cross-batch plan reuse is exactly zero while
-                # each batch mints ~7 new signatures (6 from SummaryStatistics, 1 from
-                # chi.peak_freq) at ~2 MB apiece; the default 4096-entry cache would saturate
-                # around batch ~585 of 5000 and hold ~8.6 GB hostage. Clearing per batch costs
-                # nothing (the intra-batch reuse across gen_stats' sub-batches already happened)
-                # and is preferable to shrinking cufft_plan_cache.max_size, which WOULD thrash it.
-                torch.backends.cuda.cufft_plan_cache.clear()
+            # plans ON: cuFFT caches a plan per distinct transform SHAPE, outside PyTorch's
+            # caching allocator -- so empty_cache() cannot touch it and it surfaces as a RAW driver
+            # cudaErrorMemoryAllocation rather than torch.cuda.OutOfMemoryError. N_points_k changes
+            # every batch, so cross-batch plan reuse is exactly zero while each batch mints ~7 new
+            # signatures (6 from SummaryStatistics, 1 from chi.peak_freq) at ~2 MB apiece; the
+            # default 4096-entry cache would saturate around batch ~585 of 5000 and hold ~8.6 GB
+            # hostage. Clearing per batch costs nothing (the intra-batch reuse across gen_stats'
+            # sub-batches already happened) and is preferable to shrinking
+            # cufft_plan_cache.max_size, which WOULD thrash it.
+            #
+            # graphs OFF: the batch SUCCEEDED. Dropping the captured graphs here would recapture on
+            # every batch of a 5000-batch run and give back the solver's ~8x replay speedup to
+            # reclaim a few MiB we are not short of. Graph pools are dropped only on the OOM paths.
+            _release_device_memory(device, graphs=False)
+            # THE one recovery credit for this batch. gen_obs' own calls are suppressed while
+            # _BATCH_TAG is set precisely so that a chi batch's 1 + K of them cannot count as
+            # 1 + K clean batches -- see _budget_note_ok.
+            _budget_note_ok(batch_level=True)
             # Batch 0 gives an immediate baseline (so a run that is doomed says so in the first
             # minute rather than the fifth hour); after that, one line per _MEM_LOG_EVERY batches.
             if batch_k == 0 or (batch_k + 1) % _MEM_LOG_EVERY == 0:

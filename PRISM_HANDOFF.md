@@ -75,14 +75,14 @@ every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each fil
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `tests/test_gui_progress.py` | 97 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5), and **the TSNPE tab** — its gate, and an `ast`-level check that its runner never references a proposal or `set_default_x` (§11.6) |
+| `tests/test_gui_progress.py` | 98 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5), and **the TSNPE tab** — its gate, and an `ast`-level check that its runner never references a proposal or `set_default_x` (§11.6) |
 | `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
-| `tests/test_user_sbi.py` | 64 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard) |
+| `tests/test_user_sbi.py` | 66 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard), and **every GUI-exposed knob arriving as an ARGUMENT** rather than a config write, checked both in the signature and at the point it is used (§2.3) |
 | `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
 | `tests/test_artifact_consistency.py` | 15 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
 | `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| `tests/test_conditioning_repair.py` | 23 | **§11**, and pure torch in seconds like the encoder suite: rank-Gaussianisation (monotone, the mid-rank tie rule, the dead-channel pass-through, and the contaminated channel becoming visible), the valid flags (each predicate, the B7 pair sharing one flag, `tau_slow`'s dt dependence), winsorisation leaving the χ block **bitwise** untouched, the pathological-trajectory counter, **the KL scalar's zero point** (a posterior that IS the prior scores exactly 0 nats) and its per-block retry on a mixed-device product prior, tier-1's round trip through the implied temperature and its refusal without `nd_idx`/`k_b_cell`, and **the TSNPE pinning test the whole of §11.6 rests on** — that the proposal has the truncated PRIOR's width, not the posterior's and not the posterior's over √2. Also: **a legacy `sum_mean`/`sum_std` posterior still loads and evaluates**, without which every pre-2026-08-26 artifact — including the §11 baseline — is unopenable |
-| **Total** | **266** | |
+| `tests/test_conditioning_repair.py` | 25 | **§11**, and pure torch in seconds like the encoder suite: rank-Gaussianisation (monotone, the mid-rank tie rule, the dead-channel pass-through, and the contaminated channel becoming visible), the valid flags (each predicate, the B7 pair sharing one flag, `tau_slow`'s dt dependence), winsorisation leaving the χ block **bitwise** untouched, the pathological-trajectory counter, **the KL scalar's zero point** (a posterior that IS the prior scores exactly 0 nats) and its per-block retry on a mixed-device product prior, tier-1's round trip through the implied temperature and its refusal without `nd_idx`/`k_b_cell`, and **the TSNPE pinning test the whole of §11.6 rests on** — that the proposal has the truncated PRIOR's width, not the posterior's and not the posterior's over √2. Also: **a legacy `sum_mean`/`sum_std` posterior still loads and evaluates**, without which every pre-2026-08-26 artifact — including the §11 baseline — is unopenable |
+| **Total** | **271** | |
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -208,6 +208,56 @@ core/gui/
 **Navigation** is two levels deep: Home → one of Reduction Map / FDT Analysis / Parameter Inference /
 Simulate (+ Settings and the model builder, reached from Settings). The app always opens on Home;
 only geometry and each panel's own settings persist.
+
+### 2.3 What the Inference tabs expose, and the rule every one of them follows
+
+Added 2026-08-27. Before that the only tunable in the GUI was the training budget (§6 row 5);
+everything else meant editing `config.py`.
+
+> ### ⚠ THE RULE: EVERY KNOB IS AN ARGUMENT, NEVER A CONFIG WRITE
+> `orchestrator` does `from .config import PRIOR_SWEEP_ITERATIONS, NSF_HIDDEN_FEATURES, SBC_N_CAL, …`,
+> which binds all of them at **import**. A panel that "configured" a run by assigning to the constant
+> would change nothing, and the run would use the default with nothing to say so. Every field below
+> therefore travels as a keyword argument defaulting to `None` (= follow the config), and
+> `test_the_sweep_and_flow_knobs_are_ARGUMENTS_because_the_constants_are_snapshotted` checks both the
+> signature **and** that each one reaches the thing it configures — accepted-and-dropped is the
+> failure a signature check alone misses.
+
+| tab | field | argument | default |
+|---|---|---|---|
+| **Prior** — *Stability sweep* | Global rounds | `build_prior(num_iterations=)` | `PRIOR_SWEEP_ITERATIONS` 50 |
+| | Candidates per round | `sweep_batch=` | `PRIOR_SWEEP_BATCH` 0 (= hw batch) |
+| | Max accepted sets | `max_sets=` | `PRIOR_SWEEP_MAX_SETS` 175 000 |
+| | Random-walk step | `walk_step=` | `PRIOR_SWEEP_STEP` 0.01 |
+| | Stability duration | `stability_units=` | `STABILITY_SWEEP_ND_UNITS` 1000 |
+| **Prior** — *Clustering / GMM* | Min cluster size | `min_cluster_size=` | `PRIOR_CLUSTER_MIN_SIZE` 50 |
+| | Min samples | `min_samples=` | `PRIOR_CLUSTER_MIN_SAMPLES` 10 |
+| **Posterior** — *Training budget* | Batches / Max rows | `build_posterior(num_runs=, run_size_cap=)` | `TRAINING_NUM_RUNS` 5000 / `TRAINING_RUN_SIZE` 0 |
+| **Posterior** — *Density estimator* | Hidden features | `hidden_features=` | `NSF_HIDDEN_FEATURES` 128 |
+| | Transforms | `num_transforms=` | `NSF_NUM_TRANSFORMS` 8 |
+| | Learning rate | `learning_rate=` | `TRAINING_LEARNING_RATE` 1e-3 |
+| | Early-stop patience | `stop_after_epochs=` | `TRAINING_STOP_AFTER_EPOCHS` 20 |
+| **Posterior** — *Fisher rotation* | Ensemble per perturbation | `fisher_m=` | `REPARAM_FISHER_M` 48 |
+| | Central-difference step | `fisher_dz=` | `REPARAM_FISHER_DZ` 0.1 |
+| | Operating points | `fisher_points=` | `REPARAM_FISHER_POINTS` 8 |
+| **Validate** | Calibration datasets | `validate_calibration(n_cal=)` | `SBC_N_CAL` 2000 |
+| | (t_scale, T) operating points | `cal_n_scales=` | `CAL_N_SCALES` 200 |
+| **TSNPE** | HPD level / directions | `build_posterior(truncation=)` | `truncate.DEFAULT_HPD` 0.999 / `DEFAULT_N_DIRECTIONS` 5 |
+
+**Five of these are NOT speed dials, and the tooltips say so:**
+
+- **Candidates per round** — the global sweep is ITERATION-bounded, so shrinking it makes the prior
+  worse *without* making it faster (527 s at 2048 against >70 min and unfinished at 32; C-7).
+- **Stability duration** — defines what *stable means*, so it moves the prior's support.
+- **Min cluster size / min samples** — HDBSCAN's label count IS the GMM's component count. Measured:
+  5 → **15 components**, 60 → **1**. A different component count is a different prior.
+- **(t_scale, T) operating points** — `t_scale`'s effective sample size (trap **X5**). Lowering it is a
+  DIFFERENT measurement, not a faster one.
+- **Max accepted sets** — buys COVERAGE of the stable manifold, not statistical precision.
+
+⚠ **The three Fisher knobs do nothing on a RESUMED run**: it reuses the checkpoint's stored `V` and
+skips the rotation entirely (trap **X10**), because `V` is not reproducible across processes.
+
 
 ---
 
@@ -1768,6 +1818,19 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   reports) premised on the box round-trip producing `±inf`; it cannot on torch 2.9. Pinned by
   `test_box_roundtrip_never_yields_a_nonfinite_latent_target`, which exists precisely so a version
   bump that removes that clamp surfaces as a test failure rather than a dead training run.
+- **X13. THE RECOVERY PATH CAN BE THE THING THAT KILLS YOU, and Python will not tell you what it was
+  recovering from.** On 2026-08-27 the retrain caught a genuine OOM at batch 351/5000, entered
+  `_rows_with_oom_retry`'s handler correctly, and then died on `torch.cuda.empty_cache()` — which
+  raised a raw `AcceleratorError: CUDA error: out of memory` of its **own**. Two things made that
+  worse than it had to be. The release deliberately sits **outside** the `except` block (while the
+  caught error is bound, its traceback pins the failed attempt's tensors and a release frees
+  nothing), and Python **clears the exception context when an except clause exits** — so the
+  secondary failure arrived with `__context__` of `None` and the traceback contained *nothing* about
+  the OOM. The stderr notice naming the original was printed *after* the release, so it never ran.
+  The symptom is a bare traceback ending in `empty_cache`, which reads as "empty_cache is broken"
+  rather than "the card is full". Both retries now print the notice **before** releasing, and all
+  releases go through `pipeline._release_device_memory`, which never raises. **If you add a release
+  anywhere, it is best-effort by definition** — its caller is already recovering.
 - **X7. An UNWRAPPED CUDA OOM rules out the solver — and that is the fastest thing to check.**
   `Simulator.__sols` wraps everything raised inside `euler`/`euler_compiled` into a `SimulationError`
   reading `"<Model> <method> failed after N steps (batch=..., segs=..., device=..., dtype=...)"`. So a
@@ -1795,6 +1858,16 @@ runs in seconds and needs no simulation — **run it first when touching anythin
   killed the first chi retrain, hours in. `config.memory_budget_elements` is therefore a HINT:
   `pipeline._BUDGET_CAP_ELEMENTS` learns the real ceiling from OOMs and `_gen_obs_retry` is what
   actually recovers. **When measuring headroom by hand, read `nvidia-smi`, never `mem_get_info`.**
+  ⚠ And the corollary measured on 2026-08-27: because WDDM also provides a **shared-memory spillover
+  pool** (half of system RAM — ~31.7 GiB here), a batch that does not fit usually does **not** fail.
+  It pages, at up to a 9× wall-clock penalty; 21.67 GiB completed on this 15.92 GiB card. So a
+  *slow* run is the symptom to watch for, not an OOM, and the OOMs that do happen are transients
+  rather than sizing errors. See the 2026-08-27 (later) entry.
+  The learned cap is REACTIVE, though — it cannot know anything until something has already failed,
+  which on a shared card can be hours in. `config.SIM_VRAM_CEILING_GIB` (0 = off) is the proactive
+  half: state the real budget up front on a day you know the desktop will be busy, and the planner
+  splits from batch 0. It is deliberately **not** part of the checkpoint identity — it changes the
+  memory plan, not the rows.
 - **X5. `CAL_N_SCALES` is `t_scale`'s effective SBC sample size.** Every row in a calibration batch is
   *assigned* that batch's `t_scale`, so their ranks are not independent. Lowering the pair count to
   buy wall-clock is a different measurement, and it damages precisely the parameter chi(ω) exists to
@@ -3057,8 +3130,19 @@ the card, and the VRAM rule has not changed: check `nvidia-smi --query-gpu=memor
 #### Run A — the Phase-1 flow-only retrain. NO SIMULATION.
 
 The cache at `Resources/Checkpoints/train_230ae7cb5fc2` is complete (5000/5000) and already carries
-the valid flags, so `gen_training_data` loads its 10.24 M rows and skips generation entirely. This is
-hours, not days — nearly all of it inside sbi's fit loop.
+the valid flags, so `gen_training_data` loads its 10.24 M rows and skips generation entirely.
+
+> ### ⚠ THAT SAVES 20 % OF A RETRAIN, NOT "days versus hours" — corrected 2026-08-27
+> This line first said "hours, not days". It is wrong, and the file timestamps of the run that
+> produced `posterior_08232026` say so: header written 2026-08-21 10:48, generation complete
+> 22:14 (**11.4 h**), posterior saved 2026-08-23 20:18 (**46.1 h** of flow training, 130 epochs).
+> **Simulation is 20 % of the run; sbi's fit loop is 80 %.** So skipping generation turns ~2.4 days
+> into ~1.9 days. It is still worth having — it is free, and it is what makes Phase 1 a clean A/B —
+> but budget two days, not an afternoon.
+>
+> The CUDA-graph speedup (§8.3) is already inside both of those figures: it landed 2026-08-21 and
+> that run started the same morning. There is no further solver speedup to bank, and none of §11
+> makes training faster.
 
 > **This was verified, not assumed.** Rebuilding the record run's `training_identity` from scratch
 > resolves to `train_230ae7cb5fc2`; `training_checkpoint.verify()` — the same field-by-field check a
@@ -3129,6 +3213,282 @@ the difference between "mildly uneven" and "nine of thirteen parameters are prio
 ---
 
 # Appendix A — Change history
+
+## 2026-08-27 (later) — the OOM retry fired for the first time, and died on its own cleanup
+
+The Phase-1 retrain reached batch 351/5000 and stopped with a bare
+`torch.AcceleratorError: CUDA error: out of memory` raised from `torch.cuda.empty_cache()` at
+`pipeline.py:632`. Two questions were asked of it — "is dynamic memory management on?" and "are we
+holding a finished batch's simulations in VRAM?" — and the answer to both was already yes.
+
+### Neither suspected cause was the cause
+
+`x_buf`/`th_buf` are **host** tensors (`torch.empty` with no `device=`), `_rows` returns CPU data,
+`gen_stats` does `.cpu()` per sub-batch, and `append_simulations` is pinned to `data_device="cpu"`.
+Nothing large is GPU-resident across batches. The learned budget worked too: it caught the OOM and
+entered the retry. **The run died on its RECOVERY.**
+
+`empty_cache()` sits outside the `except` block — correctly, because a release while the error is
+bound frees nothing — and it raised. The pasted traceback had no *"During handling of the above
+exception"* chain, which is the signature of a raise after an except clause closes, and is what
+pinned the diagnosis. Worse, the notice naming the original OOM was printed *after* the release, so
+the failure that started it all left **no record at all**. That is now trap **X13**.
+
+### Five changes
+
+1. **`pipeline._release_device_memory(device, *, plans, graphs)`** — one guarded place for all three
+   reclaimable resources, and it **never raises**. `except Exception`, never `BaseException`, so a
+   `WorkerCancelled` still reaches `Worker.run`. The flags exist because not every caller wants all
+   three: a hot loop (`gen_stats`' sub-batches, `gen_chi_raw`'s probes) passes `plans=False,
+   graphs=False`, since clearing the plan cache there destroys the intra-batch cuFFT reuse those
+   loops exist to get and dropping graphs would recapture per probe against an ~8× replay speedup.
+   `gen_training_data`'s per-batch tail keeps `plans=True` (cross-batch plan reuse is exactly zero)
+   and `graphs=False` (the batch succeeded). Only the OOM paths take all three.
+2. **The notice is printed BEFORE the release** in both ladders. Ordering, not wording.
+3. **`sdeint.drop_graph_cache()`**, called on the OOM paths only. Graph memory lives in a private
+   pool `empty_cache()` cannot reclaim; at an OOM up to `SOLVER_GRAPH_CACHE_MAX` are pinned and the
+   halving retry is about to capture *another* at the reduced width, because `tuple(x0.shape)` is
+   part of `_graph_key`. Clearing the dict is a request, not a guarantee — the pool returns when the
+   `CUDAGraph` is collected — which is one more reason the release belongs outside the handler.
+4. **⚠ THE LEARNED BUDGET WAS RECOVERING ~10× TOO FAST IN CHI MODE.** `_BUDGET_RECOVER_AFTER` is 32
+   and every description of it, here and in the code, says *"32 clean **batches**"*. But `gen_obs`
+   was what called `_budget_note_ok`, and a chi batch makes **1 + K** of those — one spontaneous run
+   plus one per probe. At the production K that is ~7–12 calls per batch, so the cap probed upward
+   every ~3 batches instead of every 32: an 0.8× backoff fully unwound in three batches and kept
+   climbing. **The throttle never held**, which is why a busy card produced repeated OOMs rather than
+   settling into a slower surviving state. `_budget_note_ok` now takes `batch_level=`, ignores
+   `gen_obs`' calls while `_BATCH_TAG` is set, and `gen_training_data` credits exactly once per
+   completed batch. Outside training the per-call credit is unchanged — the PPC and the prior sweeps
+   have no batch to key on.
+5. **A batch-level retry that WAITS instead of shrinking.** Both existing ladders answer "this is too
+   big"; neither can answer the failure that actually kills runs here, which is a reasonable batch on
+   a card momentarily full of somebody else's evictable surfaces. It restores the batch's opening RNG
+   snapshot (`_pending_rng`, already taken every iteration for the checkpoint) and re-runs — so the
+   retried batch is **the batch that would have been produced**. Without the restore the retry is a
+   different draw, and the checkpoint's stored RNG would no longer describe the rows written beside
+   it: a corruption no test catches and no log shows. Delays 15 s / 60 s / 180 s, and the wait is
+   sliced and printed, because **cancellation is raised from a stream `write()` on the worker thread
+   — a plain `time.sleep()` cannot be cancelled.**
+
+### The drive was under-charged 4×, and it is now measured
+
+§8.2 flagged `_max_sim_batch` as budgeting only `n_ch * n_fine` for the drive. Counting
+`build_nondim_force_tensor`'s eager allocations gives 4R (`t_dim` + `sin_term` both live to the end,
+plus two elementwise temporaries), and **measured 4.10×** on the 5070 Ti at B=64/T=20000. `_per_row`
+now charges `_FORCE_BUILD_PEAK_MULTIPLE`, which matters because `_per_row` is the number
+`_budget_note_oom` teaches the cap — under-counting taught it something smaller than what failed.
+
+### What the card actually looked like
+
+`nvidia-smi` at the time of diagnosis: **102 MiB free of 16303 MiB**, ~30 GPU-touching processes
+(two Firefox, three Edge WebViews, Steam, Discord, Spotify, Parsec, TeamViewer, PyCharm's JCEF, two
+Claude, OneDrive, ProtonDrive…), plus the crashed run still holding its context. The worst admissible
+geometry at 2048 rows needs ~11.44 GiB against a ~12.48 GiB budget **on an idle card**. No fix to the
+retry machinery changes that arithmetic — **closing the browsers is still the largest single lever**,
+and `SIM_VRAM_CEILING_GIB` is how you tell the planner in advance when you cannot.
+
+### ⚠ THE RETRY LADDERS COULD NOT BE MADE TO FIRE, AND THE REASON RESHAPES THE DIAGNOSIS
+
+This entry set out to do the thing §"what this actually buys" says has never been done — stage a
+genuine reactive CUDA OOM with a second process holding VRAM — so the ladders would stop being
+tested-by-construction. **It could not be done on this machine, and finding out why was worth more
+than the test would have been.**
+
+Four attempts on the 5070 Ti, `nvidia-smi` free measured at each start:
+
+| geometry (peak) | competing hog | `mem_get_info` | `nvidia-smi` | outcome |
+|---|---|---|---|---|
+| 2048 × 100k (5.34 GiB) | 13.5 GiB, idle | 13.77 GiB | **1.02 GiB** | completed 2.5 s, no split |
+| 2048 × 280k (10.83 GiB) | 13.6 GiB, **churning** | 6.76 GiB | **0.30 GiB** | planner split 2048→512, completed 42.5 s |
+| 2048 × 280k, planner blinded | 6.75 GiB, churning | 6.76 GiB | **0.24 GiB** | completed 60.8 s at full width |
+| **4096 × 280k (21.67 GiB)** | none | 14.62 GiB | 0.20 GiB | **completed 168.7 s** |
+
+Read the last row again: **an allocation of 21.67 GiB completed on a 15.92 GiB card**, returning a
+(1, 4096, 276000) tensor that is finite throughout. Nothing OOM'd. The first attempt also explains
+why an idle hog proves nothing — its pages are cold, so WDDM simply evicts them; the hog has to
+*churn* to compete at all, and even then it loses.
+
+**The mechanism is Windows' shared GPU memory.** WDDM exposes up to half of system RAM as a spillover
+pool — 63.4 GiB installed here, so ~31.7 GiB of shared memory behind a 15.92 GiB board, ~47 GiB
+addressable in total. A batch that cannot fit in VRAM does not fail; it **pages**, and the cost is
+wall-clock: 168.7 s for a batch that takes ~18 s unpressured, a 9× penalty. The 3.4× at 42.5 s in row
+two is the same effect, smaller.
+
+**So the failure mode is not what the memory work has been assuming.** "This batch is too big" is
+close to unreachable on this hardware — which is why two rounds of pressure testing never fired a
+reactive retry, and why the ladders have stayed unexercised through every smoke run. What actually
+killed the run at batch 351 was a **transient**: a moment when the driver could not complete a
+page-in or an eviction in time, which is a function of what the desktop was doing that second, not of
+the geometry. Three consequences worth keeping:
+
+1. **Waiting is the right lever, and shrinking is not.** The batch-level retry added in this entry
+   pauses and re-runs the same batch; the halving ladders answer a question the hardware rarely asks.
+   That ordering is the opposite of what the 2026-08-10 and 2026-08-11 entries assumed.
+2. **A "slow run" and a "nearly-OOM run" are the same event here.** If generation is crawling, the
+   card is spilling to shared memory — that is the signal to close things, and it arrives long before
+   any OOM does. The `[mem]` line's *peak reserved* is what shows it.
+3. **`SIM_VRAM_CEILING_GIB` earns its place for a reason other than the one it was added for.** Its
+   value is not avoiding a hard OOM — it is keeping the batch inside real VRAM so the run does not
+   quietly drop into the 9× paging regime.
+
+**What is and is not verified, stated plainly.** The *predictive* guard is now exercised on real
+hardware under real pressure (row two: it split 2048→512 unprompted and the batch completed). The
+*reactive* ladders are still exercised only by injected failures — but that injection set now
+includes the exact 2026-08-27 shape, a release that raises inside the handler
+(`test_the_release_path_survives_a_failing_empty_cache`). Reproducing a real reactive OOM would need
+a second process that can defeat WDDM paging, and this one could not.
+
+### ⚠ AN UNSAVED PRIOR ORPHANS ITS OWN CHECKPOINT, PERMANENTLY
+
+Found while checking whether the crashed run could resume. Three checkpoints from that day:
+
+| dir | batches | `prior_fingerprint` | prior file |
+|---|---|---|---|
+| `train_230ae7cb5fc2` | 5000, complete | `33ecff5c70c828d8` | `3d_master_08102026.pt` (75 comp.) |
+| `train_85226b80f5d1` | 884 | `bd307c079d14db0b` | **none — never saved** |
+| `train_005ff030d387` | 351 (the crash) | `d33fd505672d7b25` | `prior_08272026.pt` (98 comp.) |
+
+`training_identity` fingerprints the prior's fitted GMM and that fingerprint names the checkpoint
+**directory**. A prior that was fitted but never written to disk therefore produces a directory
+nothing can resolve again once the process exits — so 884 batches of simulation are unrecoverable,
+not merely awkward to resume. `build_posterior` now refuses to start a run of ≥100 batches from a
+prior whose fingerprint matches no file in `Resources/Priors` (`_assert_prior_is_saved`). Silent for
+short runs and for checkpointing-off, which is where the tests and the smoke train live.
+
+The crashed run *is* resumable: load `prior_08272026.pt` rather than rebuilding it, keep
+`n_runs=5000`, and the log prints `[checkpoint] resuming at batch 351/5000`. **If that line is
+absent, stop.**
+
+> **A process note, recorded because it cost real work.** Unwinding a bad edit with
+> `git checkout -- <file>` discarded ~70 lines of *uncommitted* work in `tests/test_user_sbi.py` that
+> the session-start `git status` had listed as modified. They were reconstructed from this document —
+> which names the lost tests and what they must assert — and all five pass against the working tree,
+> with the `ast.unparse` comment-stripping verified to be load-bearing (`nadrowski_prior.py`'s
+> comment about the fix contains the string the check forbids). **Use `git stash`, not
+> `git checkout --`, and read `git status` before touching a file you did not create.**
+
+---
+
+## 2026-08-27 — the sweep knobs came out of hiding, and the flood-fill had been on the CPU all along
+
+Asked for two fields on the Prior tab. Finding out what they should be bound to turned up a knob that
+was not a constant at all, a second that was never threaded, and a hardcode that made the dominant
+cost of every prior build ~18× slower than it needed to be.
+
+### Two of the four "constants" were not constants
+
+- **`n_max` was the literal `175000` inside `pipeline.gen_prior`**, silently overriding
+  `construct_prior`'s own `n_max=200000` default. Nothing named it; nothing could change it.
+- **`step` (the flood-fill's random-walk stride) was never threaded through `gen_prior` at all**, so
+  `construct_prior`'s default won no matter what any caller asked for.
+
+Both are now `config.PRIOR_SWEEP_MAX_SETS` / `PRIOR_SWEEP_STEP` and both arrive as arguments — the
+same fix C-7 applied to `num_iterations`, one layer further down.
+
+### ⚠ THE LOCAL SWEEP HAD BEEN PINNED TO THE CPU IN ALL FOUR PRIORS
+
+`_local_map` was a **`@staticmethod`** in `NadrowskiPrior`, `BPPrior` and `HopfPrior` — so it could
+not see `self.device` — and every one of them opened with
+`dtype = torch.float32; device = torch.device('cpu')`. `UserPrior`'s was an instance method and
+hardcoded it anyway. Meanwhile `_global_map` ran on `self.device`, i.e. the GPU. **The global census
+was accelerated and the flood-fill it feeds was not**, which is backwards: the flood-fill is the
+larger half of the work.
+
+Measured on the real inner loop (1024 trajectories × 40,000 steps, the local sweep's actual shape):
+
+| | per iteration |
+|---|---|
+| CPU | **6.32 s** |
+| CUDA | **0.357 s** |
+| | **17.7×** |
+
+End to end on a small prior build: **9.01 s → 2.83 s**. All four are instance methods now and
+simulate on `self.sweep_device`, resolved once by `prior.resolve_sweep_device` and **falling back to
+the CPU with a printed note** when CUDA is unavailable — verified by forcing
+`torch.cuda.is_available` False, which completes on the CPU rather than raising.
+
+> **The accept loop had to be vectorised in the same change, or the move would have paid for
+> nothing.** It walked `for i in range(batch_size)` doing `is_valid[i]` and `thetas[i].tolist()` per
+> row — free on the CPU, and **2048 device-to-host syncs per iteration** on CUDA. It is now one
+> `thetas[is_valid].detach().cpu().tolist()` per iteration.
+
+### What is worth knowing before turning any of these
+
+- **Candidates-per-round is NOT a speed dial.** The global sweep is ITERATION-bounded, so shrinking it
+  makes the prior worse *without* making it faster — 527 s at 2048 against >70 min and unfinished at
+  32 (C-7). The field carries that warning.
+- **Stability duration changes what "stable" MEANS**, so it moves the prior's support, not just the
+  wait. A longer screen rejects slow instabilities a short one accepts.
+- **`CAL_N_SCALES` is `t_scale`'s effective sample size** (trap X5), so lowering it is a *different*
+  measurement, not a faster one. "SBC flat on all 13" is strong for 11 of them and materially weaker
+  for `t_scale`, and this number is why.
+- **Max accepted sets buys COVERAGE, not precision.** It is the point cloud HDBSCAN clusters and the
+  GMM is fitted to; a 10-D GMM with a few components needs nothing like 175,000 points.
+
+### Two more that were asked for after the first pass, and one of them is not a tuning dial
+
+**HDBSCAN's `min_cluster_size=50` and `min_samples=10` were literals in `construct_prior`.** They are
+not a clustering preference: HDBSCAN's label count is handed **straight to the GMM's `n_components`**,
+so they decide how many MODES the prior has. Measured on a small build, changing nothing else:
+
+| `min_cluster_size` | GMM components |
+|---|---|
+| 5 | **15** |
+| 60 | **1** |
+
+A prior with a different component count is a **different prior**, not a faster one — which is why
+they get their own "Clustering / GMM" group on the Prior tab rather than joining the sweep fields.
+`min_samples` is the other half: higher declares more points NOISE, which HDBSCAN leaves unassigned
+and the GMM therefore never sees, so it thins the cloud as well as splitting it.
+
+**`REPARAM_FISHER_M` / `_DZ` / `_POINTS` needed no plumbing at all** —
+`build_latent_fisher_rotation` has accepted `m`, `dz` and `n_points` as optional arguments all along;
+`build_posterior` simply never passed them. Now on the Posterior tab beside the flow capacity.
+
+> ⚠ **A RESUMED run ignores all three.** It reuses the checkpoint's stored `V` and skips the Fisher
+> entirely — trap **X10**, and that is a correctness requirement, not an optimisation: `V`'s operating
+> points are not reproducible across processes, so a fresh one would express the reused rows in a
+> different coordinate than the targets stored beside them. Turning these knobs only does anything on
+> a run that computes its rotation.
+
+### The flow knobs are on the Posterior tab because the checkpoint is a cache
+
+C-11's own docstring says a completed checkpoint *"is a cache of the whole simulation run, so you can
+retrain the flow at a different capacity/learning rate without re-simulating"* — and until now there
+was no way to do that without editing `config.py`. Hidden features, transforms, learning rate and
+early-stop patience are now fields. The economics: **~46 h to re-train against a cache, against ~57 h
+for a full run** (measured from the 2026-08-25 run's own file timestamps — 11.4 h of generation,
+46.1 h of training). And §4.6's "more capacity will not help" was measured on the **broken**
+conditioning; that verdict is worth re-testing after §11's Phase 1, not inheriting.
+
+### Every knob is an ARGUMENT, and there is a test that says so
+
+`orchestrator` does `from .config import PRIOR_SWEEP_ITERATIONS, NSF_HIDDEN_FEATURES, …`, which binds
+all of them at IMPORT — so a panel that "configured" a run by assigning to the constant would change
+nothing and the run would use the default with nothing to say so. That is the trap the training
+budget was made a parameter for (§6 row 5), and it now applies to eleven more.
+`test_the_sweep_and_flow_knobs_are_ARGUMENTS_because_the_constants_are_snapshotted` checks the
+signature AND that each knob reaches the thing it configures, because accepted-and-dropped is the
+failure mode a signature check alone misses.
+
+> ### ⚠ A STUB INSTALLED OVER A FUNCTION MUST TOLERATE ITS NEW ARGUMENTS
+> `tests/test_user_sbi.py` monkeypatches `pipeline.gen_prior` with tiny stand-ins, and there are
+> **two** of them. Adding `n_max`/`step` upstream killed the suite with
+> `TypeError: _tiny_nadrowski_gen_prior() got an unexpected keyword argument 'n_max'` -- deep inside
+> `build_prior`, ~40 tests in. Fixing the one named in the traceback then hit the SECOND stub on the
+> next run and cost another hour. Both now take `**_kw`.
+>
+> That is deliberately NOT a lost contract check: mirroring the signature by hand was never checking
+> anything useful (it failed as a TypeError, not an assertion), and `gen_prior`'s real signature is
+> asserted directly by `test_n_max_and_step_are_no_longer_hidden_inside_gen_prior`.
+
+> **A test-writing note that has now cost time twice.** The check that `_local_map` no longer
+> hardcodes the CPU failed on its first run — against the **comment that documents the fix**, which
+> necessarily contains the string it forbids. Same false positive as the TSNPE runner check. Both now
+> compare `ast.unparse(ast.parse(source))`, which drops comments and docstrings by construction. If
+> you assert on source text, parse it first.
+
+---
 
 ## 2026-08-26 — §11 implemented, and the measurement that set its width was not the one §11 assumed
 
@@ -4475,6 +4835,12 @@ by CPU tests with injected failures (including a full `gen_training_data` recove
 run under artificial pressure that exercised the *predictive* split rather than the reactive retry.
 **Reproducing a genuine reactive CUDA OOM needs a second process holding VRAM, which has not been
 staged.** Treat the retries as tested-by-construction until a real run exercises them.
+>
+> **UPDATE 2026-08-27: they fired, and the first real firing found a bug in them.** The Phase-1
+> retrain hit a genuine reactive OOM at batch 351/5000 and `_rows_with_oom_retry` caught it exactly
+> as designed — then died on its own `empty_cache()`. See the 2026-08-27 (later) entry and trap X13.
+> The retries are no longer untested by real hardware; the release path they depend on is now
+> best-effort and pinned by `test_the_release_path_survives_a_failing_empty_cache`.
 
 ## 2026-08-10 (later) — the retrain OOM'd, and the free-memory reading is why
 

@@ -117,6 +117,7 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
                  chi_k_fixed: int | None = None, chi_max_cycles: float | None = None,
                  n_vars: int | None = None,
                  nd_idx: dict | None = None, k_b_cell: float | None = None,
+                 cal_n_scales: int | None = None,
                  dtype: torch.dtype = torch.float32,
                  device: torch.device = torch.device('cpu')) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -133,6 +134,8 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
     :param steady_idx: Index defining the steady-state position in the simulation points.
     :param dt_nd_min: Finest ND time step of the pre-simulated trajectory.
     :param n_cal: Number of calibration data samples to generate.
+    :param cal_n_scales: (t_scale, T) operating points to spread them over; None = config.CAL_N_SCALES.
+                         TRAP X5: this is t_scale's effective sample size, not a speed dial.
     :param dt_exp: Fixed experimental sampling interval (seconds).
     :param t_min_exp: Shortest experimental recording duration (seconds).
     :param t_max_exp: Longest experimental recording duration (seconds).
@@ -151,8 +154,11 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
     # exactly as it always did (n_cal=2000 -> 200 x 10; the suites' n_cal=40/60 -> 4/6 x 10). Only a
     # LARGER n_cal starts growing the batch instead of the batch count, which is what makes extra
     # statistical power essentially free.
+    # Passed, never read from the module: analysis.py does `from core.config import CAL_N_SCALES`,
+    # which SNAPSHOTS it at import, so a caller assigning to config.CAL_N_SCALES changes nothing.
+    n_scales = CAL_N_SCALES if cal_n_scales is None else max(1, int(cal_n_scales))
     cal_run_size = min(n_cal, max(CAL_RUN_SIZE,
-                                  min(CAL_RUN_SIZE_MAX, math.ceil(n_cal / max(1, CAL_N_SCALES)))))
+                                  min(CAL_RUN_SIZE_MAX, math.ceil(n_cal / max(1, n_scales)))))
     cal_run_size = max(1, cal_run_size)
     cal_n_runs = max(1, math.ceil(n_cal / cal_run_size))
 

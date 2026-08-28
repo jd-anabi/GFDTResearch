@@ -63,6 +63,49 @@ HELP = {
     "tsnpe_dirs": "How many of the best-constrained Fisher directions to truncate; the rest keep "
                   "full prior width. Truncating every axis would cut the FLAT directions (k, "
                   "delta_E, temp sit at or near prior) on noise rather than on information.",
+    "sweep_iters": "GLOBAL sweep rounds. Total candidates screened for stability = rounds x "
+                   "candidates-per-round, so this is the coverage of the broad Sobol census that "
+                   "SEEDS the local flood-fill. The sweep is ITERATION-bounded, which is why the "
+                   "next field is not a speed dial.",
+    "sweep_batch": "Candidates per global round; 0 = follow the hardware batch. NOT a speed knob — "
+                   "the sweep is iteration-bounded, so shrinking this makes the prior WORSE without "
+                   "making it faster (measured 527 s at 2048 against >70 min and unfinished at 32).",
+    "sweep_max_sets": "Accepted parameter sets that STOP the local flood-fill. This is the point "
+                      "cloud HDBSCAN clusters and the GMM is fitted to, so it buys COVERAGE of the "
+                      "stable manifold rather than statistical precision — a 10-D GMM with a few "
+                      "components needs nothing like 175,000 points.",
+    "sweep_step": "Random-walk stride for the flood-fill, in PHYSICAL parameter units. Too small and "
+                  "the walk never leaves its seed points; too large and it steps ACROSS the stable "
+                  "manifold instead of tracing it.",
+    "sweep_units": "ND time units the stability screen integrates each candidate over. This defines "
+                   "what 'stable' MEANS, so it changes the prior's support and not just how long the "
+                   "sweep takes — a longer screen rejects slow instabilities a short one accepts.",
+    "cluster_size": "HDBSCAN's floor on what counts as an ISLAND of stable parameters. Its label "
+                    "count is handed straight to the GMM's n_components, so this sets how many "
+                    "MODES the prior has — a different component count is a different prior, not "
+                    "a faster one.",
+    "cluster_samples": "How conservative HDBSCAN's density estimate is. Higher declares more "
+                       "points NOISE, which it leaves unassigned and the GMM never sees — so this "
+                       "thins the cloud the prior is fitted to as well as splitting it.",
+    "fisher_m": "Ensemble size per latent perturbation in the Fisher rotation. Cost is linear in "
+                "this; under chi each evaluation already pays (1+K) simulations instead of 2.",
+    "fisher_dz": "Latent central-difference step for the Fisher Jacobian.",
+    "fisher_points": "Operating points the Fisher is AVERAGED over. 1 is ground-truth-only, which "
+                     "re-correlates away from it — averaging is what makes one LINEAR rotation "
+                     "valid across the whole prior. ⚠ A resumed run reuses the checkpoint's stored "
+                     "V and ignores all three of these (trap X10).",
+    "flow_hidden": "Flow width: hidden units per spline transform. With a COMPLETE training "
+                   "checkpoint on disk this can be re-tried without re-simulating (~46 h against "
+                   "~57 h for a full run) — that is what the checkpoint is a cache for.",
+    "flow_transforms": "Flow depth: number of spline transforms. Same re-try economics as the width.",
+    "flow_lr": "Adam learning rate for the density estimator.",
+    "flow_patience": "Early-stopping patience in epochs. The 2026-08-25 run stopped at 130 on a "
+                     "patience of 20, with its best validation loss at epoch 110.",
+    "cal_n": "Calibration datasets drawn for SBC/TARP.",
+    "cal_scales": "(t_scale, T) operating points those datasets are spread over. ⚠ This is "
+                  "t_scale's EFFECTIVE SAMPLE SIZE, not a speed dial: lowering it is a DIFFERENT "
+                  "measurement, not a faster one. 'SBC flat on all 13' is strong for 11 of them and "
+                  "materially weaker for t_scale, and this number is why (trap X5).",
     "num_runs": "How many training BATCHES to simulate. Each batch is one Sobol (t_scale, T) "
                 "operating point that every row in it shares — so this is the data budget AND the "
                 "timescale/duration diversity of the training set, and it is what wall-clock scales "
@@ -575,6 +618,42 @@ class PriorPanel(_StagePanel):
         row.addWidget(self.btn_save_prior)
         v.addLayout(row)
         self.controls_layout.addWidget(box)
+
+        # -- the stability sweep: what actually builds the prior ---------------------------------
+        sweep = QGroupBox("Stability sweep")
+        sv = QVBoxLayout(sweep)
+        sform = make_form()
+        self.sweep_iters = IntField(str(config.PRIOR_SWEEP_ITERATIONS))
+        self.sweep_batch = IntField(str(config.PRIOR_SWEEP_BATCH))
+        self.sweep_max_sets = IntField(str(config.PRIOR_SWEEP_MAX_SETS))
+        self.sweep_step = FloatField(str(config.PRIOR_SWEEP_STEP))
+        self.sweep_units = FloatField(str(config.STABILITY_SWEEP_ND_UNITS))
+        add_help_row(sform, "Global rounds", self.sweep_iters, HELP["sweep_iters"])
+        add_help_row(sform, "Candidates per round (0 = auto)", self.sweep_batch, HELP["sweep_batch"])
+        add_help_row(sform, "Max accepted sets", self.sweep_max_sets, HELP["sweep_max_sets"])
+        add_help_row(sform, "Random-walk step", self.sweep_step, HELP["sweep_step"])
+        add_help_row(sform, "Stability duration (ND units)", self.sweep_units, HELP["sweep_units"])
+        sv.addLayout(sform)
+        self.sweep_note = _TrainingBudgetMixin._derived_label()
+        sv.addWidget(self.sweep_note)
+        for fld in (self.sweep_iters, self.sweep_batch, self.sweep_max_sets, self.sweep_units):
+            fld.textChanged.connect(lambda _t: self._sync_sweep())
+        self.controls_layout.addWidget(sweep)
+        self._sync_sweep()
+
+        # -- clustering: a different STAGE from the sweep. The sweep maps the stable manifold;
+        # this decides how many MODES the prior has, because HDBSCAN's label count becomes the
+        # GMM's n_components.
+        clust = QGroupBox("Clustering / GMM")
+        cv = QVBoxLayout(clust)
+        cform = make_form()
+        self.cluster_size = IntField(str(config.PRIOR_CLUSTER_MIN_SIZE))
+        self.cluster_samples = IntField(str(config.PRIOR_CLUSTER_MIN_SAMPLES))
+        add_help_row(cform, "Min cluster size", self.cluster_size, HELP["cluster_size"])
+        add_help_row(cform, "Min samples", self.cluster_samples, HELP["cluster_samples"])
+        cv.addLayout(cform)
+        self.controls_layout.addWidget(clust)
+
         self.restore_settings(settings.settings())
 
     def on_draft_set(self, draft):
@@ -661,8 +740,39 @@ class PriorPanel(_StagePanel):
                 f"{cfg.chi_k_pad} probe slots. Train a NEW posterior (the width differs from a non-χ one).")
 
         entry, is_new = self.prior_picker.selected()
+        # Passed, never written to config: orchestrator does `from .config import
+        # PRIOR_SWEEP_ITERATIONS, ...`, so assigning to the constants here would be a silent no-op.
         self.dispatch(orchestrator.build_prior, cfg, entry, is_new, save=False,
-                      provide_fig_sink=True, on_result=self._on_prior)
+                      provide_fig_sink=True, on_result=self._on_prior,
+                      num_iterations=max(1, self.sweep_iters.value()),
+                      sweep_batch=max(0, self.sweep_batch.value()),
+                      max_sets=max(1, self.sweep_max_sets.value()),
+                      walk_step=self.sweep_step.value() or config.PRIOR_SWEEP_STEP,
+                      stability_units=self.sweep_units.value() or config.STABILITY_SWEEP_ND_UNITS,
+                      min_cluster_size=max(2, self.cluster_size.value()),
+                      min_samples=max(1, self.cluster_samples.value()))
+
+    def _sync_sweep(self) -> None:
+        """The one derived line: how many candidates the GLOBAL census screens, and where the time
+        goes. Pure and cheap, so it is safe on every keystroke; wrapped because a status line must
+        never be able to raise into refresh_gates and take the tab down."""
+        try:
+            cfg = self.session.cfg
+            hw_batch = getattr(getattr(cfg, "hw", None), "batch_size", None) or config.detect_device().batch_size
+            per_round = self.sweep_batch.value() or hw_batch
+            rounds = max(1, self.sweep_iters.value())
+            units = self.sweep_units.value() or config.STABILITY_SWEEP_ND_UNITS
+            dt = getattr(cfg, "dt_nd_min", None)
+            steps = f"{int(units / dt):,}" if dt else "?"
+            self.sweep_note.setText(
+                f"Global census screens {rounds * per_round:,} candidates ({rounds:,} rounds x "
+                f"{per_round:,}), each integrated over {steps} steps.\n"
+                f"The LOCAL flood-fill then runs until {max(1, self.sweep_max_sets.value()):,} sets "
+                f"are accepted — that is the dominant cost of a prior build, and it now runs on the "
+                f"same device as the global sweep (falling back to the CPU when there is no "
+                f"accelerator).")
+        except Exception as e:                    # noqa: BLE001 -- never break the tab over a label
+            self.sweep_note.setText(f"Sweep summary unavailable: {type(e).__name__}: {e}")
 
     def _on_prior(self, payload):
         self.session.inf_prior, self.session.force_prior = payload
@@ -688,6 +798,9 @@ class PriorPanel(_StagePanel):
         qs.setValue("prior", self.prior_picker.key())
         qs.setValue("bounds", self.bounds_picker.key())
         qs.setValue("bounds_source", self.bounds_source.key())
+        for name in ("sweep_iters", "sweep_batch", "sweep_max_sets", "sweep_step", "sweep_units",
+                     "cluster_size", "cluster_samples"):
+            qs.setValue(name, str(getattr(self, name).value()))
         qs.endGroup()
         # The bounds GRID is not persisted: it is seeded from whichever file is selected, so restoring a
         # stale hand-edited grid against a different model/bounds would silently mis-bind parameters.
@@ -698,6 +811,20 @@ class PriorPanel(_StagePanel):
         # The bounds picker points at CONFIG's model, which is not known at __init__ -- stash the key and
         # re-apply it in on_draft_set (the same deferred-restore trap the cell pickers have).
         self._saved_bounds_key = settings.get_str(qs, "bounds")
+        # str + cast, because settings has no get_float; a blank or unparseable value falls back to
+        # the config constant rather than to FloatField.value()'s 0.0 -- and a 0 here would mean a
+        # sweep with no rounds, or a flood-fill that stops at zero accepted sets.
+        for name, default, cast in (("sweep_iters", config.PRIOR_SWEEP_ITERATIONS, int),
+                                    ("sweep_batch", config.PRIOR_SWEEP_BATCH, int),
+                                    ("sweep_max_sets", config.PRIOR_SWEEP_MAX_SETS, int),
+                                    ("sweep_step", config.PRIOR_SWEEP_STEP, float),
+                                    ("sweep_units", config.STABILITY_SWEEP_ND_UNITS, float),
+                                    ("cluster_size", config.PRIOR_CLUSTER_MIN_SIZE, int),
+                                    ("cluster_samples", config.PRIOR_CLUSTER_MIN_SAMPLES, int)):
+            try:
+                getattr(self, name).setText(str(cast(settings.get_str(qs, name, str(default)))))
+            except (TypeError, ValueError):
+                getattr(self, name).setText(str(default))
         # Always start in FILE mode: direct entry has to be seeded from a file, and no file is selected
         # until on_draft_set runs. The saved mode is deliberately not restored for that reason.
         self.bounds_source.set_direct(False)
@@ -900,6 +1027,33 @@ class PosteriorPanel(_TrainingBudgetMixin, _StagePanel):
             fld.textChanged.connect(lambda _t: self._sync_budget())
         self.controls_layout.addWidget(budget)
 
+        # -- flow capacity: re-tryable against a COMPLETE checkpoint without re-simulating --------
+        flow = QGroupBox("Density estimator")
+        fv = QVBoxLayout(flow)
+        fform = make_form()
+        self.flow_hidden = IntField(str(config.NSF_HIDDEN_FEATURES))
+        self.flow_transforms = IntField(str(config.NSF_NUM_TRANSFORMS))
+        self.flow_lr = FloatField(str(config.TRAINING_LEARNING_RATE))
+        self.flow_patience = IntField(str(config.TRAINING_STOP_AFTER_EPOCHS))
+        add_help_row(fform, "Hidden features", self.flow_hidden, HELP["flow_hidden"])
+        add_help_row(fform, "Transforms", self.flow_transforms, HELP["flow_transforms"])
+        add_help_row(fform, "Learning rate", self.flow_lr, HELP["flow_lr"])
+        add_help_row(fform, "Early-stop patience", self.flow_patience, HELP["flow_patience"])
+        fv.addLayout(fform)
+        self.controls_layout.addWidget(flow)
+
+        fisher = QGroupBox("Fisher rotation")
+        rv = QVBoxLayout(fisher)
+        rform = make_form()
+        self.fisher_m = IntField(str(config.REPARAM_FISHER_M))
+        self.fisher_dz = FloatField(str(config.REPARAM_FISHER_DZ))
+        self.fisher_points = IntField(str(config.REPARAM_FISHER_POINTS))
+        add_help_row(rform, "Ensemble per perturbation", self.fisher_m, HELP["fisher_m"])
+        add_help_row(rform, "Central-difference step", self.fisher_dz, HELP["fisher_dz"])
+        add_help_row(rform, "Operating points", self.fisher_points, HELP["fisher_points"])
+        rv.addLayout(rform)
+        self.controls_layout.addWidget(fisher)
+
         self.restore_settings(settings.settings())
         self._sync_budget()
 
@@ -925,6 +1079,13 @@ class PosteriorPanel(_TrainingBudgetMixin, _StagePanel):
         self.dispatch(orchestrator.build_posterior, cfg, self.session.inf_prior,
                       self.session.force_prior, entry, is_new, save=False,
                       num_runs=n_runs, run_size_cap=cap,
+                      hidden_features=max(1, self.flow_hidden.value()),
+                      num_transforms=max(1, self.flow_transforms.value()),
+                      learning_rate=self.flow_lr.value() or config.TRAINING_LEARNING_RATE,
+                      stop_after_epochs=max(1, self.flow_patience.value()),
+                      fisher_m=max(1, self.fisher_m.value()),
+                      fisher_dz=self.fisher_dz.value() or config.REPARAM_FISHER_DZ,
+                      fisher_points=max(1, self.fisher_points.value()),
                       provide_fig_sink=True, on_result=self._on_posterior)
 
     def _on_posterior(self, payload):
@@ -982,11 +1143,25 @@ class PosteriorPanel(_TrainingBudgetMixin, _StagePanel):
         qs.setValue("posterior", self.post_picker.key())
         qs.setValue("num_runs", self.num_runs.value())
         qs.setValue("run_size_cap", self.run_size_cap.value())
+        for name in ("flow_hidden", "flow_transforms", "flow_lr", "flow_patience",
+                     "fisher_m", "fisher_dz", "fisher_points"):
+            qs.setValue(name, str(getattr(self, name).value()))
         qs.endGroup()
 
     def restore_settings(self, qs):
         qs.beginGroup("inference_posterior")
         self.post_picker.restore_key(settings.get_str(qs, "posterior"))
+        for name, default, cast in (("flow_hidden", config.NSF_HIDDEN_FEATURES, int),
+                                    ("flow_transforms", config.NSF_NUM_TRANSFORMS, int),
+                                    ("flow_lr", config.TRAINING_LEARNING_RATE, float),
+                                    ("flow_patience", config.TRAINING_STOP_AFTER_EPOCHS, int),
+                                    ("fisher_m", config.REPARAM_FISHER_M, int),
+                                    ("fisher_dz", config.REPARAM_FISHER_DZ, float),
+                                    ("fisher_points", config.REPARAM_FISHER_POINTS, int)):
+            try:
+                getattr(self, name).setText(str(cast(settings.get_str(qs, name, str(default)))))
+            except (TypeError, ValueError):
+                getattr(self, name).setText(str(default))
         # Defaults are the config constants, so a fresh install and a wiped QSettings both land on
         # exactly the CLI's behaviour.
         self.num_runs.setText(str(settings.get_int(qs, "num_runs", config.TRAINING_NUM_RUNS)))
@@ -1008,22 +1183,43 @@ class ValidatePanel(_StagePanel):
         box = QGroupBox("Validate (SBC + TARP)")
         v = QVBoxLayout(box)
         v.addWidget(QLabel("Data-free calibration. Needs a posterior and the prior it was trained against."))
+        cform = make_form()
+        self.cal_n = IntField(str(config.SBC_N_CAL))
+        self.cal_scales = IntField(str(config.CAL_N_SCALES))
+        add_help_row(cform, "Calibration datasets", self.cal_n, HELP["cal_n"])
+        add_help_row(cform, "(t_scale, T) operating points", self.cal_scales, HELP["cal_scales"])
+        v.addLayout(cform)
         self.btn_validate = QPushButton("Run calibration")
         self.btn_validate.setProperty("accent", True)     # primary CTA (Fluent accent)
         self.btn_validate.clicked.connect(self._validate)
         v.addWidget(self.btn_validate)
         self.controls_layout.addWidget(box)
+        self.restore_settings(settings.settings())
 
     def _validate(self):
         s = self.session
         if s.posterior is None or s.inf_prior is None:   # force_prior is legitimately None (no drive)
             return
         self.dispatch(orchestrator.validate_calibration, s.cfg, s.posterior,
-                      s.inf_prior, s.force_prior, provide_fig_sink=True)
+                      s.inf_prior, s.force_prior, provide_fig_sink=True,
+                      n_cal=max(1, self.cal_n.value()),
+                      cal_n_scales=max(1, self.cal_scales.value()))
 
     def refresh_local_gates(self):
         s = self.session
         self.btn_validate.setEnabled(s.posterior is not None and s.inf_prior is not None)
+
+    def save_settings(self, qs):
+        qs.beginGroup("inference_validate")
+        qs.setValue("cal_n", self.cal_n.value())
+        qs.setValue("cal_scales", self.cal_scales.value())
+        qs.endGroup()
+
+    def restore_settings(self, qs):
+        qs.beginGroup("inference_validate")
+        self.cal_n.setText(str(settings.get_int(qs, "cal_n", config.SBC_N_CAL)))
+        self.cal_scales.setText(str(settings.get_int(qs, "cal_scales", config.CAL_N_SCALES)))
+        qs.endGroup()
 
 
 # ── 5. Infer ──────────────────────────────────────────────────────────────────
