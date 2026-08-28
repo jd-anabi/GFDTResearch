@@ -856,6 +856,100 @@ def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
     del sol, src
     return obs
 
+def _training_inits(model: str, run_size: int, n_vars, dtype, device) -> torch.Tensor:
+    """Initial conditions for a training run: the model's declared inits (user models) or the
+    randint-pos/zero-prob synthesis (built-ins). Drawn from NUMPY's global RNG -- which torch seeds
+    do not touch -- so callers claiming seeded reproducibility must seed numpy too.
+
+    ``n_vars`` is a consistency CHECK, not an input: the real count comes from the inits, and a
+    caller whose state width disagrees with the model's declared inits has a real bug (a stale cell
+    file, a user model edited since the config was built) that would otherwise surface much later
+    as a shape error inside the solver.
+    """
+    from core import registry
+    is_user = registry.is_user_model(model)
+    if is_user:
+        # User models declare per-variable inits (a nondimensional model may live on a unit scale that
+        # randint(0, 10) would blow past); broadcast them across the run. n_vars comes from the caller.
+        from core.SBI.Priors.user_prior import declared_inits
+        inits = declared_inits(registry.get(model)).to(dtype=dtype, device=device).expand(run_size, -1)
+    else:
+        n_pos, n_prob = INIT_SHAPES[model.lower()]
+        if n_prob > 0:
+            # Probability-like channels start at 0. (This was np.random.randint(0, 1, ...), which is
+            # ALWAYS 0 -- numpy's `high` is exclusive -- so the behaviour is unchanged; it just no
+            # longer reads as a random draw that someone might later "fix" into a real one.)
+            inits = torch.tensor(
+                helpers.concat(np.array(np.random.randint(0, 10, size=(run_size, n_pos))),
+                               np.zeros((run_size, n_prob), dtype=int)),
+                dtype=dtype, device=device)
+        else:
+            inits = torch.tensor(np.random.randint(0, 10, size=(run_size, n_pos)), dtype=dtype, device=device)
+
+    if n_vars is not None and int(n_vars) != inits.shape[-1]:
+        raise ValueError(
+            f"n_vars={n_vars} disagrees with the model's initial conditions, which are "
+            f"{inits.shape[-1]}-wide for '{model}'. One of the two is stale.")
+    return inits
+
+
+def _batch_schedule(n_runs: int, t: torch.Tensor, t_scale_bounds, t_min_exp, t_max_exp,
+                    dt_exp, dt_nd_min, steady_idx) -> tuple[torch.Tensor, torch.Tensor]:
+    """The run's stratified (t_scale, T) schedule: Sobol pairs, log-spaced in both axes, pre-filtered
+    by the fine-grid ceiling. Consumes the torch global RNG (SobolEngine(scramble=True) draws at
+    construction), so a resume must reuse the stored schedule rather than call this again.
+    """
+    t_scale_lo, t_scale_hi = t_scale_bounds
+    log_t_scale_lo, log_t_scale_hi = math.log(t_scale_lo), math.log(t_scale_hi)
+    log_T_lo, log_T_hi = math.log(t_min_exp), math.log(t_max_exp)
+
+    # A batch must fit BOTH ceilings. N_ND_MAX is the cost cap; len(t) is the hard length of the ND
+    # grid every batch slices with `t_fine = t[:n_fine_total]`, which CLIPS SILENTLY when it is
+    # exceeded. An over-long draw then produces a self-inconsistent training row: the spontaneous
+    # trace is built by SLICING (so it comes back short) while gen_chi_block GATHERS to N_points
+    # (its clamp replicating the last sample), so chi and the summary statistics describe different
+    # trace lengths, and log(T_k) records a duration neither of them actually has. Filtering the
+    # draw is the honest fix -- these geometries cannot be simulated at the requested resolution, so
+    # they must not enter the training set at all.
+    #   Built-in bounds are unaffected: t_scale in (1, 40) puts len(t) at ~2.4M against a 300k cap,
+    #   so nothing was ever clipped. It bites model-builder bounds, where t_scale in (v/2, v*2)
+    #   makes len(t) = 240k -- SHORTER than N_ND_MAX -- and ~20% of accepted draws truncated.
+    n_fine_max = min(N_ND_MAX, t.shape[0])
+
+    def _draw_and_filter(n_candidates: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw Sobol candidates, filter by the fine-grid ceiling, return (t_scales, Ts) that fit."""
+        pts = sobol.draw(n_candidates)
+        cand_t_scales = torch.exp(log_t_scale_lo + pts[:, 0] * (log_t_scale_hi - log_t_scale_lo))
+        cand_Ts = torch.exp(log_T_lo + pts[:, 1] * (log_T_hi - log_T_lo))
+        dt_nd_cand = dt_exp / cand_t_scales
+        subsample_cand = torch.clamp(torch.round(dt_nd_cand / dt_nd_min), min=1).long()
+        N_points_cand = (cand_Ts / dt_exp).long()
+        n_fine_cand = steady_idx + N_points_cand * subsample_cand
+        valid = n_fine_cand <= n_fine_max
+        return cand_t_scales[valid], cand_Ts[valid]
+
+    sobol = torch.quasirandom.SobolEngine(dimension=2, scramble=True)
+    oversample = 3
+    valid_t_scales, valid_Ts = _draw_and_filter(n_runs * oversample)
+    # Fallback: keep drawing more candidates until we have enough valid ones. A whole draw coming
+    # back empty means NO (t_scale, T) in the declared bounds fits the grid, so redrawing would
+    # spin forever -- say what is wrong instead of hanging.
+    while valid_t_scales.shape[0] < n_runs:
+        more_t_scales, more_Ts = _draw_and_filter(n_runs * oversample)
+        if more_t_scales.numel() == 0:
+            raise ValueError(
+                f"No (t_scale, T) pair in the declared bounds fits the fine-grid ceiling of "
+                f"{n_fine_max} steps (steady_idx={steady_idx}, dt_exp={dt_exp}, "
+                f"dt_nd_min={dt_nd_min}, t_scale in {t_scale_bounds}, T in "
+                f"[{t_min_exp}, {t_max_exp}]). Shorten the recording range, widen t_scale, or "
+                f"raise N_ND_MAX / the model's t_nd_max.")
+        valid_t_scales = torch.cat([valid_t_scales, more_t_scales])
+        valid_Ts = torch.cat([valid_Ts, more_Ts])
+    batch_t_scales = valid_t_scales[:n_runs]
+    batch_Ts = valid_Ts[:n_runs]
+    return batch_t_scales, batch_Ts
+
+
 def gen_training_data(model: str, prior: torch.distributions.Distribution, forcing_prior: torch.distributions.Distribution,
                       t: torch.Tensor, run_size: int, n_runs: int, steady_idx: int, dt_nd_min: float,
                       nd_dim: int, forcing_idx: dict, rescale_idx: dict,
@@ -960,33 +1054,7 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
     if model.lower() not in VALID_SIMS and not is_user:
         raise ValueError(f"Invalid simulator: {model}")
 
-    if is_user:
-        # User models declare per-variable inits (a nondimensional model may live on a unit scale that
-        # randint(0, 10) would blow past); broadcast them across the run. n_vars comes from the caller.
-        from core.SBI.Priors.user_prior import declared_inits
-        inits = declared_inits(registry.get(model)).to(dtype=dtype, device=device).expand(run_size, -1)
-    else:
-        n_pos, n_prob = INIT_SHAPES[model.lower()]
-        if n_prob > 0:
-            # Probability-like channels start at 0. (This was np.random.randint(0, 1, ...), which is
-            # ALWAYS 0 -- numpy's `high` is exclusive -- so the behaviour is unchanged; it just no
-            # longer reads as a random draw that someone might later "fix" into a real one.)
-            inits = torch.tensor(
-                helpers.concat(np.array(np.random.randint(0, 10, size=(run_size, n_pos))),
-                               np.zeros((run_size, n_prob), dtype=int)),
-                dtype=dtype, device=device)
-        else:
-            inits = torch.tensor(np.random.randint(0, 10, size=(run_size, n_pos)), dtype=dtype, device=device)
-
-    # n_vars was ACCEPTED AND IGNORED: the real count comes from inits above, so the argument was a
-    # dead input that three callers dutifully computed. Rather than drop it, use it -- a caller whose
-    # idea of the state width disagrees with the model's declared inits has a real bug (a stale cell
-    # file, a user model edited since the config was built), and it would otherwise surface much
-    # later as a shape error inside the solver.
-    if n_vars is not None and int(n_vars) != inits.shape[-1]:
-        raise ValueError(
-            f"n_vars={n_vars} disagrees with the model's initial conditions, which are "
-            f"{inits.shape[-1]}-wide for '{model}'. One of the two is stale.")
+    inits = _training_inits(model, run_size, n_vars, dtype, device)
 
     # move to the specified device
     t = t.to(dtype=dtype, device=device)
@@ -1089,61 +1157,14 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
             if note:
                 print(note, flush=True)
 
-    # --- Stratified sampling of batch-level (t_scale, T) pairs with pre-filter ---
-    t_scale_lo, t_scale_hi = t_scale_bounds
-    log_t_scale_lo, log_t_scale_hi = math.log(t_scale_lo), math.log(t_scale_hi)
-    log_T_lo, log_T_hi = math.log(t_min_exp), math.log(t_max_exp)
-
-    # A batch must fit BOTH ceilings. N_ND_MAX is the cost cap; len(t) is the hard length of the ND
-    # grid every batch slices with `t_fine = t[:n_fine_total]`, which CLIPS SILENTLY when it is
-    # exceeded. An over-long draw then produces a self-inconsistent training row: the spontaneous
-    # trace is built by SLICING (so it comes back short) while gen_chi_block GATHERS to N_points
-    # (its clamp replicating the last sample), so chi and the summary statistics describe different
-    # trace lengths, and log(T_k) records a duration neither of them actually has. Filtering the
-    # draw is the honest fix -- these geometries cannot be simulated at the requested resolution, so
-    # they must not enter the training set at all.
-    #   Built-in bounds are unaffected: t_scale in (1, 40) puts len(t) at ~2.4M against a 300k cap,
-    #   so nothing was ever clipped. It bites model-builder bounds, where t_scale in (v/2, v*2)
-    #   makes len(t) = 240k -- SHORTER than N_ND_MAX -- and ~20% of accepted draws truncated.
-    n_fine_max = min(N_ND_MAX, t.shape[0])
-
-    def _draw_and_filter(n_candidates: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Draw Sobol candidates, filter by the fine-grid ceiling, return (t_scales, Ts) that fit."""
-        pts = sobol.draw(n_candidates)
-        cand_t_scales = torch.exp(log_t_scale_lo + pts[:, 0] * (log_t_scale_hi - log_t_scale_lo))
-        cand_Ts = torch.exp(log_T_lo + pts[:, 1] * (log_T_hi - log_T_lo))
-        dt_nd_cand = dt_exp / cand_t_scales
-        subsample_cand = torch.clamp(torch.round(dt_nd_cand / dt_nd_min), min=1).long()
-        N_points_cand = (cand_Ts / dt_exp).long()
-        n_fine_cand = steady_idx + N_points_cand * subsample_cand
-        valid = n_fine_cand <= n_fine_max
-        return cand_t_scales[valid], cand_Ts[valid]
-
     # SKIPPED ENTIRELY on a resume: batch_t_scales/batch_Ts already came from the checkpoint header.
     # Not merely redundant -- rebuilding the engine would consume the torch global RNG (scramble=True
     # draws at construction) between here and the RNG restore, and re-deriving a schedule that the
     # accept/reject filter makes geometry-dependent is precisely the "silently non-uniform
     # stratification" C-11 warns is worse than crashing.
     if _ck_resumed is None:
-        sobol = torch.quasirandom.SobolEngine(dimension=2, scramble=True)
-        oversample = 3
-        valid_t_scales, valid_Ts = _draw_and_filter(n_runs * oversample)
-        # Fallback: keep drawing more candidates until we have enough valid ones. A whole draw coming
-        # back empty means NO (t_scale, T) in the declared bounds fits the grid, so redrawing would
-        # spin forever -- say what is wrong instead of hanging.
-        while valid_t_scales.shape[0] < n_runs:
-            more_t_scales, more_Ts = _draw_and_filter(n_runs * oversample)
-            if more_t_scales.numel() == 0:
-                raise ValueError(
-                    f"No (t_scale, T) pair in the declared bounds fits the fine-grid ceiling of "
-                    f"{n_fine_max} steps (steady_idx={steady_idx}, dt_exp={dt_exp}, "
-                    f"dt_nd_min={dt_nd_min}, t_scale in {t_scale_bounds}, T in "
-                    f"[{t_min_exp}, {t_max_exp}]). Shorten the recording range, widen t_scale, or "
-                    f"raise N_ND_MAX / the model's t_nd_max.")
-            valid_t_scales = torch.cat([valid_t_scales, more_t_scales])
-            valid_Ts = torch.cat([valid_Ts, more_Ts])
-        batch_t_scales = valid_t_scales[:n_runs]
-        batch_Ts = valid_Ts[:n_runs]
+        batch_t_scales, batch_Ts = _batch_schedule(
+            n_runs, t, t_scale_bounds, t_min_exp, t_max_exp, dt_exp, dt_nd_min, steady_idx)
 
         if _ck_dir is not None:
             # The PREFLIGHT write, before the first simulation. A read-only Resources/, a permissions
