@@ -168,7 +168,7 @@ T = build_inferred_bijection(cfg)
 # Reconstruct POST's exact training bijection (log box + optional rotation) from its sidecar,
 # so latent draws map to physical θ consistently; falls back to plain linear T for legacy posteriors.
 T_eval = load_eval_bijection(cfg, POST, POSTERIOR_PATH)
-force_prior = orchestrator._build_forcing_prior(cfg)
+force_prior = orchestrator.build_forcing_prior(cfg)
 z = latent_prior.sample((K - 1,))
 theta = T_eval(z.to(device))
 force_s = force_prior.sample((K - 1,)).to(device)

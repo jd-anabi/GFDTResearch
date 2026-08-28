@@ -212,7 +212,7 @@ def test_out_of_distribution_drive_is_flagged():
                               str(config.BOUNDS_PATH / "nadrowski" / "master.txt"))
     cli.load_and_validate_gt(cfg, str(config.CELL_PATH / "nadrowski" / "master_weak.txt"))
     cfg.hw = config.cpu_device()
-    force_prior = orchestrator._build_forcing_prior(cfg)      # cheap: no simulation involved
+    force_prior = orchestrator.build_forcing_prior(cfg)      # cheap: no simulation involved
 
     class _BoxPrior:                                          # stands in for the (expensive) ND prior
         def __init__(self, bounds):
@@ -1775,7 +1775,7 @@ def _gen_td(mode, *, seed=0, n_runs=3, run_size=4, **over):
     np.random.seed(seed)
     n_grid, steady_idx = 12_000, 500
     t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
-    force_prior = orchestrator._build_forcing_prior(cfg) if mode == "forced" else None
+    force_prior = orchestrator.build_forcing_prior(cfg) if mode == "forced" else None
     kw = dict(
         run_size=run_size, n_runs=n_runs, steady_idx=steady_idx, dt_nd_min=cfg.dt_nd_min,
         nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,

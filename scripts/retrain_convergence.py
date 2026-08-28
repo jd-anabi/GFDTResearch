@@ -106,7 +106,7 @@ assert _z.shape[-1] == nd_dim + len(cfg.rescale_params), \
 del base
 
 T = build_inferred_bijection(cfg)
-force_prior = orchestrator._build_forcing_prior(cfg)
+force_prior = orchestrator.build_forcing_prior(cfg)
 sbi_prior = sbi_prior_wrapper.SBIPriorWrapper(latent_inferred_prior)
 
 # ---- embedding net (mirror orchestrator.build_posterior) ----

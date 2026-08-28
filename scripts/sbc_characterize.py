@@ -114,7 +114,7 @@ print(f"[reparam] POST={POST}: rotation={'on' if _rot else 'off'}, log-box dims=
       flush=True)
 # None for a SPONTANEOUS or CHI config -- neither samples a drive prior. gen_cal_data is told which
 # branch to take below, so it never dereferences this.
-force_prior = orchestrator._build_forcing_prior(cfg)
+force_prior = orchestrator.build_forcing_prior(cfg)
 
 _z = latent_inferred_prior.sample((2,))
 assert _z.shape[-1] == len(labels), f"latent prior dim {_z.shape[-1]} != n_inferred {len(labels)}"

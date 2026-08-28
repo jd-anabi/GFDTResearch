@@ -689,10 +689,10 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
                 f"bounds file lists {actual}. Re-save the model from the Settings model builder.")
 
     # 1. Forcing prior
-    force_prior = _build_forcing_prior(cfg)
+    force_prior = build_forcing_prior(cfg)
 
     # 2. Rescaling prior
-    rescale_prior = _build_rescale_prior(cfg)
+    rescale_prior = build_rescale_prior(cfg)
 
     if not build_new and choice is not None:
         _assert_prior_matches(cfg, str(PRIOR_PATH / choice), choice)
@@ -763,7 +763,7 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     return inferred_prior, force_prior
 
 
-def _build_rescale_prior(cfg: SimConfig) -> Distribution:
+def build_rescale_prior(cfg: SimConfig) -> Distribution:
     """
     Construct the rescaling-parameter prior from cell file bounds.
 
@@ -780,7 +780,7 @@ def _build_rescale_prior(cfg: SimConfig) -> Distribution:
     return scaling.construct_prior(bounds, types)
 
 
-def _build_forcing_prior(cfg: SimConfig) -> Distribution:
+def build_forcing_prior(cfg: SimConfig) -> Distribution:
     """
     Construct the forcing-parameter prior from cell file bounds.
 

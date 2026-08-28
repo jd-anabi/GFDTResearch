@@ -74,9 +74,7 @@ def _probe_training_data(mode: str) -> None:
     np.random.seed(SEED)
     n_grid, steady_idx = 12_000, 500
     t = torch.linspace(0, n_grid * cfg.dt_nd_min, n_grid, dtype=cfg.hw.dtype)
-    build_forcing_prior = getattr(orchestrator, "build_forcing_prior", None) \
-        or orchestrator._build_forcing_prior
-    force_prior = build_forcing_prior(cfg) if mode == "forced" else None
+    force_prior = orchestrator.build_forcing_prior(cfg) if mode == "forced" else None
     kw = dict(
         run_size=4, n_runs=2, steady_idx=steady_idx, dt_nd_min=cfg.dt_nd_min,
         nd_dim=len(cfg.params_dict), forcing_idx=cfg.forcing_idx, rescale_idx=cfg.rescale_idx,

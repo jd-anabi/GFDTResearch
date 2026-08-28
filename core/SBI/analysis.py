@@ -6,7 +6,7 @@ from torch.distributions.transforms import Transform
 
 from core.SBI import pipeline
 from core.config import CAL_N_SCALES, CAL_RUN_SIZE, CAL_RUN_SIZE_MAX
-from core.SBI.reparam import _transform_device
+from core.SBI.reparam import transform_device
 
 # === POSTERIOR PREDICTIVE CHECK ===
 def invalid_breakdown(valid_mask: torch.Tensor, layout: dict | None) -> dict | None:
@@ -197,7 +197,7 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
     if theta_transform is not None:
         # Convert latent theta_star to physical for downstream comparison.
         # The transform lives on cfg.hw.device; move cpu tensor there, apply, move back.
-        t_device = _transform_device(theta_transform)
+        t_device = transform_device(theta_transform)
         theta_star_phys = theta_transform(theta_star_latent.to(t_device)).cpu()
         return cal_data, theta_star_phys
     else:

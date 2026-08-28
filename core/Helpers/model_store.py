@@ -125,7 +125,7 @@ def nd_bounds(v: float) -> tuple:
 
 # Forcing parameters that must stay strictly positive. `freq` is a drive rate and `tau` an exponential
 # time constant: at 0 the first is not a drive and the second divides by zero, and `freq` additionally
-# gets a LOG-UNIFORM marginal in orchestrator._build_forcing_prior, which is undefined at lo <= 0.
+# gets a LOG-UNIFORM marginal in orchestrator.build_forcing_prior, which is undefined at lo <= 0.
 # `amp` is a magnitude whose sign is absorbed by `phase` (sin/triangular) or by `sign` (exponential),
 # so its box is clamped at 0 rather than required positive -- amp = 0 is a legitimate "no drive".
 _POSITIVE_FORCING = frozenset({"freq", "tau"})

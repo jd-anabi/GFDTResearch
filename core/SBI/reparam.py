@@ -211,7 +211,7 @@ def build_inferred_bijection(cfg, log_params=None) -> ComposeTransform:
     return build_box_bijection(lows, torch.cat([nd_highs, rs_highs]), _log_mask(names, lows, log_params))
 
 
-def _transform_device(transform: ComposeTransform) -> torch.device:
+def transform_device(transform: ComposeTransform) -> torch.device:
     """Extract the device the transform's tensors live on by peeking at the box's bound tensors."""
     for t in transform.parts:
         if isinstance(t, UnitToBoxTransform):
