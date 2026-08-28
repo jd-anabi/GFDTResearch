@@ -42,7 +42,7 @@ import torch
 # "negative result" that was really a no-op.
 #
 # NOT `expandable_segments`, which would be the ideal fix and is a measured no-op on this Windows
-# build (see the 2026-08-10 appendix entry): it needs CUDA's VMM API, which cu130-on-Windows does not
+# build (measured): it needs CUDA's VMM API, which cu130-on-Windows does not
 # expose. These two options are pure allocator POLICY and are not platform-gated.
 #
 # SET HERE rather than in run.bat so the CLI, the scripts and the tests get it too. Safe this late:
@@ -151,7 +151,7 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
 # is REACTIVE: it only tightens once something has already failed, and on a card shared with a
 # Windows desktop the first failure can land hours into a multi-day run. mem_get_info cannot warn it
 # in advance, because under WDDM other processes' surfaces are evictable and get reported to you as
-# free -- measured 15037 MiB reported against nvidia-smi's 5814 on this machine (trap X6). This knob
+# free -- measured 15037 MiB reported against nvidia-smi's 5814 on this machine. This knob
 # is the PROACTIVE half: on a day you know the desktop will be busy, state the real budget up front
 # and the planner splits from batch 0 instead of discovering it the hard way.
 #
@@ -159,7 +159,7 @@ def memory_budget_elements(device: torch.device, dtype: torch.dtype,
 # splitting is k x time on the batches it touches -- and buys a run that does not die.
 #
 # READ LIVE via `config.SIM_VRAM_CEILING_GIB`, never `from .config import SIM_VRAM_CEILING_GIB`:
-# an imported name is a SNAPSHOT and assigning to it later is a silent no-op (trap X12).
+# an imported name is a SNAPSHOT and assigning to it later is a silent no-op.
 #
 # DELIBERATELY NOT PART OF THE TRAINING CHECKPOINT IDENTITY. It changes the memory PLAN, not the
 # rows: a split batch is row-aligned and produces the same training distribution. Putting it in the
@@ -184,12 +184,12 @@ UNITS_PATH   = _ROOT / "Units"
 PRIOR_PATH   = _ROOT / "Priors"
 POSTERIOR_PATH = _ROOT / "Posteriors"
 PLOT_PATH    = _ROOT / "Plots"
-# Training-data checkpoints (C-11). Its OWN directory, not a subfolder of Priors/ or Posteriors/:
+# Training-data checkpoints. Its OWN directory, not a subfolder of Priors/ or Posteriors/:
 # file_manager.list_dir walks recursively and the GUI's posterior picker keeps any *.pt that is not
 # *.rot.pt, so a checkpoint shard under Posteriors/ would appear in the dropdown as a loadable
 # posterior and fail an isinstance assert on selection.
 CHECKPOINT_PATH = _ROOT / "Checkpoints"
-# Observations persisted at INFERENCE time (section 11.6 guardrail 1). Amortized NPE has no
+# Observations persisted at INFERENCE time. Amortized NPE has no
 # observation when it is SAVED -- which is why `default_x` is None on posterior_08232026 and why
 # the posterior behind those figures cannot be re-sampled from the artifacts alone. TSNPE needs
 # one, so it is recorded where it first exists: at inference.
@@ -277,7 +277,7 @@ SBC_N_CAL = 2000       # calibration datasets for SBC in validate(). n_cal=1000 
                        # miscalibration only surfaces reliably at n_cal>=2000 (KS power grows with n_cal).
 TRAINING_NUM_RUNS = 5000  # number of (t_scale_k, T_k) batches per training round (data budget)
 
-# --- Training-data checkpointing (C-11) -----------------------------------------------------------
+# --- Training-data checkpointing ------------------------------------------------------------------
 # Write a resumable checkpoint every N training batches; 0 disables it entirely.
 #
 # Deliberately NOT sharing pipeline._MEM_LOG_EVERY (250). That one is a DISPLAY volume, tuned to give
@@ -371,17 +371,17 @@ QUIET_SEGMENT_BAR = False
 # `pos` is 0, 1 or 2 depending on which phase and which panel is running.
 #
 # WHAT THE GUI DOES WITH IT: exclude it, and only that. Its total is in the tens of thousands, so it
-# would win the overall bar's election every time and sweep it 0->100% every second (trap S3). It is
+# would win the overall bar's election every time and sweep it 0->100% every second. It is
 # NOT the "Solver Performance" meter's source any more -- that number comes from core.progress.SOLVER,
 # because a solver call shorter than its own bar's mininterval never paints a rate at all, which is
-# exactly what CUDA graphs made happen (§10.5).
+# exactly what CUDA graphs made happen.
 #
 # The bar nevertheless stays ENABLED under the GUI, unlike QUIET_SEGMENT_BAR above: its redraws are the
 # cooperative cancel's most frequent checkpoint and feed the stall detector's heartbeat through a long
 # batch. See core/gui/widgets/progress_pane.py.
 SOLVER_BAR_DESC = "step"
 
-# === DECORRELATING REPARAMETERIZATION (Track A: flow calibration via latent rotation) ===
+# === DECORRELATING REPARAMETERIZATION (flow calibration via latent rotation) ===
 # When the inferred params are well-identified but strongly correlated (e.g. kappa~x_scale at
 # |cos|=0.95), the flow mis-calibrates the thin diagonal ridge. Rotating the flow's latent
 # coordinate into the simulation-based Fisher eigenbasis makes that posterior axis-aligned so the
@@ -414,7 +414,7 @@ REPARAM_LOG_PARAMS = []   # ALL-LINEAR box (the keeper posterior_07012026's coor
                           # nd_log_mask stays all-False, and the existing linear ND prior
                           # (prior_forcing_no_forcing.pt) + posterior_07012026 already match this box.
 
-# === CONDITIONING REPAIR (PRISM_HANDOFF section 11.3) ============================================
+# === CONDITIONING REPAIR =========================================================================
 # Knots in the per-channel rank-Gaussian standardizer EmbeddedNet fits over the summary block.
 # The transform IS the (knot, probit) pair, so this is its resolution: 1024 knots put the finest
 # quantile step at ~0.1%, which resolves every point mass measured on the 10.24M-row cache (the
@@ -427,7 +427,7 @@ RANK_GAUSS_KNOTS = 1024
 # reached -1.7e29 -- three decades of outlier under the threshold, which is what dragged its fitted
 # std to 4.19e11.
 #   ⚠ THE SUMMARY BLOCK ONLY, NEVER THE CHI BLOCK. A pad slot is exactly 0.0 in all six channels and
-#   is required to be BITWISE inert (section 3.6, with a test). Clipping a probe column whose 0.1th
+#   is required to be BITWISE inert (pinned by tests/test_chi_set_encoder.py). Clipping a probe column whose 0.1th
 #   percentile is non-zero would move that 0.0 and silently turn every pad into a phantom probe.
 WINSOR_PCT = (0.001, 0.999)
 
@@ -441,7 +441,7 @@ WINSOR_PCT = (0.001, 0.999)
 # second pathway (forcing_dim = 3K). A single passive trace only sees the products D*A_nd (amplitude)
 # and (lambda_hb/k_gs)*tau_nd (timescale); the chi(omega) SHAPE over frequency separates
 # kappa/lambda/x_scale/t_scale INDIVIDUALLY -- the only lever on the information ceiling + the
-# x_scale location bias (KEEPER CAVEAT 1). CHI_MODE=False = the exact current pipeline
+# x_scale location bias. CHI_MODE=False = the exact current pipeline
 # (single-frequency forcing, or spontaneous-only), so this is fully optional and additive.
 CHI_MODE = False
 CHI_N_FREQS = 6                # K: number of single-tone drive frequencies (recordings) per observation.
@@ -504,7 +504,7 @@ CHI_MIN_CYCLES = 2.0   # a probe is MASKED (never moved, never dropped) below th
 CHI_MAX_CYCLES = 20.0  # CEILING on the drive cycles a probe is locked in over. The counterpart to
                        # CHI_MIN_CYCLES above, and the less obvious of the two: every instinct about
                        # integration says a longer lock-in is a better one, and above ~30 cycles on
-                       # this model it is not. Measured 2026-08-06 (handoff 4.3.1 / trap CHI9): at
+                       # this model it is not. Measured 2026-08-06: at
                        # FIXED theta, |chi| CV runs 0.03 -> 0.63 and driven/undriven SNR 26 -> 2.3 as
                        # the window grows past the wall, and re-locking the SAME trace over a shorter
                        # prefix reverses it completely. A stationary noise-limited estimator cannot do
@@ -523,8 +523,8 @@ CHI_MAX_CYCLES = 20.0  # CEILING on the drive cycles a probe is locked in over. 
                        #   24 -> 0.086  28 -> 0.123   32 -> 0.198   36 -> 0.456  (first failure)
                        # A steady climb, not a cliff, so there is no "correct" value -- only a
                        # trade-off. 20 sits in the flat part with ~3x margin to the 0.2 CV screen and
-                       # 10x above CHI_MIN_CYCLES, and it is the value the 4.3.1 rescue table already
-                       # validated end-to-end on every failing point. 12-16 reproduce slightly better;
+                       # 10x above CHI_MIN_CYCLES, and it is the value the re-lock rescue measurement
+                       # already validated end-to-end on every failing point. 12-16 reproduce slightly better;
                        # they were not chosen because NOTHING here measures the other side of the
                        # trade -- a shorter lock-in is also less frequency-selective, and no
                        # experiment in this repo has yet priced that.
@@ -593,7 +593,7 @@ PRIOR_SWEEP_ITERATIONS = 50     # sweep ROUNDS inside gen_prior's global stabili
                                 # candidates screened = PRIOR_SWEEP_BATCH x this, and each round pays
                                 # a full STABILITY_SWEEP_ND_UNITS trajectory whatever the batch is --
                                 # so rounds cost wall-clock and batch costs memory. Was a bare literal
-                                # at the gen_prior call site until C-7.
+                                # at the gen_prior call site until 2026-08-10.
                                 # (Prior.construct_prior passes batch*iterations down as `batch_size`,
                                 # so the subclasses' `batch_size % num_iterations` guard is vacuous by
                                 # construction -- do not rely on it to catch a bad value here.)
@@ -603,8 +603,8 @@ PRIOR_SWEEP_BATCH = 0           # candidates per prior sweep; 0 = follow Hardwar
 # --- the LOCAL sweep (the flood-fill), promoted out of hiding 2026-08-27 ------------------------
 # Both were invisible: n_max was a LITERAL inside pipeline.gen_prior that silently overrode
 # construct_prior's own default, and `step` was never threaded through gen_prior at all, so
-# construct_prior's default always won no matter what a caller asked for. Same defect class C-7
-# promoted PRIOR_SWEEP_ITERATIONS out of.
+# construct_prior's default always won no matter what a caller asked for. The same defect class
+# PRIOR_SWEEP_ITERATIONS was promoted out of.
 PRIOR_SWEEP_MAX_SETS = 175_000  # accepted parameter sets that STOP the local flood-fill. This is the
                                 # point cloud HDBSCAN clusters and the GMM is fitted to, so it buys
                                 # COVERAGE of the stable manifold rather than statistical precision --
@@ -634,7 +634,7 @@ PRIOR_CLUSTER_MIN_SAMPLES = 10
                                 # That one number used to drive both, so shrinking it for a quick run
                                 # made the PRIOR worse without making it faster: the sweep is
                                 # iteration-bounded, so a smaller batch runs the same 50 rounds and
-                                # merely accepts fewer points each. Measured (backlog C-7): 527 s at
+                                # merely accepts fewer points each. Measured: 527 s at
                                 # batch 2048, versus >70 min and STILL UNFINISHED at batch 32. Set
                                 # this only to bound prior-sweep MEMORY; to make a smoke run cheap,
                                 # shrink the training batch instead and leave this at 0.
