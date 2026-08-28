@@ -86,3 +86,17 @@ class ArtifactPicker(QWidget):
         i = self.combo.findData(key)
         if i >= 0:
             self.combo.setCurrentIndex(i)
+
+    def repoint(self, base_path, restore_key: str | None = None) -> None:
+        """Point the picker at a different folder, rescan, and optionally re-apply a saved selection.
+
+        THE ONE PLACE THE ORDER LIVES (four panels used to restate it): the folder must be set and
+        refreshed BEFORE any saved key is re-applied, because refresh() rebuilds the combo and would
+        wipe a selection restored first. Callers restoring from QSettings must also restore their
+        MODEL combo first and call their _on_model_changed explicitly (currentTextChanged does not
+        fire when the saved value equals the current text), since that is what routes here.
+        """
+        self.base_path = Path(base_path)
+        self.refresh()
+        if restore_key is not None:
+            self.restore_key(restore_key)

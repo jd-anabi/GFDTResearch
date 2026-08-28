@@ -93,8 +93,7 @@ class SimulatePanel(BasePanel):
         self.controls_layout.addWidget(box)
 
     def _on_model_changed(self, model: str):
-        self.cell_picker.base_path = CELL_PATH / model.lower()
-        self.cell_picker.refresh()
+        self.cell_picker.repoint(CELL_PATH / model.lower())
 
     def _start(self):
         cell = self.cell_picker.selected_path()
@@ -169,8 +168,8 @@ class SimulatePanel(BasePanel):
 
     def restore_settings(self, qs):
         qs.beginGroup("simulate")
-        # Model FIRST + explicit _on_model_changed (currentTextChanged won't fire if the value already
-        # equals the default), THEN the cell picker -- a picker restored first gets wiped by refresh().
+        # Model FIRST, explicit _on_model_changed, THEN the picker key -- ArtifactPicker.repoint
+        # owns the rationale.
         self.model_combo.setCurrentText(settings.get_str(qs, "model", self.model_combo.currentText()))
         self._on_model_changed(self.model_combo.currentText())
         self.cell_picker.restore_key(settings.get_str(qs, "cell"))

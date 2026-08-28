@@ -638,18 +638,17 @@ class ConfigPanel(_StagePanel):
 
 
 class _CellPreviewMixin:
-    """Shared cell-picker handling for Simulate + Infer: the cell folder follows the BUILT config's
-    model (there is no live model combo in these tabs), so the picker is repointed in on_config_built
-    and the saved key is re-applied there (it could not resolve at __init__, before any config)."""
+    """Cell-picker handling for the Infer tab (its only user): the cell folder follows the BUILT
+    config's model (there is no live model combo in that tab), so the picker is repointed in
+    on_config_built and the saved key re-applied there (it could not resolve at __init__, before
+    any config exists)."""
 
     def _init_cell_picker(self):
         self.cell_picker = ArtifactPicker(CELL_PATH / "nadrowski")
         self._saved_cell_key = ""
 
     def on_config_built(self, cfg):
-        self.cell_picker.base_path = CELL_PATH / cfg.model.lower()
-        self.cell_picker.refresh()
-        self.cell_picker.restore_key(self._saved_cell_key)   # -1 guard leaves default if not in folder
+        self.cell_picker.repoint(CELL_PATH / cfg.model.lower(), self._saved_cell_key)
 
 
 # ── 2. Prior (also picks the BOUNDS file, which is what builds the config) ────
@@ -732,9 +731,7 @@ class PriorPanel(_StagePanel):
     def on_draft_set(self, draft):
         """Config applied: repoint the bounds picker at the new model's folder and re-apply the saved
         key (it could not resolve at __init__, before any model was chosen)."""
-        self.bounds_picker.base_path = BOUNDS_PATH / draft.model.lower()
-        self.bounds_picker.refresh()
-        self.bounds_picker.restore_key(self._saved_bounds_key)   # -1 guard leaves default if absent
+        self.bounds_picker.repoint(BOUNDS_PATH / draft.model.lower(), self._saved_bounds_key)
         if self.bounds_source.is_direct():        # a different model means a different parameter set
             self._on_bounds_source_changed()
 

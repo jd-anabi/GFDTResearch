@@ -102,8 +102,7 @@ class FdtPanel(BasePanel):
         self.controls_layout.addWidget(box)
 
     def _on_model_changed(self, model: str):
-        self.cell_picker.base_path = CELL_PATH / model.lower()
-        self.cell_picker.refresh()
+        self.cell_picker.repoint(CELL_PATH / model.lower())
         # FDT supports the built-ins + additive-noise, no-forcing user models. Gate the CTA on
         # registry.fdt_support and show the reason (multiplicative/zero-noise or forced user models).
         ok, reason = registry.fdt_support(model)
@@ -149,11 +148,9 @@ class FdtPanel(BasePanel):
 
     def restore_settings(self, qs):
         qs.beginGroup("fdt")
-        # Model FIRST, and drive _on_model_changed explicitly: currentTextChanged won't fire if the
-        # saved value equals the current text, and the picker's base_path must be repointed before the
-        # cell key is restored (otherwise refresh() would clear the just-set selection). Feed it the
-        # combo's ACCEPTED text, not the raw saved string -- a corrupt saved model a non-editable combo
-        # rejects would otherwise point the cell picker at a nonexistent folder.
+        # Model FIRST, explicit _on_model_changed, THEN the picker key -- ArtifactPicker.repoint owns
+        # the rationale. Feed the combo's ACCEPTED text, not the raw saved string: a corrupt saved
+        # model a non-editable combo rejects would otherwise point the picker at a nonexistent folder.
         self.model_combo.setCurrentText(settings.get_str(qs, "model", self.model_combo.currentText()))
         self._on_model_changed(self.model_combo.currentText())
         self.cell_picker.restore_key(settings.get_str(qs, "cell"))
