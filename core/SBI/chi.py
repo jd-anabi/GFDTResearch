@@ -66,11 +66,10 @@ _PEAK_FREQ_BATCH = 256
 #   amplifier case, measured at max|J| = 2.0e4 against 289 for the largest real feature in
 #   scripts/degeneracy_map, and at a harmless 6.0 in a rotation whose +-dz arms happened not to
 #   straddle a quantization step. Intermittent, not benign: a rotation averages 8 operating points over
-#   a ~4-decade Omega_0 prior. Duplicate or quantization, never independent -- so it leaves. Backlog
-#   C-9/C-10.
+#   a ~4-decade Omega_0 prior. Duplicate or quantization, never independent -- so it leaves.
 #
 # This is about the FISHER set ONLY. In the CONDITIONING block `logcyc` is genuinely informative,
-# because training varies placement AND duration per row (C-6/C-8), so the constants above are not
+# because training varies placement AND duration per row, so the constants above are not
 # constant there. Do not "simplify" the two lists toward each other.
 CHI_COND_CHANNELS = ("u", "logmag", "cos", "sin", "logcyc", "mask")
 CHI_FISHER_CHANNELS = ("logmag", "cos", "sin")
@@ -135,7 +134,7 @@ def probe_verdict(cfg, f_peak_cell: float, freq_hz: float, n_samples: int) -> Pr
     """Classify one experimental probe against the SAME predicates build_experiment_obs_chi applies.
 
     THIS IS THE SHARED SOURCE OF TRUTH, and that is the whole point of it existing. The GUI's probe
-    planner (backlog C-3) has to tell a user what is in band and how long to record BEFORE a bench
+    planner has to tell a user what is in band and how long to record BEFORE a bench
     session; the experimental path has to refuse/mask/truncate the same way AFTER it. Those two
     re-deriving the same five predicates separately is precisely how a diagnostic comes to disagree
     with the thing it is diagnosing -- so the planner and the runtime call this, and neither owns a
@@ -239,7 +238,7 @@ def resolvable_multipliers(mults: torch.Tensor, f_peak: torch.Tensor, T_obs: flo
                            min_cycles: float | None = None) -> torch.Tensor:
     """Lift each ROW's multipliers into the sub-band its own Omega_0 can actually resolve -> (B, K).
 
-    THE PROBLEM (backlog C-6, measured in PRISM_HANDOFF 4.3.4). Probes sit at ``mult * Omega_0``, so
+    THE PROBLEM, measured. Probes sit at ``mult * Omega_0``, so
     a probe resolves only if ``mult * Omega_0 * T >= CHI_MIN_CYCLES``. The prior spans ~4 decades of
     Omega_0 while the band is a FIXED window of multipliers, so with one shared multiplier set the
     slow rows cannot resolve at any placement in the band: measured, 55 % of training rows carried
@@ -403,12 +402,12 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
                       batched call lock in rows over DIFFERENT durations, which chi mode needs
                       because Omega_0 spans ~4 decades within a training batch: a single shared
                       duration must be keyed on the fastest row to respect CHI_MAX_CYCLES, and that
-                      truncates the slow rows below CHI_MIN_CYCLES and masks them (backlog C-6/C-8,
-                      handoff 4.3.5). Rows are MASKED rather than sliced -- the tensor stays
-                      rectangular, so the chunked float64 accumulation is unchanged and the memory
-                      bound grows by one BOOL mask per chunk: +16 MiB at B=2048, chunk=8192, against
-                      a 553.7 MiB unmasked peak. (C-8 claimed "unchanged" and shipped a float64 mask,
-                      which was +128 MiB. See _mask.)
+                      truncates the slow rows below CHI_MIN_CYCLES and masks them (~48 % of rows
+                      carried no live probe under the shared duration). Rows are MASKED rather than
+                      sliced -- the tensor stays rectangular, so the chunked float64 accumulation is
+                      unchanged and the memory bound grows by one BOOL mask per chunk: +16 MiB at
+                      B=2048, chunk=8192, against a 553.7 MiB unmasked peak. (The per-row change
+                      first claimed "unchanged" and shipped a float64 mask, +128 MiB. See _mask.)
     :return: (B,) complex128 susceptibilities.
     """
     B, n = x.shape[0], x.shape[-1]
@@ -416,7 +415,7 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
     step = max(1, int(chunk))
 
     # Per-row live length. None -> every row uses all n, and every mask below is all-True, so the
-    # scalar path is bit-identical to the pre-C-8 code (pinned by the chunking test).
+    # scalar path is bit-identical to the pre-per-row code (pinned by the chunking test).
     if n_samples is None:
         n_live = torch.full((B,), n, dtype=torch.float64, device=dev)
         limit = None
@@ -433,10 +432,10 @@ def lock_in_batched(x: torch.Tensor, omega: torch.Tensor, F0, T_obs, dt: float,
         byte per element instead of eight. At the training batch (B=2048, chunk=8192) that is 16 MiB
         rather than 128 MiB.
 
-        C-8 shipped this as float64, and the claim in this function's docstring that per-row masking
-        leaves "the chunked float64 accumulation and its memory bound ... unchanged" was wrong by one
-        full (B, chunk) float64 tensor. Measured peak for the whole call at that batch: 553.7 MiB
-        unmasked (pre-C-8), 681.7 MiB as C-8 shipped it, 569.7 MiB now. The regression was invisible
+        Per-row masking first shipped this as float64, and the claim in this function's docstring
+        that it leaves "the chunked float64 accumulation and its memory bound ... unchanged" was
+        wrong by one full (B, chunk) float64 tensor. Measured peak for the whole call at that batch:
+        553.7 MiB unmasked, 681.7 MiB as first shipped, 569.7 MiB now. The regression was invisible
         because the only end-to-end exercise was the smoke train at RUN_SIZE=32, where 128 MiB is 2 MB.
         """
         if limit is None:

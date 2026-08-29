@@ -58,7 +58,7 @@ class EmbeddedNet(nn.Module):
         trains with ``z_score_x="none"`` and standardizes here instead: per-channel inside the
         encoder, and RANK-GAUSSIANISED for the summary block, both fitted over real data only.
 
-        WHY RANK-GAUSSIANISATION AND NOT MEAN/STD (section 11.3 item 1.1). The affine this replaces
+        WHY RANK-GAUSSIANISATION AND NOT MEAN/STD. The affine this replaces
         was measured on the 2026-08-25 retrain's own artifact: ``A1_mean`` was fitted at
         std = 4.19e11 against a physical range of ~1e3, and ``D3_bimodality`` at std = 4.42e8
         against a range of (0, 1]. Both were driven there by a handful of pathological trajectories
@@ -82,7 +82,7 @@ class EmbeddedNet(nn.Module):
         Unpickling restores THOSE buffers into an instance of THIS class, so ``forward`` dispatches
         on which buffers are present rather than assuming the new ones. Without that branch every
         pre-2026-08-26 artifact becomes unloadable -- including ``posterior_08232026``, which is the
-        baseline every section 11 gate is measured against.
+        baseline every conditioning-repair gate is measured against.
         """
         super().__init__()
 

@@ -1,4 +1,4 @@
-"""Resumable checkpointing for ``pipeline.gen_training_data`` (backlog C-11).
+"""Resumable checkpointing for ``pipeline.gen_training_data``.
 
 WHY. A production run is ``TRAINING_NUM_RUNS=5000`` batches x ``hw.batch_size=2048`` rows -- days of
 simulation accumulating in host RAM with nothing on disk until it finishes. The 2026-08-10/11 OOM work
@@ -19,7 +19,7 @@ WHAT IS DELIBERATELY NOT PERSISTED
   * ``pipeline._BUDGET_CAP_ELEMENTS`` / ``_budget_clean_runs``. Process-local by design: the right cap
     depends on what is on the card NOW, and a resumed run must re-learn it against the current desktop.
   * numpy's RNG state. ``np.random`` is used exactly once in this path, for ``inits`` before the loop
-    (trap X8 -- ``torch.manual_seed`` does not touch numpy). The TENSOR is persisted instead, which is
+    (``torch.manual_seed`` does not touch numpy). The TENSOR is persisted instead, which is
     both smaller and immune to anything else in the process having drawn from numpy meanwhile.
   * The Sobol engine. ``SobolEngine(dimension=2, scramble=True)`` consumes the torch global RNG AT
     CONSTRUCTION, and ``_draw_and_filter``'s accept count depends on the geometry, so the schedule
@@ -159,7 +159,7 @@ def create(path, identity: dict, *, schedule_t_scales, schedule_Ts, inits, V, pr
         # The stratification schedule. Persisted, never re-derived -- see the module docstring.
         "batch_t_scales": schedule_t_scales.detach().cpu(),
         "batch_Ts": schedule_Ts.detach().cpu(),
-        "inits": inits.detach().cpu(),                     # numpy-drawn; trap X8
+        "inits": inits.detach().cpu(),                     # numpy-drawn; torch seeds do not cover it
         "V": None if V is None else V.detach().cpu(),
         "probe": probe,
         "run_size": int(run_size),

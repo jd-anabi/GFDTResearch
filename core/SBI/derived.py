@@ -1,4 +1,4 @@
-"""Tier-1 physical consistency: f_scale derived from the gating-spring energy (section 11.5).
+"""Tier-1 physical consistency: f_scale derived from the gating-spring energy.
 
 THE BUG THIS FIXES, AND IT IS A BUG RATHER THAN A NARROWING. The box samples the gating-spring energy
 TWICE and never requires the two copies to agree:
@@ -30,7 +30,7 @@ the other twelve would make that density singular, and SBC/TARP/NPE all need it 
 simulation, and it lands in the SAME COLUMN -- so every downstream reader of
 ``rescale_idx["f_scale"]`` is untouched.
 
-⚠ TWO HAZARDS, both real (section 11.5):
+⚠ TWO HAZARDS, both real:
   1. The derived f_scale reaches ~1e4 pN, and the chi drive amplitude is ``CHI_F0 * f_scale``. Any
      feasibility guard must read the DERIVED value. This is a real change to the training
      distribution, not a relabelling.
@@ -86,7 +86,7 @@ def to_sim_rescale(nd: torch.Tensor, rescale: torch.Tensor, rescale_idx: dict,
         # Loud, because the silent alternative is simulating with a TEMPERATURE in newtons. A caller
         # that has not been taught about tier 1 must stop, not guess.
         raise ValueError(
-            "This box declares 'T' instead of 'f_scale' (tier-1 physical consistency, section 11.5), "
+            "This box declares 'T' instead of 'f_scale' (tier-1 physical consistency), "
             "so f_scale must be DERIVED as N*beta*k_B*T/x_scale -- but nd_idx and/or k_b_cell were "
             "not supplied, so it cannot be. Pass both, or use a bounds file that declares f_scale.")
     for name in (_N_CHANNELS_PARAM, _BETA_PARAM):

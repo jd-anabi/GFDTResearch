@@ -488,7 +488,7 @@ class SummaryStatistics:
             return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-# === VALID FLAGS (section 11.3 item 1.2) =========================================================
+# === VALID FLAGS =================================================================================
 # A binary companion channel for each feature whose value is a SUBSTITUTED SENTINEL rather than a
 # measurement, mirroring the mask channel ChiSetEncoder already carries for the probe block.
 # Convention matches that mask: 1 = the feature is a real measurement, 0 = it was substituted.

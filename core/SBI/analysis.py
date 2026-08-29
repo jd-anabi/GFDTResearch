@@ -206,7 +206,7 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
 
 
 
-# === INFORMATIVENESS (PRISM_HANDOFF section 11.4) ================================================
+# === INFORMATIVENESS =============================================================================
 # Every other diagnostic in this file measures CALIBRATION -- SBC, TARP, PPC coverage all ask whether
 # the posterior's stated uncertainty is honest. None of them asks whether it is USEFUL, and a
 # posterior that simply returns the prior passes all three perfectly. `posterior_08232026` is exactly
@@ -237,7 +237,8 @@ def gen_cal_data(model: str, prior: torch.distributions.Distribution,
 # ⚠ AND THEY ARE AN ENTROPY REDUCTION, NOT A MARGINAL KL. `per_param[j]` is
 # `H(prior_j) - E_x[H(posterior_j | x)]`, which measures how much NARROWER the marginal got. It is
 # not KL(posterior_j || prior_j): a marginal that shifts without narrowing has positive KL and ZERO
-# entropy reduction. That is the right quantity here on purpose -- section 4.6's complaint is width
+# entropy reduction. That is the right quantity here on purpose -- the 2026-08-25 posterior's
+# characterised failure is width
 # (PPC coverage 99.1% at a nominal 90%, intervals 2-3x the observation's envelope) -- but do not
 # quote it as a KL, and note it can go negative for a marginal the flow widened.
 # The per-direction figures are computed in the flow's own LATENT coordinate, which under
@@ -339,7 +340,7 @@ def informativeness(posterior, theta_star: torch.Tensor, x_cal: torch.Tensor,
         # EVENLY SPACED, not the first n_d. gen_cal_data returns rows in generation order and every
         # row in a batch shares one (t_scale, T) operating point -- so `range(n_d)` would compute the
         # decomposition over a handful of t_scale values rather than across the prior, which is the
-        # same stratification trap trap X5 records for SBC. Deterministic, so two runs compare.
+        # same stratification hazard SBC has. Deterministic, so two runs compare.
         idx = torch.linspace(0, x_cal.shape[0] - 1, n_d).round().long()
         prior_draw = prior.sample((max(n_samples * 8, 4096),)).cpu()
         h_prior = _entropy_1d(prior_draw.T)                              # (P,)

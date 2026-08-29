@@ -24,7 +24,7 @@ its weight on one direction loading -1.00*k. An HPD box drawn in 13-D physical s
 axes on NOISE, and deleted support is permanent: truncation is a one-way ratchet, and a round-2 run
 cannot recover a region round 1 threw away. So the region is expressed along the flow's own latent
 axes, which under REPARAM_ROTATE *are* V's columns -- truncate directions 0..K-1, leave the flat ones
-full width. This also dissolves the addendum's own section 8.3 flaw 2 outright: in that basis the
+full width. This also dissolves the clustering concern outright: in that basis the
 region is approximately axis-aligned, so there is no curved ridge to fragment and no clustering
 needed at all.
 """
@@ -103,7 +103,7 @@ def region_from_posterior(posterior_latent, x_obs: torch.Tensor, *,
         raise ValueError(
             "region_from_posterior needs the observation the region is being drawn around. An "
             "amortized posterior has no default_x -- persist x_obs at INFERENCE time and pass it "
-            "here (section 11.6 guardrail 1).")
+            "here.")
     with torch.no_grad():
         z = posterior_latent.sample((int(n_samples),), x=x_obs)
     z = z.detach().to(torch.float64).cpu()
