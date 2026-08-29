@@ -55,7 +55,7 @@ from core.SBI.reparam import (TransformedPosterior, load_eval_bijection, posteri
 
 DEFAULT_CELL = str(CELL_PATH / "nadrowski" / "master_spont.txt")
 # Several diagnostics read cfg.forcing_idx["amp"] unconditionally, so they need a bounds file that
-# DECLARES a Forcing section -- which, per section 3.3, is a property of the CELL you point them at.
+# DECLARES a Forcing section -- which is a property of the CELL you point them at.
 # master_weak resolves (sibling-first, then the folder's master.txt) to the forced 13-dim box; the
 # spontaneous default above resolves to master_spont.txt and would KeyError on 'amp'.
 FORCED_DEFAULT_CELL = str(CELL_PATH / "nadrowski" / "master_weak.txt")
@@ -343,7 +343,7 @@ def assert_nadrowski(cfg: SimConfig, why: str = "") -> None:
 def assert_forced(cfg: SimConfig, what: str) -> None:
     """Guard for diagnostics that read the cell's own drive (``cfg.forcing_idx["amp"]`` and friends).
 
-    Whether a drive EXISTS is a property of the bounds file, not the cell values (section 3.3), so
+    Whether a drive EXISTS is a property of the bounds file, not the cell values, so
     pointing one of these at a spontaneous cell used to surface as a bare ``KeyError: 'amp'`` twenty
     lines below the config banner. Say which file to point at instead.
     """

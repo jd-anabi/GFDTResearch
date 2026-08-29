@@ -16,7 +16,7 @@ choices:
                    band put 8 of 10 probes there, which is what made posterior_chi_08042026
                    uninformative.
 
-THE T_obs GATE (PRISM_HANDOFF.md section 4.1 step 1 / backlog C-1). The band and F0 were settled on a
+THE T_obs GATE. The band and F0 were settled on a
 SINGLE T_obs = 5 s slice, but training draws T ~ logU[T_MIN_EXP_S, T_MAX_EXP_S] and |chi| is strongly
 T-dependent -- 8.03 / 7.73 / 6.97 / 1.16 across T = 1 / 2 / 5 / 20 s at FIXED theta. A band chosen on
 one slice of an axis the training distribution sweeps is not gated. So T is now the OUTER loop, and
@@ -32,7 +32,7 @@ THE FOUR CRITERIA, per (T_obs, multiplier, F0):
   SNR          mean|chi_driven| / mean|chi_undriven| at the SAME probe frequency. The denominator is
                the lock-in FLOOR: what the estimator returns on a passive trace, i.e. spontaneous
                1/f content plus noise leakage. Free -- it reuses the passive ensemble. This is the
-               ratio section 4.1 nominates to eventually replace CHI_MIN_CYCLES, so it is reported
+               ratio nominated to eventually replace CHI_MIN_CYCLES, so it is reported
                beside the drive-cycle count the production resolution_filter currently gates on.
   own peak     entrainment: driven power at the UNDRIVEN Omega_0, over its undriven level (>= SUP_MIN)
 
@@ -49,7 +49,7 @@ Env knobs:
   CV_MAX     reproducibility ceiling on |chi| CV                        (default 0.20)
   PHASE_MAX  ceiling on circular phase scatter, radians                 (default 0.50)
              ⚠ the one screen here with NO empirical basis. It was chosen, so a verdict that turns
-             on it (today: whether 0.3x belongs in the band) is not evidence -- see backlog C-5
+             on it (today: whether 0.3x belongs in the band) is not evidence -- see _edge_profile below
   SNR_MIN    floor on driven/undriven |chi|  -- PROPOSED, not settled   (default 3.0)
   SUP_MIN    entrainment floor: own peak must retain this fraction      (default 0.50)
   CYCLE_CAP  the prefix length shown in the per-point table and the plot. This is the control that
@@ -87,7 +87,7 @@ _common.enable_warnings()
 M = int(os.environ.get("M", "24"))
 SEED = int(os.environ.get("SEED", "0"))
 CV_MAX = float(os.environ.get("CV_MAX", "0.20"))
-# ADVISORY BY DEFAULT (inf), and that is a measured decision, not a loosening. C-5 swept 11
+# ADVISORY BY DEFAULT (inf), and that is a measured decision, not a loosening. The high-edge sweep ran 11
 # multipliers through the band's high edge: under the duration cap, circular phase scatter grows
 # SMOOTHLY from 0.13 to 1.52 rad with no knee anywhere (step ratios settle to ~1.15 per grid point),
 # so any threshold on it is a choice reported back as a finding -- and the choice is worth a 2.5x
@@ -511,7 +511,7 @@ def _f0_verdict(TOBS, res, f_scale):
 
 
 def _edge_profile(TOBS, res):
-    """Where does the band's HIGH EDGE actually break? -- backlog C-5.
+    """Where does the band's HIGH EDGE actually break?
 
     The band verdict answers "does this multiplier cross the thresholds". That is the wrong question
     at the edge, because ``PHASE_MAX`` was CHOSEN, not measured: a verdict that turns on it reports
@@ -520,11 +520,11 @@ def _edge_profile(TOBS, res):
     a property of the cell rather than of a constant in this file.
 
     Read it as: if phase scatter and own-peak degrade SMOOTHLY across the whole range, no threshold
-    here is defensible from this data and the edge has to be settled by training (C-5's expensive
-    branch). If they turn sharply somewhere, that turn IS the edge and the thresholds should be moved
+    here is defensible from this data and the edge has to be settled by training (the expensive
+    two-posterior comparison). If they turn sharply somewhere, that turn IS the edge and the thresholds should be moved
     to bracket it.
     """
-    print("=== EDGE PROFILE: capped metrics vs probe frequency (backlog C-5) ===")
+    print("=== EDGE PROFILE: capped metrics vs probe frequency ===")
     print(f"  Worst across T_obs, all at the {CYCLE_CAP:g}-cycle cap. 'step' is the ratio to the row")
     print(f"  above -- a knee shows up there, not in the absolute values.")
     print(f"  {'mult':>7} {'CV':>8} {'step':>6} {'SNR':>8} {'step':>6} {'phase':>8} {'step':>6} "
@@ -550,11 +550,11 @@ def _edge_profile(TOBS, res):
           f"phase <= {PHASE_MAX:g} rad, own peak >= {SUP_MIN:g}")
     print(f"  ⚠ PHASE_MAX and SNR_MIN were CHOSEN, not measured. Where a multiplier falls relative to")
     print(f"    them is not evidence; where the STEP column turns is. If no step turns sharply, this")
-    print(f"    grid cannot settle the edge and C-5 needs the training comparison instead.\n")
+    print(f"    grid cannot settle the edge and it needs the training comparison instead.\n")
 
 
 def _wall_verdict(res):
-    """WHERE is the reproducibility wall? -- the measurement C-4 needs before it can pick a cap.
+    """WHERE is the reproducibility wall? -- the measurement the duration cap rests on.
 
     Every cap is evaluated on the same traces, so this is a prefix-length sweep, not a re-run. Two
     populations are reported per cap, and the distinction is the whole point:

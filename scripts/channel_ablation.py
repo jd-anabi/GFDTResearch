@@ -1,6 +1,6 @@
 """Which conditioning channels can the flow actually SEE? Reads the artifacts; simulates nothing.
 
-THE TEST HAD TO BE CORRECTED BEFORE IT WOULD ANSWER (PRISM_HANDOFF section 11.2 item 1). The
+THE TEST HAD TO BE CORRECTED BEFORE IT WOULD ANSWER. The
 2026-08-25 addendum nominates this as its decisive test and specifies it as: replace channel i with
 its fitted mean, and expect EXACTLY ZERO change from a dead channel. Run that way it gives 5.2e-5 for
 A1_mean and 4.6e-4 for D3_bimodality -- not zero -- and you conclude both channels are alive, which
@@ -25,13 +25,13 @@ The two dead channels reporting the SAME number to three figures is itself the t
 the network's own float noise, identical because neither channel moves the output at all.
 
 (Measured on `posterior_08232026` at ROWS=200000, NSWEEP=33, base = the real row nearest the
-standardised median -- 2 live probes of 12, a realistic observation. Section 11.2 records 1.8e-7 and
+standardised median -- 2 live probes of 12, a realistic observation. An earlier ad-hoc run recorded 1.8e-7 and
 8.9e-8 for the same two channels from an ad-hoc run whose hold-point and resolution were not written
 down; the RATIO to a healthy channel, ~1e-6, is the finding, and it reproduces. Verdict: 11
 structurally dead, 2 numerically invisible, 29 usable of 42.)
 
-Run it against the OLD posterior and the NEW one and compare: that comparison is section 11.8's
-Phase-1 gate.
+Run it against the OLD posterior and the NEW one and compare: that comparison is the Phase-1
+retrain's gate.
 
 Env:
   POST   posterior .pt (bare name resolves against Resources/Posteriors). Default: newest.

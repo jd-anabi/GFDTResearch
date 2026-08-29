@@ -13,7 +13,7 @@ kept, costs no simulation, and runs in a second.
 
 WHAT IT REVEALED ON THE 2026-08-25 RETRAIN, and why the distinction matters: `k` puts 99.9% of its
 weight on a single direction whose loading is -1.00*k, and its overlap with `x_scale` across all 13
-directions is 0.0002. The handoff had the central problem recorded as the `k`~`x_scale` alias
+directions is 0.0002. The central problem had been recorded as the `k`~`x_scale` alias
 (|cos| 0.97, measured three times). Both are true, and together they say something sharper than
 either: degeneracy_map's |cos| compares the two parameters' gradient DIRECTIONS, while a Fisher
 eigenvalue is about gradient MAGNITUDE, and `k`'s gradient is both nearly parallel to `x_scale`'s and

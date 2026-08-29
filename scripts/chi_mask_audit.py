@@ -1,7 +1,7 @@
 """
-WHY are chi probes being masked, and which knob would recover them? -- backlog C-6.
+WHY are chi probes being masked, and which knob would recover them?
 
-The smoke train found 77 % of training probes masked (PRISM_HANDOFF 4.3.3). The runtime warning
+The smoke train found 77 % of training probes masked. The runtime warning
 lumps every cause into one sentence -- "below CHI_MIN_CYCLES drive cycles, at/above Nyquist, out of
 band, or a non-finite lock-in" -- which is the right message for a training log and useless for
 deciding what to change. This separates them, on the REAL stability-screened prior, and reports the

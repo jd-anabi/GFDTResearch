@@ -1,5 +1,5 @@
 """
-Step 2 (PRISM_HANDOFF.md, Appendix A): full characterization of the t_offset SBC anomaly.
+Full characterization of the t_offset SBC anomaly.
 
 t_offset's SBC KS p-value swung 0.762 -> 0.001 between training runs, unlike the
 persistently-bad cluster (kappa/lambda/beta). This repeats SBC K times at a raised
@@ -29,7 +29,7 @@ Env knobs:
   CHI_K_FIXED  hold the chi probe COUNT at this value instead of pooling over the training
                mixture -- run per stratum (2 / 6 / CHI_K_PAD) as well as pooled  (default: pooled)
 
-Outputs are suffixed by STRATUM (`_pooled` or `_k<N>`), because handoff 4.1 step 6 is a FOUR-RUN
+Outputs are suffixed by STRATUM (`_pooled` or `_k<N>`), because the stratified SBC protocol is a FOUR-RUN
 comparison and unsuffixed names meant each run overwrote the last -- so the workflow the suffix
 serves left only its final stratum on disk. Same defect degeneracy_map.py's MODE_TAG fixed, on a
 different axis. Compare strata by label across the four .npz files.
@@ -37,7 +37,7 @@ different axis. Compare strata by label across the four .npz files.
 Run:
   & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/sbc_characterize.py
 
-  # handoff 4.1 step 6, the full stratified sweep (chi mode, a trained chi posterior):
+  # the full stratified sweep (chi mode, a trained chi posterior):
   $env:CHI=1; $env:POST="<name>.pt"
   foreach ($k in 2, 6, 12) { $env:CHI_K_FIXED=$k; & $py scripts/sbc_characterize.py }
   Remove-Item Env:CHI_K_FIXED;                    & $py scripts/sbc_characterize.py   # pooled

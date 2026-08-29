@@ -1,4 +1,4 @@
-"""Widen a pre-flag C-11 training checkpoint with the derived valid-flag block. One-shot, additive.
+"""Widen a pre-flag training checkpoint with the derived valid-flag block. One-shot, additive.
 
 WHY THIS EXISTS. Section 11.3 item 1.2 adds a valid-flag channel beside each summary feature whose
 value is a substituted sentinel. That is a change to the FEATURE SET, which normally means
@@ -22,7 +22,7 @@ WHAT IS COPIED VERBATIM, AND WHY IT MATTERS:
   * `probe`, the bijection probe. It pins the box the latent targets live in; the box is unchanged,
     so the stored probe stays valid and a later resume can still verify it.
   * the Sobol schedule (`batch_t_scales`, `batch_Ts`) and `inits`, neither of which is re-derivable
-    (SobolEngine consumes the global RNG at construction; `inits` is drawn from NUMPY's -- trap X8).
+    (SobolEngine consumes the global RNG at construction; `inits` is drawn from NUMPY's, which torch seeds do not touch).
 
 Env:
   SRC     source checkpoint directory. Default: the newest COMPLETE one that has no summary_flags.
@@ -127,7 +127,7 @@ def main() -> None:
         "batch_t_scales": header["batch_t_scales"],
         "batch_Ts": header["batch_Ts"],
         "inits": header["inits"],
-        "V": header.get("V"),                 # NEVER recomputed -- trap X10, see the module docstring
+        "V": header.get("V"),                 # NEVER recomputed -- V is not reproducible across processes; see the module docstring
         "probe": header.get("probe"),
         "run_size": header["run_size"],
         "n_runs": header["n_runs"],

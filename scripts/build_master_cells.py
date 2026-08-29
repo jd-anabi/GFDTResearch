@@ -92,7 +92,7 @@ SHARED_INITS = OrderedDict([("x_init", -0.11), ("xa_init", -1.32), ("c_init", 0.
 # The MASTER ND box. Wide but not degenerate: the ND prior is a stability-screened GMM, so an
 # over-wide box mostly costs screening effort and prior diffuseness rather than correctness.
 # `tau_c` and `temp` take lower bounds > 0 deliberately -- zero active noise is a degenerate corner,
-# and the archived cell_2 sat exactly on it (a ground truth ON a bound is the §7.1 hazard).
+# and the archived cell_2 sat exactly on it (a ground truth ON a bound saturates its latent).
 MASTER_ND_BOX = OrderedDict([
     ("k",       (0.01, 5.0)),
     ("lam",     (0.1, 50.0)),
@@ -125,8 +125,8 @@ AMP_ND_GRID = [0.01, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 
 # locks trivially because the bundle already oscillates there. Detuned, the discriminator is sharp:
 #   weak      -> the bundle keeps its own rhythm, the PSD shows TWO peaks, PLV at the drive is low
 #   entrained -> the bundle abandons Omega_0 and follows the drive, PSD collapses, PLV -> 1
-# This also sidesteps the linear-response question entirely, which matters because PRISM_HANDOFF 4.3
-# already established that an actively oscillating bundle has NO clean linear regime near Omega_0 --
+# This also sidesteps the linear-response question entirely, which matters because the band
+# measurement already established that an actively oscillating bundle has NO clean linear regime near Omega_0 --
 # so "weak" cannot be defined by linearity here, only by "does not capture the oscillator".
 DETUNE = float(os.environ.get("DETUNE", "1.4"))     # drive frequency = DETUNE * Omega_0
 #
@@ -388,7 +388,7 @@ def main():
             print(f"    {name:<16} F0 = {val:<5g} ND -> nearest measured amp_ND={row['a_nd']:g}: "
                   f"{state} (own peak at {100 * row['suppress']:.1f}%)")
         print("    A probe at or above the onset is not a linear-response measurement. Note that")
-        print("    PRISM_HANDOFF 4.3 ruled F0=0.05 out for the OPPOSITE reason (|chi| too noisy to")
+        print("    the band measurement ruled F0=0.05 out for the OPPOSITE reason (|chi| too noisy to")
         print("    reproduce), so the usable window is bounded on both sides -- and it was measured")
         print("    on a different cell. Re-measure before trusting either bound here.")
 
@@ -462,7 +462,7 @@ def _write_files(cfg, f0_cell, f_drive, weak, entrain, hz):
         path.write_text(text, encoding="utf-8")
         print(f"  wrote {path}")
 
-    # Every GT strictly interior to its own bound -- a value ON a bound is the §7.1 hazard, and it is
+    # Every GT strictly interior to its own bound -- a value ON a bound saturates its latent, and it is
     # what made the archived cell_2 unusable against any other cell's box.
     bad = [f"{k}={v} not strictly inside {MASTER_ND_BOX[k]}"
            for k, v in SHARED_ND.items() if not (MASTER_ND_BOX[k][0] < v < MASTER_ND_BOX[k][1])]

@@ -1,5 +1,5 @@
 """
-Step 4 (PRISM_HANDOFF.md, Appendix A): degeneracy / sloppiness map over ALL 16 inferred params.
+Degeneracy / sloppiness map over ALL 16 inferred params.
 
 Generalizes the archived diagnose_fmax.py Part B. At the cell-file ground truth it builds the
 standardized feature-Jacobian
@@ -88,7 +88,7 @@ gt_rescale = torch.tensor([v for v, _ in cfg.rescale_params.values()], dtype=dty
 #   forced : [S(41) incl. Group G from a single-tone drive at the cell's own frequency]
 #   chi    : [S(41) with Group G ZEROED | chi(3K)]  -- so Group G's 11 columns are dropped and 3K
 #            chi columns take their place. The FISHER set is (log|chi|, cos, sin), see
-#            chi.CHI_FISHER_CHANNELS -- `u`, `mask` and (since C-9/C-10) `logcyc` are all excluded
+#            chi.CHI_FISHER_CHANNELS -- `u`, `mask` and `logcyc` are all excluded
 #            because a standardized Jacobian divides by an ensemble std, so a barely-varying channel
 #            is an amplifier. The conditioning block is a
 #            different, WIDER thing (6 per slot over CHI_K_PAD slots, adding `u` and `mask`) and is
@@ -117,7 +117,7 @@ else:
 
 # Suffixes every output. MODE alone is not enough: `J` is in signal-to-noise units and `fnoise` falls
 # ~1/sqrt(T), so the SAME mode at two T_obs is two different measurements -- and the forced arm has to
-# be run at a second T_obs on purpose (the Group-G non-stationarity control, handoff 4.4.1). Tagged by
+# be run at a second T_obs on purpose (the Group-G non-stationarity control). Tagged by
 # mode alone, that control silently overwrote the primary forced result it exists to be compared
 # against. Exactly the defect the mode suffix was added to fix, on an axis added later.
 MODE_TAG = f"{cfg.observation_mode}_T{cfg.T_obs / cfg.get_unit_conversion_factor('s'):g}"
@@ -259,7 +259,7 @@ print(f"[noise] CAP={CAP:.4g}  GT valid frac={keep0.mean():.2f}  median feature 
 # It used to pin `logcyc` to log(max_cycles) plus floor() quantization, which a 1e-9-floored fnoise
 # amplified into the largest entry in the whole Jacobian (max|J| = 2.0e4 against 289 for the biggest
 # real feature -- it set sigma[0] and a condition number of 56000 single-handedly). `logcyc` has since
-# left CHI_FISHER_CHANNELS entirely (C-9/C-10), and the surviving channels -- log|chi|, cos, sin --
+# left CHI_FISHER_CHANNELS entirely, and the surviving channels -- log|chi|, cos, sin --
 # are genuine measurements over a shorter window. So PINNED below is now INFORMATIONAL. Keep printing
 # it: it is what tells you the top of the band is being measured over 20 cycles rather than 30.
 if cfg.chi_mode:
@@ -331,7 +331,7 @@ if cfg.chi_mode:
 # contributes nothing to a norm, a cosine, a singular value or an argsort, so no consumer below has to
 # know this happened.
 # This detector finds a channel pinned at float32 resolution -- `u` (ratio ~1e-8) is the worked
-# example. It is kept as a STANDING guard rather than a fix for any current channel: after C-9/C-10
+# example. It is kept as a STANDING guard rather than a fix for any current channel: after logcyc left the Fisher set
 # no member of CHI_FISHER_CHANNELS pins, so on a healthy run it prints "no dead channels" and that
 # line is the evidence, not decoration.
 #
@@ -425,7 +425,7 @@ for _i in np.argsort(-_rowmax)[:8]:
           f"{_rowmax[_i]:9.3g}  {names[int(np.argmax(_absJ[_i]))]}")
 
 # ---- THE DELIVERABLE, AS DATA ---------------------------------------------------------------------
-# Step 3 of the handoff is a forced-vs-chi DIFF of tables that take hours to produce and, until now,
+# The payoff is a forced-vs-chi DIFF of tables that take hours to produce and, until now,
 # existed only in a terminal buffer -- anything nobody thought to print in advance was simply gone.
 # J and its labels ARE the map; every table above and below is a pure function of them. Saved beside
 # the mode-suffixed figures, under the same suffix and for the same reason, so comparing the two runs
@@ -502,7 +502,7 @@ for i in range(len(ns)):
 ax.set_title(f"|cos| between standardized feature-gradients — {MODE_TAG.upper()} "
              f"({len(FEAT_LABELS)} features)")
 fig.colorbar(im, ax=ax, fraction=0.046); fig.tight_layout()
-# Suffixed by MODE. Step 3 of the handoff is a forced-vs-chi COMPARISON, so unsuffixed names meant the
+# Suffixed by MODE. The payoff is a forced-vs-chi COMPARISON, so unsuffixed names meant the
 # second run silently overwrote the first and you compared a figure with itself.
 heat = str(PLOT_PATH / f"degeneracy_cosine_{MODE_TAG}.png"); fig.savefig(heat, dpi=130)
 

@@ -1,5 +1,5 @@
 """
-Step 3 part B (PRISM_HANDOFF.md, Appendix A): convergence retrain.
+Convergence retrain.
 
 Trains a NEW posterior non-interactively and saves its per-epoch train/validation loss
 curve (via the part-A capture in train_nn -> build_posterior), so we can read whether the

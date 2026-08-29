@@ -1,7 +1,7 @@
 """
 The pre-flight run: all five pipeline stages end-to-end at tiny sizes, non-interactively.
 
-WHY THIS EXISTS. PRISM_HANDOFF 4.1 has called for "a smoke train before the long run" since the
+WHY THIS EXISTS. The retrain runbook has called for "a smoke train before the long run" since the
 retrain path was written, with no way to do one: `retrain_convergence.py` INHERITS its prior from an
 existing posterior, and Resources/Posteriors/ is empty, so the very situation a smoke train is for --
 about to spend days on the first posterior -- is the one situation that script cannot serve.
@@ -16,7 +16,7 @@ WHAT TO WATCH, beyond "it finished":
 
   * `chi: N/M probes masked` -- the count, not the presence. Some masking is by design (a probe under
     CHI_MIN_CYCLES on a short recording). The reference figure is ~37 % of TRAINING probes
-    (PRISM_HANDOFF 4.3.6: 36.8 %, reproduced at 36.7 % after the OOM work); materially above that
+    (36.8 % on the corrected band, reproduced at 36.7 % after the OOM work); materially above that
     means something in the chi path regressed.
       ⚠ THE RUN-LEVEL FIGURE IS NOISY, AND BY MUCH MORE THAN IT LOOKS. Do NOT treat "704 probes" as
       the sample size: all rows in a batch share one (t_scale, T) stratum AND one probe set, so the
@@ -26,16 +26,16 @@ WHAT TO WATCH, beyond "it finished":
       31.7 / 32.7 / 34.8 / 35.4 / 36.7 / 38.2 / 44.9 %, mean ~36 %.
       So: compare the MEAN of a few runs against ~37 %, and treat a single run within roughly
       +/-12 pp as uninformative. SEED does not make runs comparable either -- it sets torch's RNG but
-      not numpy's, and initial conditions come from np.random.randint (trap X8).
+      not numpy's, and initial conditions come from np.random.randint.
       (2026-08-20: a 31.7 % reading was chased through a physics A/B before this was understood --
       Omega_0, which is what drives masking, was identical between solver paths at KS D = 0.0020
       against a 0.0347 critical value, n = 3072 per arm.) Note the PPC's fraction is much higher by design and
-    is a readout of the POSTERIOR, not of the probe machinery -- see 4.3.6 before reading it as a bug.
+    is a readout of the POSTERIOR, not of the probe machinery -- do not read it as a bug.
       HISTORICAL, and no longer true: this bullet used to say the duration ceiling "is keyed on the
       batch's fastest f_peak, so a batch spanning a wide range of f_peak gives its slowest rows
       proportionally fewer cycles". That WAS the defect -- it is what drove the 77 % masking this
-      script first found -- and C-8 fixed it: the ceiling is now applied PER ROW ((B,) N_row) in
-      gen_chi_raw. Trap CHI9: a scalar T_k anywhere in that path is now a regression.
+      script first found -- and the per-row fix removed it: the ceiling is now applied PER ROW ((B,) N_row) in
+      gen_chi_raw. A scalar T_k anywhere in that path is now a regression.
   * out-of-distribution warnings from check_observation_in_distribution -- these are the guards that
     were invisible for months before _common.enable_warnings().
   * the mode banner. A width mismatch between the config and the trained net is exactly what this
@@ -50,16 +50,16 @@ resolves `Bounds/nadrowski/master_spont.txt`, the 12-dim SPONTANEOUS box. Under 
 loud: both boxes report `mode=chi` and both build the SAME 114-wide conditioning vector, because the
 chi block is a function of CHI_K_PAD and not of the parameter set. What silently differs is the
 inferred dimension -- 12 against 13 -- and the parameter dropped is `f_scale`, which is precisely the
-one PRISM_HANDOFF 4.1 step 5 names as the retrain's headline hypothesis. A smoke run left at the
+retrain's headline hypothesis. A smoke run left at the
 default therefore exercises a configuration that omits the thing the retrain exists to measure.
 (A cross-LOAD between the two is caught, by the `param_keys` guard -- but nothing catches a smoke
 train that simply runs the wrong one.)
 
 This is a property of the CELL/BOUNDS pairing, not of this script, so it is not "fixed" here: the
-sibling-first rule is shared with the CLI and the GUI and must stay that way (PRISM_HANDOFF 3.3).
+sibling-first rule is shared with the CLI and the GUI and must stay that way.
 
 This is NOT a calibration measurement. SBC at these sizes has no power -- CAL_N_SCALES is t_scale's
-effective sample size (trap X5) and it is tiny here. A flat rank histogram from this run means
+effective sample size (rows in a batch share its t_scale) and it is tiny here. A flat rank histogram from this run means
 nothing at all; only a CRASH means anything.
 
 Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_cfg):
@@ -70,13 +70,13 @@ Env knobs (CELL / BOUNDS / MODEL / TOBS_S / CHI* are handled by _common.script_c
   SEED       RNG seed                                          (default 0)
   SAVE       "1" to persist prior/posterior artifacts          (default 0)
              ⚠ NOT "nothing touches disk", which this used to claim. The infer stage always
-             writes an observation record to Resources/Observations (section 11.6 guardrail 1):
+             writes an observation record to Resources/Observations:
              an amortized posterior has no observation at SAVE time, so recording one is the
              job of INFERENCE and is deliberately not skippable -- TSNPE keys on it. They are
              a few KB each; delete the `obs_*` files a smoke run leaves behind.
   STAGES     comma list to run a subset, e.g. "prior,posterior"
              (default prior,posterior,validate,infer)
-  CHECKPOINT "1" to exercise the C-11 training-data checkpoint into a fresh temp dir (default 0;
+  CHECKPOINT "1" to exercise the training-data checkpoint into a fresh temp dir (default 0;
              see the note at the rebinding below for why OFF is the default and why you should
              nonetheless run it ONCE on the GPU before a record run)
   CKPT_DIR   checkpoint ROOT to use instead of a fresh temp dir, so a SECOND run can find the
@@ -91,7 +91,7 @@ Run (chi mode, the case this was written for -- this is the RETRAIN's configurat
   $env:CELL="Resources/Cells/nadrowski/master_spont.txt"
   & "C:\\Users\\J\\anaconda3\\envs\\biophys-env\\python.exe" scripts/smoke_train.py
 
-Once on the GPU before a record run, add `$env:CHECKPOINT=1` (exercises C-11 on the card, which no
+Once on the GPU before a record run, add `$env:CHECKPOINT=1` (exercises the checkpoint on the card, which no
 CPU test can) and `$env:SAVE=1` (exercises the artifact writes; delete the `_smoke_*` files after).
 
 THE RESUME DRILL -- run the SAME command twice with CKPT_DIR and PRIOR both set:
@@ -102,7 +102,7 @@ THE RESUME DRILL -- run the SAME command twice with CKPT_DIR and PRIOR both set:
 Run 2 must print `Reusing the Fisher rotation stored with the training checkpoint` and finish in a
 fraction of run 1's time. That is the ONLY way to execute orchestrator.py's CPU->CUDA rehoming of the
 stored `V`, which is guarded by `if ckpt_resumed is not None and rotate:` and therefore runs on a
-GPU RESUME WITH ROTATION and nowhere else -- i.e. precisely the run C-11 exists to rescue, and a path
+GPU RESUME WITH ROTATION and nowhere else -- i.e. precisely the run checkpointing exists to rescue, and a path
 no CPU test can certify. Delete CKPT_DIR afterwards; it must not be somewhere a real run finds it.
 """
 import os
@@ -177,7 +177,7 @@ def main():
     # script exists to exercise and report a cheerful pass without having run it.
     #
     # CHECKPOINT=1 turns it back on into a FRESH TEMP DIRECTORY, so the path is exercised and nothing
-    # is ever reused. Worth doing on the GPU before a record run: the C-11 tests are CPU-only, and a
+    # is ever reused. Worth doing on the GPU before a record run: the checkpoint tests are CPU-only, and a
     # CPU test cannot catch a tensor on the wrong device -- a CPU-built probe grid meeting the CUDA
     # rotation matrix is what this script caught on 2026-08-12, an hour into the Fisher.
     #
@@ -191,7 +191,7 @@ def main():
     # resolve to two DIFFERENT directories under one CKPT_DIR: run 2 never resumes, reports
     # "N other checkpoint(s) exist and do NOT match this run: ... differs in prior_fingerprint", and
     # the drill passes having tested nothing. Loading one saved prior pins the fingerprint -- which is
-    # also exactly the rule PRISM_HANDOFF 4.1 step 5 gives for resuming a real retrain.
+    # also exactly the rule for resuming a real retrain: keep the prior it started with.
     if CHECKPOINT:
         if CKPT_DIR:
             config.CHECKPOINT_PATH = pathlib.Path(CKPT_DIR)
@@ -276,7 +276,7 @@ def main():
     print(f"\n[smoke] ALL STAGES COMPLETED in {time.time() - t0:.1f}s "
           f"({', '.join(f'{k} {v:.0f}s' for k, v in done.items())})")
     print("[smoke] This says the chain RUNS. It says nothing about calibration -- SBC at these "
-          "sizes has no power (trap X5). Read the masked-probe and OOD warnings above.")
+          "sizes has no power (t_scale's effective sample size is the batch count). Read the masked-probe and OOD warnings above.")
     return 0
 
 
