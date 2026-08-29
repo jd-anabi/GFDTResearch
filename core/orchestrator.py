@@ -146,7 +146,7 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
     # Ground-truth rescale and forcing params as (1, n) tensors
     forcing_gt = torch.tensor([[val for val, _ in cfg.force_params_dict.values()]], dtype=cfg.hw.dtype, device=cfg.hw.device)
     rescale_gt = torch.tensor([[val for val, _ in cfg.rescale_params.values()]], dtype=cfg.hw.dtype, device=cfg.hw.device)
-    # TIER 1 (section 11.5): substitute the DERIVED f_scale into T's column before anything
+    # TIER 1 (a box that declares T instead of f_scale): substitute the DERIVED f_scale into T's column before anything
     # simulates. A no-op for a box that declares f_scale. `sim_rescale_idx` is what the force
     # builders and gen_chi_raw must then be given -- handed the INFERRED index they would not
     # find 'f_scale', would fall into the Hopf-style x_scale/t_scale branch, and would drive
@@ -565,7 +565,7 @@ def _assert_amortization_understood(choice: str) -> None:
         f"observation against that digest, or pick an amortized posterior for general inference.")
 
 
-# Whether infer_and_visualize records the observation it ran against (section 11.6 guardrail 1).
+# Whether infer_and_visualize records the observation it ran against.
 # A MODULE global so the suites can rebind it, exactly as they rebind TRAINING_CHECKPOINT_EVERY and
 # for the same reason: the full-pipeline tests call infer_and_visualize, and left on they scatter a
 # record into Resources/Observations on every run. Nothing else in the suite writes into Resources,
@@ -581,12 +581,13 @@ def _assert_chi_config_is_deliberate(cfg: SimConfig) -> None:
     """Refuse a chi run whose BAND or DRIVE silently disagrees with config.py's defaults.
 
     WHY THIS EXISTS, and it is not hypothetical. The 2026-08-19 retrain spent ~5 days and 10.24M rows
-    training at ``chi_freq_bounds=(0.1, 10.0)``, ``chi_f0=0.1`` -- the band C-5 RETIRED on 2026-08-06,
-    and verbatim the configuration of ``posterior_chi_08042026``, which section 4.1 records as
+    training at ``chi_freq_bounds=(0.1, 10.0)``, ``chi_f0=0.1`` -- the band RETIRED on 2026-08-06,
+    and verbatim the configuration of ``posterior_chi_08042026``, on record as
     "well-calibrated but uninformative ... 8 of its 10 probes measured noise". The values came from
     QSettings: ``inference_tabs`` seeds the chi widgets from ``config.CHI_*`` and then ``_restore``
     overwrites them from ``PRISM.ini``, so a value saved before the band changed was reapplied on
-    every launch afterwards with nothing to say so. Trap Q, with a science payload.
+    every launch afterwards with nothing to say so. A persisted preference is the right behaviour;
+    a persisted MEASUREMENT DEFINITION needs comparing against the module default before the spend.
 
     ``_assert_mode_matches`` already catches the same disagreement -- but only when a posterior is
     LOADED, i.e. after the days are spent. This fires before the first simulation.
@@ -653,7 +654,8 @@ def build_prior(cfg: SimConfig, choice: str | None, build_new: bool,
     :param fig_sink: Optional (title, fig) -> None display callback for the corner plot; None => plt.show().
     :param num_iterations: GLOBAL sweep rounds; None = config.PRIOR_SWEEP_ITERATIONS.
     :param sweep_batch: candidates per global round; None = config.PRIOR_SWEEP_BATCH (0 = follow the
-                     hardware batch). ⚠ NOT a speed knob -- see the C-7 note at the constant.
+                     hardware batch). ⚠ NOT a speed knob -- see the note at the constant (527 s at
+                     batch 2048 against >70 min unfinished at 32; the sweep is iteration-bounded).
     :param max_sets: accepted sets that stop the LOCAL flood-fill; None = config.PRIOR_SWEEP_MAX_SETS.
     :param walk_step: flood-fill random-walk stride; None = config.PRIOR_SWEEP_STEP.
     :param stability_units: ND time units the stability screen integrates over; None =
@@ -845,15 +847,16 @@ def build_posterior(
                      config.REPARAM_FISHER_POINTS. n_points=1 is GT-only, which re-correlates
                      off-GT -- averaging is what makes ONE linear rotation valid prior-wide.
                      ⚠ A RESUMED run reuses the checkpoint's stored V and ignores all three
-                     (trap X10): V is not reproducible across processes, so a fresh one would
+                     : V is not reproducible across processes, so a fresh one would
                      put the reused rows in a different coordinate than their stored targets.
 
     ⚠ THESE FOUR ARE WHAT A COMPLETE C-11 CHECKPOINT IS FOR. Its own docstring says a finished
     checkpoint "is a cache of the whole simulation run, so you can retrain the flow at a different
     capacity/learning rate without re-simulating" -- and until 2026-08-27 there was no way to do that
     without editing config.py. Re-trying capacity costs ~46 h against ~57 h for a full run.
-    ⚠ And note §4.6 ruled out more capacity on the BROKEN conditioning; that verdict is worth
-    re-testing once §11's Phase 1 has landed, not inherited.
+    ⚠ And note the 2026-08-25 characterisation ruled out more capacity on the BROKEN conditioning
+    (a clean loss plateau well before the best epoch); that verdict is worth re-testing on the
+    repaired conditioning, not inherited.
 
     ⚠ WHY THESE ARE PARAMETERS AND NOT "JUST SET THE CONFIG CONSTANT". This module does
     `from .config import TRAINING_NUM_RUNS, TRAINING_RUN_SIZE`, which SNAPSHOTS both at import -- so a
@@ -865,11 +868,11 @@ def build_posterior(
     ⚠ AND THEY ARE NOT INTERCHANGEABLE BUDGET KNOBS. Each batch shares ONE Sobol (t_scale_k, T_k)
     pair, overridden for every row in it -- so `num_runs` is the (t_scale, T) DIVERSITY count and the
     run size is rows per operating point. 5000x2048 and 10000x1024 have equal totals and different
-    statistics (trap X5 states the same thing for calibration). Batch WIDTH is also nearly free in
+    statistics (calibration has the same property). Batch WIDTH is also nearly free in
     wall-clock -- the solver is kernel-launch-bound; measured 7.37 s at 2048 against 7.74 s at 1024 --
     so narrowing it does not speed anything up, it trades training rows for peak VRAM about 1:1.
     """
-    # Tier 1 (section 11.5): announce the DERIVED force scale before the first simulation, for the
+    # Tier 1: announce the DERIVED force scale before the first simulation, for the
     # same reason the chi banner exists -- a training distribution that changed silently is what cost
     # the 2026-08-19 run. Reports rather than refuses: whether ~1e4 pN is reasonable is a judgement
     # about the preparation, not something a threshold in this file should decide.
@@ -1056,7 +1059,7 @@ def build_posterior(
     else:
         V, T_train, train_prior = None, T, latent_inferred_prior
 
-    # ── TSNPE (section 11.6) ──────────────────────────────────────────────────────────────────────
+    # ── TSNPE ─────────────────────────────────────────────────────────────────────────────────────
     # ⚠ THE PROPOSAL IS THE TRUNCATED PRIOR, NEVER THE POSTERIOR. Wrapped around `train_prior`, which
     # is the ROTATED latent prior when the rotation is on -- so the region's axes are the flow's own
     # latent axes, i.e. V's columns, i.e. the Fisher directions. Wrapping the UNROTATED prior instead
@@ -1098,7 +1101,7 @@ def build_posterior(
         # bounds alone (no cell loaded) has an empty inits_dict and cfg.inits_tensor would RAISE. The
         # fallback synthesizes the same model-default inits the training loop itself uses.
         "n_vars": _observation_inits(cfg).shape[-1],
-        # Tier 1 (section 11.5). Both are None-safe downstream and are simply ignored by a box
+        # Tier 1. Both are None-safe downstream and are simply ignored by a box
         # that declares f_scale, so this costs pre-tier-1 runs nothing.
         "nd_idx": cfg.tier1_args[0],
         "k_b_cell": cfg.tier1_args[1],
@@ -1470,7 +1473,7 @@ def save_posterior_artifacts(name: str, posterior_latent, V, diagnostics: dict |
     from .SBI.statistics import SUMMARY_WIDTH
     file_manager.atomic_torch_save({
         "V": V,
-        # GUARDRAIL 2 (section 11.6). An amortized posterior serves any observation; a TRUNCATED one
+        # GUARDRAIL 2. An amortized posterior serves any observation; a TRUNCATED one
         # is valid only near the observation its region was drawn around, and outside it the flow has
         # never seen a single training row. With both workflows live the two sit side by side in one
         # ArtifactPicker -- the same class of confusion as the retired-band posterior that already
@@ -1690,7 +1693,8 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
         chi_k_pad=cfg.chi_k_pad, chi_max_cycles=cfg.chi_max_cycles,
         # chi_k_fixed stays None here: validate_calibration's SBC is the POOLED one, over the same
         # mixture of probe counts training saw. Stratifying by count is scripts/sbc_characterize.py's
-        # CHI_K_FIXED, run per stratum -- see section 4.1 step 5.
+        # CHI_K_FIXED, run per stratum (a pooled SBC over a mixture of counts can be flat while
+        # each count is miscalibrated in compensating directions).
         chi_k_fixed=None,
         n_vars=_observation_inits(cfg).shape[-1],
         nd_idx=cfg.tier1_args[0], k_b_cell=cfg.tier1_args[1],
@@ -1746,7 +1750,7 @@ def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | Transforme
               title=f"TARP (ATC={atc:.3f}, KS p={tarp_kspval:.3f})")
     _emit(fig_sink, "TARP coverage", plt.gcf())
 
-    # --- Informativeness (section 11.4) -----------------------------------------------------------
+    # --- Informativeness --------------------------------------------------------------------------
     # Everything above measures CALIBRATION, and a posterior that simply returns the prior passes all
     # of it. This is the scalar that says whether the run learned anything, on the calibration set
     # just simulated, so it costs nothing extra. Reported alongside rather than instead: a run wants
@@ -1781,7 +1785,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     T_obs = cfg.T_obs
     inits = _observation_inits(cfg)
 
-    # GUARDRAIL 1 (section 11.6): record the observation this inference actually ran against, here,
+    # GUARDRAIL 1: record the observation this inference actually ran against, here,
     # where it first exists. Written before the figures, so an interrupted or crashed inference still
     # leaves behind the thing needed to reproduce or extend it.
     if PERSIST_OBSERVATIONS:
@@ -1813,7 +1817,7 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
     nd_dim = len(cfg.params_dict)
     samples_nd = samples[:, :nd_dim]
     samples_rescale = samples[:, nd_dim:]
-    # TIER 1 (section 11.5): substitute the DERIVED f_scale into T's column before anything
+    # TIER 1 (a box that declares T instead of f_scale): substitute the DERIVED f_scale into T's column before anything
     # simulates. A no-op for a box that declares f_scale. `sim_rescale_idx` is what the force
     # builders and gen_chi_raw must then be given -- handed the INFERRED index they would not
     # find 'f_scale', would fall into the Hopf-style x_scale/t_scale branch, and would drive
@@ -2364,8 +2368,8 @@ def build_experiment_obs_chi(
 
         # EVERY predicate lives in chi.probe_verdict, which the GUI's probe planner also calls. They
         # used to be written out here and nowhere else, so "what will be refused" could only be
-        # discovered by running the thing -- after a bench session rather than before it (backlog
-        # C-3). Refusal is still raised HERE: a planner has to be able to describe a bad probe without
+        # discovered by running the thing -- after a bench session rather than before it.
+        # Refusal is still raised HERE: a planner has to be able to describe a bad probe without
         # dying on it, so the shared function returns a verdict and the runtime decides it is fatal.
         v = chi.probe_verdict(cfg, float(f_peak), freq_hz, N_k)
         if v.action == "refuse":
