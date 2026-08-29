@@ -1813,7 +1813,8 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
 # pipeline.<name> still lands on the object read at call time. Bottom of the file on purpose:
 # the extracted modules call back into this one through the module object, which is fully
 # populated by this line.
-from core.SBI.train import train_nn, _capped_zscore_check, _ZSCORE_CHECK_MAX_ROWS  # noqa: E402
+from core.SBI.train import (train_nn, TrainingPlan, _capped_zscore_check,  # noqa: E402
+                            _ZSCORE_CHECK_MAX_ROWS)
 from core.SBI.prior_screen import gen_prior, VALID_PRIORS  # noqa: E402
 from core.forcing import build_nondim_sin_force_tensor  # noqa: E402
 from core.SBI.chi_probes import gen_chi_raw, gen_chi_block, _subset_probe_rows  # noqa: E402

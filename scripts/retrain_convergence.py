@@ -118,30 +118,30 @@ input_dim = statistics.SUMMARY_WIDTH + 1                # 41 stats + 8 valid fla
 # here and in the since-archived reparam_wiring_smoke, so a layout change had three places to be wrong in.
 embedded_net = orchestrator.build_embedding_net(cfg, input_dim, forcing_dim)
 
-training_params = {
-    "model": cfg.model, "prior": latent_inferred_prior, "t": cfg.t,
-    "run_size": cfg.hw.batch_size, "num_runs": NUM_RUNS,
-    "steady_idx": cfg.steady_idx, "dt_nd_min": cfg.dt_nd_min,
-    "dt_exp": cfg.dt_exp, "t_min_exp": cfg.t_min_exp, "t_max_exp": cfg.t_max_exp,
-    "t_scale_bounds": cfg.t_scale_bounds, "state_dep_drift": cfg.state_dep_drift,
+training_params = pipeline.TrainingPlan(
+    model=cfg.model, prior=latent_inferred_prior, t=cfg.t,
+    run_size=cfg.hw.batch_size, num_runs=NUM_RUNS,
+    steady_idx=cfg.steady_idx, dt_nd_min=cfg.dt_nd_min,
+    dt_exp=cfg.dt_exp, t_min_exp=cfg.t_min_exp, t_max_exp=cfg.t_max_exp,
+    t_scale_bounds=cfg.t_scale_bounds, state_dep_drift=cfg.state_dep_drift,
     # Observation mode. train_nn reads these with .get(..., False/None), so omitting them (as this
     # script used to) silently took the forced branch no matter what the config said.
-    "spontaneous_only": cfg.observation_mode == "spontaneous",
+    spontaneous_only=cfg.observation_mode == "spontaneous",
     # chi_n_freqs is deliberately absent: it is the OBSERVATION's probe count, and training draws K
     # per batch so one posterior serves any count. chi_k_pad comes from the config, not from
     # gen_training_data's module fallback -- it is frozen into the saved artifact (trap CHI7).
-    "chi_mode": cfg.chi_mode, "chi_f0": cfg.chi_f0,
-    "chi_freq_bounds": cfg.chi_freq_bounds, "chi_k_pad": cfg.chi_k_pad,
+    chi_mode=cfg.chi_mode, chi_f0=cfg.chi_f0,
+    chi_freq_bounds=cfg.chi_freq_bounds, chi_k_pad=cfg.chi_k_pad,
     # chi_max_cycles for the same reason as chi_k_pad, and it was the one field this dict did not
     # thread while both sbc_characterize and orchestrator.build_posterior did. It is the lock-in
     # duration ceiling, so it sets the `logcyc` every probe reports -- the channel the encoder uses to
     # decide how much to trust a probe. Falling through to the module fallback retrains against a
     # ceiling the base posterior may never have seen; benign only for as long as SimConfig's default
     # happens to equal config.CHI_MAX_CYCLES, which is the same latent bug as the one two lines above.
-    "chi_max_cycles": cfg.chi_max_cycles,
-    "n_vars": cfg.inits_tensor.shape[-1],
-    "dtype": cfg.hw.dtype, "device": cfg.hw.device,
-}
+    chi_max_cycles=cfg.chi_max_cycles,
+    n_vars=cfg.inits_tensor.shape[-1],
+    dtype=cfg.hw.dtype, device=cfg.hw.device,
+)
 
 print(f"[wiring] device={device} mode={cfg.observation_mode.upper()} input_dim={input_dim} "
       f"forcing_dim={forcing_dim} nd_dim={nd_dim} run_size={cfg.hw.batch_size} "

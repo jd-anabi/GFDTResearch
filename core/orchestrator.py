@@ -864,44 +864,44 @@ def build_posterior(
         print(f"[tsnpe] this artifact will be marked NON-AMORTIZED; it is valid only near the "
               f"observation its region was drawn around (digest {x_obs_digest}).", flush=True)
 
-    training_params = {
-        "model": cfg.model,
-        "prior": train_prior,                         # <-- latent (rotated if REPARAM_ROTATE)
-        "t": cfg.t,
-        "run_size": run_size,
-        "num_runs": n_runs,
-        "steady_idx": cfg.steady_idx,
-        "dt_nd_min": cfg.dt_nd_min,
-        "dt_exp": cfg.dt_exp,
-        "t_min_exp": cfg.t_min_exp,
-        "t_max_exp": cfg.t_max_exp,
-        "t_scale_bounds": cfg.t_scale_bounds,
-        "state_dep_drift": cfg.state_dep_drift,
-        "spontaneous_only": not cfg.has_forcing,
-        "chi_mode": cfg.chi_mode,
+    training_params = pipeline.TrainingPlan(
+        model=cfg.model,
+        prior=train_prior,                         # <-- latent (rotated if REPARAM_ROTATE)
+        t=cfg.t,
+        run_size=run_size,
+        num_runs=n_runs,
+        steady_idx=cfg.steady_idx,
+        dt_nd_min=cfg.dt_nd_min,
+        dt_exp=cfg.dt_exp,
+        t_min_exp=cfg.t_min_exp,
+        t_max_exp=cfg.t_max_exp,
+        t_scale_bounds=cfg.t_scale_bounds,
+        state_dep_drift=cfg.state_dep_drift,
+        spontaneous_only=not cfg.has_forcing,
+        chi_mode=cfg.chi_mode,
         # No "chi_n_freqs" here on purpose. It is the count an OBSERVATION supplies; training draws K
         # per batch over [CHI_K_MIN_TRAIN, chi_k_pad] and subsets again per row, which is what makes
         # one posterior serve any probe count. It used to be threaded in and silently ignored -- an
         # invitation to "fix" gen_training_data into honouring it and destroy exactly that property.
-        "chi_f0": cfg.chi_f0,
-        "chi_freq_bounds": cfg.chi_freq_bounds,
-        "chi_k_pad": cfg.chi_k_pad,
-        "chi_max_cycles": cfg.chi_max_cycles,
+        chi_f0=cfg.chi_f0,
+        chi_freq_bounds=cfg.chi_freq_bounds,
+        chi_k_pad=cfg.chi_k_pad,
+        chi_max_cycles=cfg.chi_max_cycles,
         # _observation_inits, NOT cfg.inits_tensor: training is ground-truth-free, so a config built from
         # bounds alone (no cell loaded) has an empty inits_dict and cfg.inits_tensor would RAISE. The
         # fallback synthesizes the same model-default inits the training loop itself uses.
-        "n_vars": _observation_inits(cfg).shape[-1],
+        n_vars=_observation_inits(cfg).shape[-1],
         # Tier 1. Both are None-safe downstream and are simply ignored by a box
         # that declares f_scale, so this costs pre-tier-1 runs nothing.
-        "nd_idx": cfg.tier1_args[0],
-        "k_b_cell": cfg.tier1_args[1],
-        "dtype": cfg.hw.dtype,
-        "device": cfg.hw.device,
-    }
+        nd_idx=cfg.tier1_args[0],
+        k_b_cell=cfg.tier1_args[1],
+        dtype=cfg.hw.dtype,
+        device=cfg.hw.device,
+    )
     if ckpt_dir is not None:
         # V and the probe go in AFTER the rotation, so a fresh run stores the V it just computed and
         # a resumed one stores nothing new (create() is not called on a resume).
-        training_params["checkpoint"] = {
+        training_params.checkpoint = {
             "dir": ckpt_dir, "identity": ident,
             # device= is load-bearing: T_train holds the rotation V on cfg.hw.device, and a CPU grid
             # into a CUDA matmul is a hard RuntimeError inside build_posterior.

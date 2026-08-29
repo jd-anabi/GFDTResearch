@@ -22,6 +22,51 @@ from torch.distributions.transforms import Transform
 from core.SBI import pipeline as _pipeline
 
 
+import dataclasses
+
+
+@dataclasses.dataclass
+class TrainingPlan:
+    """Everything ``gen_training_data`` is driven with, typed -- replacing the ~27-key dict whose
+    every consumer did its own ``.get(...)`` defaulting. The defaults now live HERE, once.
+
+    ``chi_n_freqs`` is deliberately ABSENT: it is the count an OBSERVATION supplies, and training
+    draws K per batch over [CHI_K_MIN_TRAIN, chi_k_pad] then subsets per row -- which is what lets
+    one posterior serve any probe count. It used to be threaded in and silently ignored, an
+    invitation to "fix" gen_training_data into honouring it and destroy exactly that property.
+
+    ``chi_k_fixed`` is script-only: ``orchestrator.build_posterior`` never sets it; the stratified
+    SBC path does (one probe count per calibration stratum). ``checkpoint`` stays a plain dict --
+    its key set (dir/identity/probe/V/every/resume) is the resumable-checkpoint contract, and
+    ``gen_training_data``'s own signature is unchanged.
+    """
+    model: str
+    prior: object
+    t: torch.Tensor
+    run_size: int
+    num_runs: int
+    steady_idx: int
+    dt_nd_min: float
+    dt_exp: float
+    t_min_exp: float
+    t_max_exp: float
+    t_scale_bounds: tuple
+    dtype: torch.dtype
+    device: torch.device
+    state_dep_drift: bool = False
+    spontaneous_only: bool = False
+    chi_mode: bool = False
+    chi_f0: float = None
+    chi_freq_bounds: tuple = None
+    chi_k_pad: int = None
+    chi_k_fixed: int = None
+    chi_max_cycles: float = None
+    n_vars: int = None
+    nd_idx: dict = None
+    k_b_cell: float = None
+    checkpoint: dict = None
+
+
 _ZSCORE_CHECK_MAX_ROWS = 200_000
 
 
@@ -85,7 +130,7 @@ def _capped_zscore_check(max_rows: int = _ZSCORE_CHECK_MAX_ROWS):
 
 
 
-def train_nn(training_params: dict, model: str, prior: torch.distributions.Distribution, embedding_net: torch.nn.Module,
+def train_nn(training_params: TrainingPlan, model: str, prior: torch.distributions.Distribution, embedding_net: torch.nn.Module,
              forcing_prior: torch.distributions.Distribution, nd_dim: int, forcing_idx: dict, rescale_idx: dict,
              x_obs: torch.Tensor = None, theta_obs: torch.Tensor = None, num_rounds: int = 1, return_diagnostics: bool = False, theta_transform: Transform | None = None,
              fixed_dict: dict = None,
@@ -96,10 +141,11 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
     """
     Generate training data and fit the NPE flow (SNPE when ``num_rounds > 1``).
 
-    :param training_params: the dict ``gen_training_data`` is driven from -- see that signature for
-        each key's meaning; the .get() defaults below are the compatibility story for older callers.
+    :param training_params: a ``TrainingPlan`` -- the typed carrier of everything
+        ``gen_training_data`` is driven with; its field defaults are the single source of the
+        old per-call-site ``.get()`` defaulting.
     :param model: sbi density-estimator name (e.g. "nsf"); NOT the simulation model, which rides in
-        ``training_params["model"]``.
+        ``training_params.model``.
     :param embedding_net: the conditioning net; ``owns_standardization`` decides z_score_x below.
     :param x_obs: observed data, required for SNPE (``num_rounds > 1``).
     :param theta_obs: ground-truth parameters, required only for ``return_diagnostics``.
@@ -112,7 +158,7 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
     """
     if num_rounds > 1 and x_obs is None:
         raise ValueError("x_obs must be specified for SNPE algorithm")
-    if num_rounds > 1 and training_params.get("checkpoint") is not None:
+    if num_rounds > 1 and training_params.checkpoint is not None:
         # Refused loudly rather than half-supported. Rounds >= 2 sample from a PROPOSAL -- a trained
         # DirectPosterior -- whose identity a checkpoint would have to capture and re-validate, which
         # is a separate problem from the one C-11 solves. TRAINING_NUM_ROUNDS is 1 (amortized NPE), so
@@ -120,7 +166,7 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
         raise ValueError(
             f"Training-data checkpointing is not supported for SNPE (num_rounds={num_rounds}); the "
             f"per-round proposal is not part of the checkpoint's identity. Use num_rounds=1, or "
-            f"drop training_params['checkpoint'].")
+            f"drop the plan's checkpoint.")
 
     # sbi's default z_score_x="independent" fits a PER-COLUMN affine over the conditioning vector.
     # Under the chi SET layout that is permutation-BREAKING (two orderings of one probe set would be
@@ -148,28 +194,28 @@ def train_nn(training_params: dict, model: str, prior: torch.distributions.Distr
     for _ in tqdm(range(num_rounds), desc=f"Training neural posterior", leave=False):
         # train the density estimator
         data, thetas = _pipeline.gen_training_data(
-            training_params["model"], training_params["prior"], forcing_prior, training_params["t"],
-            training_params["run_size"], training_params["num_runs"],
-            training_params["steady_idx"], training_params["dt_nd_min"],
+            training_params.model, training_params.prior, forcing_prior, training_params.t,
+            training_params.run_size, training_params.num_runs,
+            training_params.steady_idx, training_params.dt_nd_min,
             nd_dim, forcing_idx, rescale_idx,
-            dt_exp=training_params["dt_exp"], t_min_exp=training_params["t_min_exp"],
-            t_max_exp=training_params["t_max_exp"], t_scale_bounds=training_params["t_scale_bounds"],
+            dt_exp=training_params.dt_exp, t_min_exp=training_params.t_min_exp,
+            t_max_exp=training_params.t_max_exp, t_scale_bounds=training_params.t_scale_bounds,
             proposal=proposal,
             theta_transform=theta_transform,
             fixed_dict=fixed_dict,
-            state_dep_drift=training_params.get("state_dep_drift", False),
-            spontaneous_only=training_params.get("spontaneous_only", False),
-            chi_mode=training_params.get("chi_mode", False),
-            chi_f0=training_params.get("chi_f0", None),
-            chi_freq_bounds=training_params.get("chi_freq_bounds", None),
-            chi_k_pad=training_params.get("chi_k_pad", None),
-            chi_k_fixed=training_params.get("chi_k_fixed", None),
-            chi_max_cycles=training_params.get("chi_max_cycles", None),
-            n_vars=training_params.get("n_vars", None),
-            checkpoint=training_params.get("checkpoint", None),
-            nd_idx=training_params.get("nd_idx", None),
-            k_b_cell=training_params.get("k_b_cell", None),
-            dtype=training_params["dtype"], device=training_params["device"],
+            state_dep_drift=training_params.state_dep_drift,
+            spontaneous_only=training_params.spontaneous_only,
+            chi_mode=training_params.chi_mode,
+            chi_f0=training_params.chi_f0,
+            chi_freq_bounds=training_params.chi_freq_bounds,
+            chi_k_pad=training_params.chi_k_pad,
+            chi_k_fixed=training_params.chi_k_fixed,
+            chi_max_cycles=training_params.chi_max_cycles,
+            n_vars=training_params.n_vars,
+            checkpoint=training_params.checkpoint,
+            nd_idx=training_params.nd_idx,
+            k_b_cell=training_params.k_b_cell,
+            dtype=training_params.dtype, device=training_params.device,
         )
 
         # Filter the data -- and the TARGETS. thetas is the LATENT target (a logit); its row can in
