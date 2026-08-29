@@ -71,18 +71,31 @@ loses its finest checkpoint. The tqdm traps (C1/C2) are tqdm-version-bound, not 
 ### 1.3 Tests
 
 **There is no pytest.** Each test module has an `if __name__ == "__main__":` runner that executes
-every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each file directly.
+every `test_*` function and prints `PASS`/`FAIL` then `ALL PASSED`. Run each file directly. Every
+runner catches `except Exception` (not just `AssertionError`) since the 2026-08-28 refactor, so a
+crashing test reports as ONE failure instead of silently killing the suite's tail.
 
-| Suite | Tests | Covers |
-|---|---|---|
-| `tests/test_gui_progress.py` | 98 | tqdm classifier, Qt stack, panels, pop-out, nav/gating, Simulate stream + video, labels, **layout geometry**, **the χ probe table + planner** (C-2/C-3), and **the one-bar progress display** — the solver meter reading `core.progress.SOLVER` rather than a rendered bar, the largest-total overall-bar election, and the caption's fallback to sbi's epoch counter (§10.5), and **the GUI training budget** — the derived simulation count, the peak-memory estimate against `pipeline`'s own cost model, and the budget reaching `build_posterior` as ARGUMENTS rather than through the config (§6 row 5), and **the TSNPE tab** — its gate, and an `ast`-level check that its runner never references a proposal or `set_default_x` (§11.6) |
-| `tests/test_user_models.py` | 39 | sympy parser/codegen, forcing kinds + the sin golden test, persistence, registry, **the v1→v2→v3 param migrations, the log-box validation and its route to the prior mask, physical forcing bounds, the blank-bound guard, icon-glyph coverage, the app icon, and `build_app` itself (which had no test at all)** |
-| `tests/test_user_sbi.py` | 66 | spontaneous + chi SBI paths, the built-in-path-unperturbed guard, memory/geometry regressions, the box round-trip invariant, the posterior-mode decoder, the JIT/eager contract, the dt and off-grid guards, the fixed-K calibration lever, the OOM retry ladder + learned memory budget, the batch-level retry and its gen_training_data wiring, the capped z-score check, **the seeded-reproducibility gate, the bit-identical resume, the stratification-across-the-seam check, the checkpoint store + atomic write**, and **the CUDA-graph solver path** (graph/eager equivalence, the RNG contract C-11 depends on, the X1 cache-placement guard), and **every GUI-exposed knob arriving as an ARGUMENT** rather than a config write, checked both in the signature and at the point it is used (§2.3) |
-| `tests/test_chi_set_encoder.py` | 23 | the chi probe-set encoder and packer, pure torch and fast — permutation invariance, **bitwise** pad inertness, pad-width invariance, masked-mean-over-live-count, the post-gate, empty/singleton sets, mask binarisation, the packer's round-trip / masked-not-phantom behaviour, and **the Fisher set's one-argument signature + channel identity** (C-9/C-10), and **`probe_verdict`'s refuse/mask/truncate split** (C-3) |
-| `tests/test_artifact_consistency.py` | 15 | the master Bounds/Cells triple, bounds resolution, the prior/posterior identity guards — **eval box comes from the sidecar, not the config** — **the end-of-run artifact writes being atomic** (posterior, prior, loss curve), and **the χ band/drive preflight** (trap Q4) |
-| `tests/test_fdt_user.py` | 5 | FDT for user models (FEATURE 1 v3 / B-d) |
-| `tests/test_conditioning_repair.py` | 25 | **§11**, and pure torch in seconds like the encoder suite: rank-Gaussianisation (monotone, the mid-rank tie rule, the dead-channel pass-through, and the contaminated channel becoming visible), the valid flags (each predicate, the B7 pair sharing one flag, `tau_slow`'s dt dependence), winsorisation leaving the χ block **bitwise** untouched, the pathological-trajectory counter, **the KL scalar's zero point** (a posterior that IS the prior scores exactly 0 nats) and its per-block retry on a mixed-device product prior, tier-1's round trip through the implied temperature and its refusal without `nd_idx`/`k_b_cell`, and **the TSNPE pinning test the whole of §11.6 rests on** — that the proposal has the truncated PRIOR's width, not the posterior's and not the posterior's over √2. Also: **a legacy `sum_mean`/`sum_std` posterior still loads and evaluates**, without which every pre-2026-08-26 artifact — including the §11 baseline — is unopenable |
-| **Total** | **271** | |
+> **The 2026-08-28 refactor reorganised the suites**: `test_gui_progress.py` (102 tests over eight
+> subjects) became SIX standalone files split along its own section banners, and `test_user_sbi.py`
+> gained three `retry_on_oom` tests (88 → 91). The table below is the current layout; the original
+> per-suite "Covers" notes survive in each file's module docstring. **Counts as of the refactor's
+> final gate — COUNT them, do not trust these numbers either.** Total then: **300**.
+
+| Suite | Tests |
+|---|---|
+| `tests/test_user_sbi.py` | 91 (~1 hour — nearly all inside `test_chi_mode_full_sbi_pipeline`) |
+| `tests/test_user_models.py` | 39 |
+| `tests/test_conditioning_repair.py` | 25 |
+| `tests/test_chi_set_encoder.py` | 23 |
+| `tests/test_artifact_consistency.py` | 15 |
+| `tests/test_fdt_user.py` | 5 |
+| `tests/test_vt_progress.py` | 22 — the tqdm/VT100 router, the Qt progress stack, the solver meter, the overall-bar election |
+| `tests/test_worker_dispatch.py` | 7 — dispatch, cancellation, error dialogs, payload lifetime |
+| `tests/test_settings_persistence.py` | 17 — QSettings round-trips, the training-budget group, layout geometry, the `_code_only` config-tab tests |
+| `tests/test_figures.py` | 19 — figure sinks, pop-outs, dark-theme matplotlib, labels |
+| `tests/test_nav_and_gating.py` | 25 — navigation, inference-tab gating, the χ probe table |
+| `tests/test_simulate.py` | 12 — the Simulate streaming loop and video export |
+
 
 > The encoder suite is the one to run first when touching chi: it is seconds, needs no simulation, and
 > the invariants it pins are the ones whose violation is invisible — a subtly non-invariant encoder
@@ -131,9 +144,11 @@ core/
   cli.py          Prompt-free config builders (make_sim_config / make_fdt_config /
                   make_reduction_config / make_param_sweep_config), _parse_cell, _SWEEP_PRESETS,
                   UnitParseError.
-  config.py       Constants + the SimConfig/FDTConfig dataclasses. detect_device()/cpu_device(),
-                  paths, VALID_MODELS/VALID_LABELS, TRAINING_*, CHI_*, SOLVER_CUDA_GRAPHS,
-                  QUIET_SEGMENT_BAR, SOLVER_BAR_DESC, memory_budget_elements().
+  config.py       Constants + device detection + paths (VALID_MODELS/VALID_LABELS, TRAINING_*,
+                  CHI_*, SOLVER_CUDA_GRAPHS, memory_budget_elements()). Re-exports SimConfig/
+                  FDTConfig PERMANENTLY from sim_config.py, so `from core.config import SimConfig`
+                  keeps working; the classes read constants via live `config.NAME`.
+  sim_config.py   The SimConfig/FDTConfig dataclasses (split out 2026-08-28).
   orchestrator.py The 5 stage functions: generate_observations -> build_prior -> build_posterior ->
                   validate_calibration -> infer_and_visualize. Plus save_*_artifacts and _emit/fig_sink.
   registry.py     Runtime model registry (ModelSpec, register, load_user_models, is_user_model,
@@ -147,13 +162,17 @@ core/
   Solvers/sdeint.py  Euler-Maruyama: an eager loop, and a TorchScript step replayed from a CUDA
                   graph (§8.3). The `torch.compile fast path` and the `unused implicit solver`
                   this line used to name never existed / were deleted (§7.7).
-  SBI/            pipeline (gen_obs/gen_stats/gen_training_data/train_nn/gen_chi_raw+gen_chi_block),
-                  statistics (the 41 features), chi (chi(omega) math + the probe-set PACKER),
-                  chi_encoder (ChiSetEncoder: the permutation-invariant probe-set encoder),
-                  embedded_network (the two-pathway conditioning net), reparam (latent box +
-                  rotation), decorrelate (Fisher rotation), analysis (SBC data + PPC), overlay
-                  (posterior-overlay diagnostics), training_checkpoint (C-11: resumable
-                  training-data checkpoints), Priors/.
+  SBI/            pipeline is the FACADE (memory planning, device/failure hygiene, the three OOM
+                  ladders + retry_on_oom, gen_obs, gen_training_data) and re-imports its extracted
+                  siblings at its bottom, so every consumer and monkeypatch keeps using pipeline.*:
+                  train (train_nn + TrainingPlan), summaries (gen_stats/winsorize/count_pathological),
+                  chi_probes (gen_chi_raw/gen_chi_block), prior_screen (gen_prior), ppc (the PPC bin
+                  loop), observations (the three build_experiment_obs*), run_guards (the pre-spend
+                  asserts + prior fingerprints). Plus statistics (the 41 features + conditioning_rows,
+                  THE one layout constructor), chi (chi(omega) math + the probe-set PACKER),
+                  chi_encoder, embedded_network, reparam, decorrelate (Fisher rotation, now laddered),
+                  analysis, overlay (+ the five posterior-overlay figures), training_checkpoint,
+                  truncate, derived, Priors/.
   FDT/            campaigns, spectral, fdt_pipeline, cross_validation, sanity.
   Reduction/      NWK->Hopf normal-form map. IRRELEVANT to SBI — do not reason about it here.
   Helpers/        file_manager, helpers, visualizers, labels, model_store.
@@ -189,8 +208,10 @@ core/gui/
   screens/      nav_shell, home_screen, section_screen, inference_screen (owns SbiSession +
                 refresh_gates), settings_screen, model_builder_screen.
   panels/       base_panel (BasePanel: controls column | results column; dispatch()),
-                inference_tabs (the FIVE inference tabs; Posterior also owns the TRAINING
-                BUDGET — batches x rows-per-batch — see §6 row 5), fdt_panel, reduction_panel,
+                inference_tabs (a 31-line IMPORT SURFACE — settings_screen reads its HELP and
+                docstring BY STRING PATH — over panels/inference/: one module per tab
+                (config/prior/posterior/validate/infer/tsnpe) + help_text/rows/runners/base;
+                Posterior owns the TRAINING BUDGET), fdt_panel, reduction_panel,
                 crossval_panel, simulate_panel + simulate_runner + simulate_export.
   widgets/      artifact_picker, figure_stack, figure_window, log_pane, progress_pane,
                 live_hair_bundle, labeled_inputs, help_badge, param_grid, source_toggle, anim.
@@ -1960,15 +1981,25 @@ runs in seconds and needs no simulation — **run it first when touching anythin
 
 ## 6. Open backlog
 
-> ### ▶ PICK UP HERE (as of 2026-08-28) — THE REFACTOR COMES BEFORE THE RETRAIN
+> ### ▶ PICK UP HERE (as of 2026-08-28, second session) — THE REFACTOR IS DONE. THE RETRAIN IS NEXT.
 >
-> **Next task: a systematic refactor of the whole codebase — structure, code AND comments.** Split the
-> 2,500-line modules along their real seams, break up the long functions, remove the duplication,
-> replace the dicts-as-structs, fix the public/private boundary, and compress the commentary. Nothing
-> may change functionally. **The full brief is §6.1**, and note its first rule: this handoff is being
-> deleted when the project ends, so knowledge must be inlined in the code, never pointed at from it.
-> Do it before the retrain, not after: the retrain is days of wall-clock during which the tree should
-> be still.
+> **The §6.1 refactor LANDED: 39 local commits (`7b1a3d0..`), zero functional change outside the two
+> designated ladder commits, every suite green at every step, and a seeded bit-identity probe held
+> `gen_training_data`'s outputs byte-identical in all three modes from first commit to last.** The
+> full account is the top Appendix A entry ("the §6.1 refactor landed"); §6.1 below keeps the
+> original brief with a DONE banner. Highlights: pipeline.py 2553→1811 with `train`/`summaries`/
+> `chi_probes`/`prior_screen` as siblings behind a re-importing façade; orchestrator.py 2408→1729
+> with `ppc`/`observations`/`run_guards`/`overlay` push-downs; config.py 1216→657 + `sim_config.py`;
+> `inference_tabs.py` 1904→31 over a per-tab package; the 8-site conditioning layout now built by
+> ONE constructor (`statistics.conditioning_rows`); `training_params` replaced by a typed
+> `TrainingPlan`; every `# trap X…`/handoff pointer in code inlined as its fact (one documented
+> exception: `training_identity`'s frozen docstring); `test_gui_progress.py` split into six suites.
+> **Two FUNCTIONAL additions, separately committed:** `pipeline.retry_on_oom` now guards the Fisher
+> rotation (with `cudaErrorUnknown` retryable there only) and the PPC bin loop — the two recovery
+> gaps the 2026-08-28 audit named. ⚠ **Still owed: one GPU `smoke_train.py`** (CHI=1 and CHI=0,
+> explicit `BOUNDS=Resources/Bounds/nadrowski/master.txt`) to certify the device path post-refactor;
+> CPU suites cannot. Then the §11.9 retrains (Run A flow-only off `train_230ae7cb5fc2`, Run B
+> tier-1) — nothing in the refactor touched their runbook.
 >
 > The memory work that blocked the retrain is **done and measured** — see the 2026-08-28 appendix
 > entries. The headline: the caching allocator was fragmenting on variable batch geometry and pinning
@@ -2049,7 +2080,15 @@ S-2 (JIT solver fast path), UX1–UX5 (the five UI/UX requests), and the PySide6
 ---
 
 
-### 6.1 THE REFACTOR — the next task
+### 6.1 THE REFACTOR — ✅ DONE 2026-08-28 (second session)
+
+> **Status: LANDED, 39 commits, all suites green, bit-identical outputs.** The brief below is kept
+> because it explains the shape of what landed; the top Appendix A entry is the account, including
+> the six deliberate deviations (ladder privates kept private as pinned test needles; the inline
+> batch ladder kept inline because its statement order IS the tested invariant; §9.3's `config/`
+> package rejected for `sim_config.py` + a re-exporting façade; `vt.py`'s rename and the directory
+> casing deferred; `migrate_checkpoint_flags.py` kept because frozen `training_identity` names it;
+> the checkpoint handshake left inline rather than becoming a wide-tuple helper).
 
 **Goal.** A codebase a person can read and an agent can navigate: sensible modules, short functions,
 no duplication, and comments that carry facts rather than narration. Today it reads as
@@ -2511,7 +2550,9 @@ defensible form is to establish `dt_nd_required` by a dt-halving convergence stu
 ## 9. Code organisation and documentation
 
 > **Status (2026-07-28):** 9.1, 9.2, 9.4, 9.5, 9.6 and the actionable part of 9.7 are DONE.
-> **9.3 (file splits) was deliberately NOT done** -- reasoning below. One 9.1 item had already been
+> **9.3 (file splits) was deliberately NOT done** at the time -- reasoning below -- and was then
+> **DONE in the 2026-08-28 refactor** as its own focused pass, exactly as prescribed (see the top
+> Appendix A entry). One 9.1 item had already been
 > fixed before the sweep: `vt.py` cites `tests/test_gui_progress.py`, not the non-existent
 > `tests/test_vt.py`.
 >
@@ -2563,7 +2604,8 @@ the module raises `AttributeError` on a `list`.** Rename the local to `model_lab
 ### 9.3 Files that are too large
 
 > **Counts refreshed 2026-08-26** — every one of them was stale by 40–130 %, which is the same
-> defect §9.1 catalogued. The split suggestions still stand and are still deliberately undone;
+> defect §9.1 catalogued. ✅ The splits LANDED in the 2026-08-28 refactor (different shapes than
+> suggested where the tests forced it -- see the top Appendix A entry);
 > §11 made four of these five files larger, so the case is stronger, not weaker.
 
 | File | Lines | Contents | Suggested split |
@@ -3368,6 +3410,104 @@ the difference between "mildly uneven" and "nine of thirteen parameters are prio
 ---
 
 # Appendix A — Change history
+
+## 2026-08-28 (second session) — the §6.1 refactor landed: 39 commits, zero drift, two new ladders
+
+The whole of §6.1 executed in one session as 39 local commits on `main` (from `7b1a3d0`), one per
+seam, fast suites between every one, the ~1-hour `test_user_sbi.py` at five milestone points
+(commits 14, 16, 24 and the final gate all **91/91**; 88/88 before the ladder tests were added).
+Bit-identity was enforced by an instrument, not by review: a temporary seeded probe
+(`scripts/_refactor_probe.py`, torch AND numpy seeded — a torch seed alone is vacuous because the
+inits come from numpy's global RNG) hashed `gen_training_data`'s outputs in all three modes plus
+four extracted components, and its combined SHA-256 was **byte-identical from the first commit to
+the last** (`cbeda7b2…`). It earned its keep once outright: the chi_probes extraction shipped
+missing an import that every fast suite missed — the chi training branch was a NameError while six
+suites were green — and the probe caught it in seconds.
+
+### What moved, and where things live now
+
+- **pipeline.py 2553 → 1811**, now the FACADE: memory planning, device/failure hygiene, the three
+  OOM ladders (+ the new `retry_on_oom`), `gen_obs`, and `gen_training_data` stay; `train_nn` →
+  `SBI/train.py`, `gen_stats`+winsorise+patho → `SBI/summaries.py`, the χ loop →
+  `SBI/chi_probes.py`, `gen_prior` → `SBI/prior_screen.py`, the sin force builder home to
+  `forcing.py`. The façade re-imports every name at its BOTTOM, which is the load-bearing pattern:
+  consumers and monkeypatches go through `pipeline.*`, callers defined in pipeline read bare names
+  from its namespace, and the extracted modules call back through the module object
+  (`_pipeline.`), so every test patch permutation still lands. **The AIMD budget state and the
+  ladder functions can never leave pipeline.py** — tests rebind them on that module object and pin
+  bare-name calls in `gen_training_data`'s own source.
+- **gen_training_data decomposed**: prelude → `_training_inits` + `_batch_schedule` (RNG-order
+  exact — the Sobol engine still consumes the global stream at the same point); the `_rows`
+  closure's three mode branches → module-level `_chi_rows`/`_spontaneous_rows`/`_forced_rows` over
+  a frozen `_BatchGeometry` dataclass, with `_rows` surviving as a thin slicing dispatcher so the
+  retry seam is byte-identical. The inline batch ladder deliberately stays inline: its statement
+  ORDER in that function's source is itself what the retry tests assert.
+- **orchestrator.py 2408 → 1729**: PPC bin loop → `SBI/ppc.py`; the five overlay figures →
+  `SBI/overlay.emit_overlay_figures` (+ `thin_ticks`/`emit_figure` public in Helpers/visualizers);
+  the three experimental builders → `SBI/observations.py`; seven clean guards →
+  `SBI/run_guards.py`. Four guards STAY: `_saved_prior_fingerprints`/`_assert_prior_is_saved`/
+  `_refuse_to_orphan_a_checkpoint` (a test sandboxes them by rebinding `orchestrator.PRIOR_PATH`)
+  and `_assert_mode_matches`. `training_identity` untouched to the byte — the one place still
+  citing a handoff section, documented as the frozen exception.
+- **training_params → `TrainingPlan`** (typed, in train.py, re-exported via pipeline): the 13
+  per-consumer `.get()` defaults live once at the fields; `chi_n_freqs` still deliberately absent;
+  `chi_k_fixed` still script-only; `checkpoint` still a plain dict (its key set is the C-11
+  contract).
+- **The conditioning layout has ONE constructor**: `statistics.conditioning_rows(summary, T,
+  tail=None)` replaced the eight hand-assembly sites / twelve `torch.cat`s. Probe-verified
+  bit-identical.
+- **config.py 1216 → 657 + `sim_config.py` 582**: the dataclasses moved out; config re-exports
+  them permanently, and every constant the classes read became a tokenizer-verified live
+  `config.NAME` read — verified behaviourally (assign `config.CHI_F0`, build a SimConfig, see the
+  new value). §9.3's `config/` package idea stays rejected: the GUI writes and pipeline live-reads
+  `config.*` on ONE module object.
+- **inference_tabs.py 1904 → 31** over `gui/panels/inference/` (per-tab modules + help_text/rows/
+  runners/base, per-module computed imports). The façade must keep existing: settings_screen reads
+  its HELP + docstring by string path, and the suites import several names through it.
+- **`test_gui_progress.py` (2,899 lines, 102 tests) → six suites** split on its own banners, with
+  helpers travelling by AST-computed reference; pass counts sum to exactly 102. All twelve
+  runners' tails now catch `except Exception`, after that pattern saved a suite twice IN this very
+  session (a NameError surfaced as one FAIL instead of a dead tail).
+- **Every `# trap X…` / `PRISM_HANDOFF §…` / backlog-id pointer in `core/`+`scripts/`+`tests/`
+  became its inlined fact** — including the two that were user-visible in GUI tooltips — plus the
+  stale-fact fixes met along the way ("five tabs"→six, `_CellPreviewMixin`'s false Simulate claim,
+  vt.py's test cite finally naming a real file). Five self-declared-stale scripts moved to the
+  gitignored `archive/scripts/` (`diagnose_fscale`, `reparam_selftest`, `reparam_wiring_smoke`,
+  `profile_sde`, `diagnose_fmax`); `migrate_checkpoint_flags.py` stays because frozen
+  `training_identity` names it. `si_factors` deleted (unread by measurement); cli's four privates
+  the GUI reached through the underscore promoted, plus `build_forcing_prior`/
+  `build_rescale_prior`/`transform_device`/`vram_ceiling_gib`/`sim_class`.
+
+### The two FUNCTIONAL commits (the §6.1 "worth doing on the way" pair)
+
+`pipeline.retry_on_oom(fn, *, what, device, attempts=None, delays=None, extra_retryable=())` — the
+pinned recovery protocol (notice → release → [mem] line → holder-gate → wait), RuntimeError-narrow,
+config knobs read live. The **Fisher rotation** wraps each operating point in it with
+`cudaErrorUnknown` retryable THERE ONLY (the error that actually killed a rotation on 2026-08-28);
+an exhausted point is SKIPPED and the all-points-failed raise still stops an empty rotation. The
+**PPC bin loop** got the same ladder (its body is index-written into preallocated buffers, so a
+bin re-run is idempotent). Three new tests pin the helper's event order, the holder gate, its
+narrowness, and the Fisher wiring — `test_user_sbi.py` is now 91.
+
+### Deviations from §6.1's letter, each deliberate
+
+The ladder/hygiene privates (`_release_device_memory`, `_we_are_the_holder`, `_cancellable_wait`,
+`_try_rng_*`, `_max_sim_batch`, `_is_oom`) were NOT made public: their names are literal needles
+in five order-pinned source tests on the recovery machinery; each carries a contract docstring
+naming its cross-module users instead. The inline batch ladder was not extracted (order = the
+invariant). `vt.py`'s rename and the `core/` directory-casing unification are deferred out of the
+programme (repo-wide churn, zero behaviour). The checkpoint handshake stayed inline (seven caller
+locals; a wide-tuple helper is the worse trade).
+
+### What a successor must know
+
+The façade re-import pattern is LOAD-BEARING everywhere it appears — pipeline.py's bottom import
+block, `inference_tabs.py`, config.py's SimConfig re-export, orchestrator's re-imports of the
+moved guards/builders/figures. Removing a "redundant" re-import silently breaks monkeypatching or
+a string-path import, and the failure mode is tests-going-slow-or-silent, not red. The probe was
+deleted with the final commit (its baseline hash is in commit 1's message; rebuild it from there
+if another structural pass is ever needed). **Still owed: one GPU smoke_train** (the refactor was
+CPU-certified only), then the §11.9 retrains.
 
 ## 2026-08-28 — the retry died in its own recovery, 3639 batches further on
 
