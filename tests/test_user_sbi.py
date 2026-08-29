@@ -49,7 +49,7 @@ _N_SPONT = len(FEATURE_LABELS) - _N_GROUP_G   # 30
 # with a tmpdir, which is unaffected by this.
 orchestrator.TRAINING_CHECKPOINT_EVERY = 0
 
-# Observation records OFF for the same reason (section 11.6 guardrail 1). The full-pipeline tests
+# Observation records OFF for the same reason. The full-pipeline tests
 # call infer_and_visualize, which records the observation it ran against -- correct for a real run,
 # and litter here. Nothing else in the suite writes into Resources/; keep it that way.
 orchestrator.PERSIST_OBSERVATIONS = False
@@ -485,7 +485,7 @@ def _lock_in_reference(x, omega, F0, T_obs, dt):
 def test_lock_in_per_row_durations_match_locking_each_row_alone():
     """``n_samples`` must make ONE batched call equal B separate calls, each over its own prefix.
 
-    WHY (backlog C-8, handoff 4.3.5). Omega_0 spans ~4 decades inside a training batch, so a single
+    WHY. Omega_0 spans ~4 decades inside a training batch, so a single
     shared lock-in duration has to be keyed on the FASTEST row to respect CHI_MAX_CYCLES -- which
     truncated the slow rows below CHI_MIN_CYCLES and masked them. ~48 % of training rows carried no
     live probe. Per-row durations are the fix, and the reference here is the only unambiguous one:
@@ -883,7 +883,7 @@ def test_lock_in_duration_is_capped_at_chi_max_cycles():
     not trained on.
 
     WHY THIS EXISTS. Every instinct about integration says a longer lock-in is a better one; measured
-    (handoff 4.3.1, trap CHI9), |chi| CV runs 0.03 -> 0.63 and driven/undriven SNR 26 -> 2.3 as the
+    (measured), |chi| CV runs 0.03 -> 0.63 and driven/undriven SNR 26 -> 2.3 as the
     window grows past ~30 cycles, and re-locking the SAME trace over a shorter prefix reverses it.
     The ceiling is therefore part of the measurement's definition, and it is silent when missing:
     nothing errors, the run simply reproduces posterior_chi_08042026's uninformative failure.
@@ -1766,7 +1766,7 @@ def _gen_td(mode, *, seed=0, n_runs=3, run_size=4, **over):
     """``gen_training_data`` under a FULLY pinned RNG.
 
     Seeds numpy as well as torch, and that is not belt-and-braces: ``inits`` comes from
-    ``np.random.randint`` (trap X8), which ``torch.manual_seed`` does not touch, so without the numpy
+    ``np.random.randint``, which ``torch.manual_seed`` does not touch, so without the numpy
     seed two runs of identical code differ and every bit-identity claim below would be vacuous.
     """
     import numpy as np
@@ -1872,7 +1872,7 @@ def test_a_resumed_training_run_is_bit_identical_to_an_uninterrupted_one():
     second one. The resume's output must equal the uninterrupted output BIT FOR BIT -- not merely
     'the right shape' and not 'statistically similar'. Anything less means the second half of a
     resumed multi-day run was drawn from a different distribution than the first, which is the exact
-    failure C-11's own backlog entry calls worse than crashing.
+    failure the checkpoint design records as worse than crashing.
 
     Exercises both write paths: the cadence write (every=2) and the on-the-way-out write in the
     BaseException handler, which is what a GUI cancel takes.
@@ -2090,7 +2090,7 @@ def test_a_rebuilt_prior_routes_to_a_different_checkpoint():
     `_gmm_fingerprint`'s own docstring says two runs over the same box produce different fits. So
     without the fingerprint in the identity, rebuilding the prior and restarting would resume into
     the SAME directory and splice rows drawn from two different distributions -- with every declared
-    field still matching, so nothing would complain. This is also what makes handoff 4.1's "save your
+    field still matching, so nothing would complain. This is also what makes the runbook's "save your
     prior and reuse it" a guard rather than advice: without it that instruction would be untrue.
     """
     from core import cli as _cli, registry as _reg
@@ -2376,7 +2376,7 @@ def test_checkpoint_peek_survives_a_torn_state_file():
 def test_the_bijection_probe_detects_a_changed_rotation():
     """The probe is what stops a resume under a different coordinate, so it must actually SEE the
     rotation. If it were insensitive to V the guard would pass vacuously -- and V is precisely the
-    thing that is not reproducible across processes (trap X10), so that is the case it exists for.
+    thing that is not reproducible across processes, so that is the case it exists for.
 
     This is also why build_posterior reuses a COMPLETE checkpoint's V rather than recomputing it: a
     fresh V would fail this very check against the rows it is about to reuse.
@@ -2624,7 +2624,7 @@ def test_the_graph_cache_is_not_hung_off_the_solver_class():
     assert "_GRAPH_CACHE" in src and isinstance(_sd._GRAPH_CACHE, dict)
     assert not hasattr(_sd.Solver, "_GRAPH_CACHE"), "the cache must not live on the Solver class"
     for bad in ("_SOLVER_SINGLETON", "_SOLVER = Solver()"):
-        assert bad not in src, f"{bad}: a module-level Solver singleton re-opens trap X1"
+        assert bad not in src, f"{bad}: a module-level Solver singleton would break the class patch"
     assert _cfg.SOLVER_GRAPH_CACHE_MAX >= 1
     if not torch.cuda.is_available():
         print("      (no CUDA -- cache-bound check is structural only)")
@@ -2761,7 +2761,7 @@ def test_the_sweep_and_flow_knobs_are_ARGUMENTS_because_the_constants_are_snapsh
     """EVERY KNOB MUST BE AN ARGUMENT, and it must reach the thing it configures.
 
     orchestrator does `from .config import PRIOR_SWEEP_ITERATIONS, NSF_HIDDEN_FEATURES, ...`, which
-    binds all of them at IMPORT (trap X12). So a panel that "configured" a run by assigning to
+    binds all of them at IMPORT. So a panel that "configured" a run by assigning to
     config.PRIOR_SWEEP_ITERATIONS would change nothing, the run would use the default, and there
     would be nothing in the log to say so. That is the trap the training budget was made a parameter
     for, and it applies to every knob the GUI now exposes.
@@ -2811,7 +2811,7 @@ def _raising_empty_cache(calls):
     """A torch.cuda.empty_cache stand-in that fails the way the real one did on 2026-08-27.
 
     A RAW driver torch.AcceleratorError, not torch.OutOfMemoryError -- that distinction is the whole
-    of trap X6/X7 and the reason `_is_oom` carries a message test as well as a type test.
+    of the raw-driver OOM form and the reason `_is_oom` carries a message test as well as a type test.
     """
     def fake():
         calls.append(1)
@@ -2971,7 +2971,7 @@ def test_the_vram_ceiling_bounds_the_plan_and_stays_out_of_the_identity():
 
 def test_the_drive_is_charged_at_its_build_peak():
     """Section 8.2 recorded the planner under-counting the drive 4x -- a 2.16 GiB result with an
-    8.64 GiB transient -- and named it a plausible source of trap X7's unwrapped OOMs. `_per_row` is
+    8.64 GiB transient -- and named it a plausible source of the unwrapped OOMs. `_per_row` is
     where that bites: it is the number _budget_note_oom teaches the learned cap, so under-counting
     taught the cap something smaller than what actually failed.
 
@@ -3045,7 +3045,7 @@ def test_the_batch_retry_waits_releases_and_restores_the_rng():
     """The outermost retry does not shrink the work -- it waits and runs the SAME batch again,
     because the failure the halving ladders cannot fix is a card that is momentarily full of
     somebody else's surfaces. Under WDDM those are evictable, so mem_get_info reported them as free
-    and the driver lost the eviction race (trap X6); shrinking does not help, waiting does.
+    and the driver lost the eviction race; shrinking does not help, waiting does.
 
     The re-run must be EXACT. gen_training_data restores the batch's opening RNG snapshot first, so
     the retried batch is the batch that would have been produced. That is worth having but is NOT a
