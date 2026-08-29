@@ -32,6 +32,8 @@ from .config import (
 )
 from . import cli, config, forcing
 from .Helpers import helpers, visualizers, file_manager, labels
+from .Helpers.visualizers import emit_figure as _emit, thin_ticks as _thin_ticks
+from .SBI.overlay import emit_overlay_figures as _emit_overlay_figures
 from .SBI import (embedded_network, pipeline, analysis, decorrelate, chi, derived, overlay, ppc,
                   truncate,
                   statistics, training_checkpoint)
@@ -1616,33 +1618,6 @@ def _observation_inits(cfg: SimConfig) -> torch.Tensor:
 
 
 # ── Step 4a: Calibration diagnostics (data-free — no chosen observation) ─────
-def _thin_ticks(fig, max_ticks: int = 3, rotation: int = 30) -> None:
-    """Keep a dense grid of small panels legible: few ticks, rotated, small labels.
-
-    A 13x13 corner at default tick density draws overlapping numbers on every panel, which is what makes
-    the plot unreadable rather than the panel size itself."""
-    from matplotlib.ticker import MaxNLocator
-    for ax in fig.axes:
-        try:
-            ax.xaxis.set_major_locator(MaxNLocator(max_ticks, prune="both"))
-            ax.yaxis.set_major_locator(MaxNLocator(max_ticks, prune="both"))
-            ax.tick_params(axis="both", labelsize=7)
-            for lbl in ax.get_xticklabels():
-                lbl.set_rotation(rotation)
-                lbl.set_horizontalalignment("right")
-        except Exception:                              # noqa: BLE001 -- cosmetic only, never fatal
-            continue
-
-
-def _emit(fig_sink, title: str, fig) -> None:
-    """Display a figure: hand it to fig_sink (a GUI canvas) when given, else fall back to the legacy
-    blocking plt.show() (CLI). This keeps orchestrator.run's CLI behavior unchanged when fig_sink is None."""
-    if fig_sink is not None:
-        fig_sink(title, fig)
-    else:
-        plt.show()
-
-
 def validate_calibration(cfg: SimConfig, posterior: DirectPosterior | TransformedPosterior,
                          inferred_prior: Distribution, force_prior: Distribution,
                          *, fig_sink=None, n_cal: int | None = None,
@@ -1944,109 +1919,6 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
         ylabel=labels.axis_label("x", cfg.length_unit),
     )
     _emit(fig_sink, "Eye test", fig)
-
-def _emit_overlay_figures(cfg, obs_data, x_samples, sim_stats, obs_stats, samples, show_truth, fig_sink):
-    """The five posterior-overlay figures. Isolated + best-effort: they are diagnostics, so a failure
-    here must never lose the corner/PPC/eye-test the caller already produced."""
-    try:
-        gt = obs_data[0, :].detach().cpu()
-        traces = x_samples.detach().cpu()
-        if traces.ndim != 2 or traces.shape[-1] != gt.shape[-1] or traces.shape[0] < 2:
-            # Say so. This used to be a bare `return` that also bypassed the except-clause's warning
-            # below, so the five overlay figures looked unimplemented rather than skipped -- and a
-            # one-sample width disagreement (see cfg.n_obs) made this the EXPECTED path, not an edge
-            # case.
-            warnings.warn(
-                f"Posterior-overlay figures skipped: need 2-D posterior traces at least 2 deep whose "
-                f"length matches the observation, got traces {tuple(traces.shape)} vs observation "
-                f"length {gt.shape[-1]}.",
-                stacklevel=2,
-            )
-            return
-        dt_s = 1.0 / cfg.get_unit_conversion_factor("s") * cfg.dt_exp    # sample spacing in SECONDS
-        labels_ = cfg.inferred_labels
-        truth = cfg.ground_truth if show_truth else None
-        xlab, ylab = labels.axis_label("t", "s"), labels.axis_label("x", cfg.length_unit)
-
-        # window the time-domain overlays to a readable number of cycles
-        f_pk = float(chi.peak_freq(gt.unsqueeze(0), dt_s)[0])
-        w = overlay.cycle_window(gt.shape[-1], dt_s, f_pk, EYE_TEST_CYCLES)
-        t_w = np.arange(w) * dt_s
-
-        # The five figures are emitted in four independent groups. (2)+(3) share rank_by_trace's
-        # alignment so they stand or fall together; the rest are independent. One shared try used to
-        # mean a failure in the first silently cost the other four -- notably cycle_average's
-        # quantile, which can raise on a large enough draw x sample product.
-        def _group(name, fn):
-            try:
-                fn()
-            except Exception as e:                        # noqa: BLE001 -- diagnostics, never fatal
-                warnings.warn(f"Posterior-overlay figure(s) '{name}' could not be produced: {e}",
-                              stacklevel=2)
-
-        def _best_fit_stats():
-            # (1) best fit by SUMMARY STATISTICS -- the space the posterior conditioned on
-            order_s, dist_s = overlay.rank_by_stats(sim_stats, obs_stats)
-            i_s = int(order_s[0])
-            fit_s, _ = overlay.align_to(gt, traces[i_s:i_s + 1])
-            _emit(fig_sink, "Best fit — summary stats", visualizers.plot_best_fit_overlay(
-                t_w, gt[:w].numpy(), fit_s[0, :w].numpy(), param_labels=labels_,
-                param_values=samples[i_s].detach().cpu(), ground_truth=truth,
-                criterion="closest summary statistics",
-                score_text=f"RMS z = {float(dist_s[i_s]):.3f}", xlabel=xlab, ylabel=ylab))
-
-        def _best_fit_trace_and_band():
-            # (2) best fit by TRACE, after alignment -- the draw that literally looks most like the data
-            order_t, rmse_t, aligned = overlay.rank_by_trace(gt, traces)
-            i_t = int(order_t[0])
-            _emit(fig_sink, "Best fit — trace", visualizers.plot_best_fit_overlay(
-                t_w, gt[:w].numpy(), aligned[i_t, :w].numpy(), param_labels=labels_,
-                param_values=samples[i_t].detach().cpu(), ground_truth=truth,
-                criterion="closest waveform (phase-aligned)",
-                score_text=f"RMSE = {float(rmse_t[i_t]):.3g}", xlabel=xlab, ylabel=ylab))
-
-            # (3) band over the top-N best draws, each aligned independently
-            n_best = int(min(50, max(5, traces.shape[0] // 20)))
-            best = aligned[order_t[:n_best]].to(torch.float64)
-            q = torch.tensor([0.05, 0.5, 0.95], dtype=torch.float64)
-            band = torch.quantile(best, q, dim=0)
-            _emit(fig_sink, "Posterior overlay (band)", visualizers.plot_overlay_band(
-                t_w, gt[:w].numpy(), band[0, :w].numpy(), band[1, :w].numpy(), band[2, :w].numpy(),
-                n_used=n_best, xlabel=xlab, ylabel=ylab))
-
-        def _psd_band():
-            # (4) PSD band -- phase-invariant
-            freqs, lo_p, med_p, hi_p, dropped = overlay.psd_band(traces, dt_s)
-            _, gt_p = overlay.psd(gt.unsqueeze(0), dt_s)
-            if dropped:
-                # Into the log as well as onto the figure. A posterior broad enough to draw parameter
-                # sets whose trajectories go non-finite is a statement about the POSTERIOR, not about
-                # plotting, and it should be greppable in a run log after the fact.
-                warnings.warn(
-                    f"Power-spectrum band: {dropped} of {traces.shape[0]} posterior-predictive draws "
-                    f"had a non-finite PSD and were excluded. Non-finite trajectories mean the "
-                    f"posterior is sampling parameter sets that do not integrate stably.",
-                    stacklevel=2)
-            _emit(fig_sink, "Power spectrum", visualizers.plot_psd_overlay(
-                freqs.numpy(), gt_p[0].numpy(), lo_p.numpy(), med_p.numpy(), hi_p.numpy(),
-                n_dropped=dropped))
-
-        def _cycle_avg():
-            # (5) cycle-averaged waveform -- phase-invariant shape comparison
-            if f_pk > 0:
-                ph, sim_m, sim_lo, sim_hi, dropped = overlay.cycle_average(traces, dt_s, f_pk)
-                _, gt_m, _, _, _ = overlay.cycle_average(gt.unsqueeze(0), dt_s, f_pk)
-                _emit(fig_sink, "Cycle-averaged waveform", visualizers.plot_cycle_average(
-                    ph.numpy(), gt_m.numpy(), sim_m.numpy(), sim_lo.numpy(), sim_hi.numpy(),
-                    ylabel=ylab, n_dropped=dropped))
-
-        _group("best fit (summary stats)", _best_fit_stats)
-        _group("best fit (trace) + band", _best_fit_trace_and_band)
-        _group("power spectrum", _psd_band)
-        _group("cycle-averaged waveform", _cycle_avg)
-    except Exception as e:                                # noqa: BLE001 -- diagnostics, never fatal
-        warnings.warn(f"Posterior-overlay figures could not be produced: {e}", stacklevel=2)
-
 
 def _build_latent_prior_for_validation(cfg, inferred_prior):
     """Mirror of the latent-prior construction in build_posterior, for gen_cal_data in validate."""

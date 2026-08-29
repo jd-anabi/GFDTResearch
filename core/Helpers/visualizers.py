@@ -454,3 +454,31 @@ def plot_training_loss(diagnostics: dict, save_path: str | PathLike[str] = None,
     if save_path is not None:
         save_figure(fig, save_path)
     return fig
+
+
+def thin_ticks(fig, max_ticks: int = 3, rotation: int = 30) -> None:
+    """Keep a dense grid of small panels legible: few ticks, rotated, small labels.
+
+    A 13x13 corner at default tick density draws overlapping numbers on every panel, which is what
+    makes the plot unreadable rather than the panel size itself."""
+    from matplotlib.ticker import MaxNLocator
+    for ax in fig.axes:
+        try:
+            ax.xaxis.set_major_locator(MaxNLocator(max_ticks, prune="both"))
+            ax.yaxis.set_major_locator(MaxNLocator(max_ticks, prune="both"))
+            ax.tick_params(axis="both", labelsize=7)
+            for lbl in ax.get_xticklabels():
+                lbl.set_rotation(rotation)
+                lbl.set_horizontalalignment("right")
+        except Exception:                              # noqa: BLE001 -- cosmetic only, never fatal
+            continue
+
+
+def emit_figure(fig_sink, title: str, fig) -> None:
+    """Display a figure: hand it to fig_sink (a GUI canvas) when given, else fall back to the
+    legacy blocking plt.show() (CLI). Keeps orchestrator.run's CLI behaviour unchanged when
+    fig_sink is None."""
+    if fig_sink is not None:
+        fig_sink(title, fig)
+    else:
+        plt.show()
