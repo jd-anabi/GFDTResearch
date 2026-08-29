@@ -15,7 +15,7 @@ def _bar_kwargs(n: int, batch_size: int) -> dict:
     per-iteration cost is a counter increment, essentially free even at 2.4M iterations.
 
     ⚠ `mininterval` IS 0.1 (tqdm's own default) AND MUST NOT GO BACK UP TO 1.0. It was 1.0, with a
-    docstring explaining that a top-level iteration takes ~10 s. Since CUDA graphs landed (§8.3) a
+    docstring explaining that a top-level iteration takes ~10 s. Since CUDA graphs landed a
     100k-step call takes ~0.7 s -- SHORTER than a 1.0 s mininterval -- so tqdm painted the "?it/s"
     opening frame and never a rate at all: measured 123 chars of stderr with no rate, against 670
     chars containing `14152.92it/s` with graphs off. The CLI was left watching a bar that never
@@ -45,7 +45,7 @@ def _step_bar(n: int, batch_size: int):
     from the rendered ``it/s``, which is exactly the coupling the speedup above broke. The rate now
     comes from ``core.progress.SOLVER``. What the GUI still does with this bar is EXCLUDE it -- by
     ``config.SOLVER_BAR_DESC`` -- from the election that drives the overall bar, since its total is
-    in the tens of thousands and it would win every time (trap S3).
+    in the tens of thousands and it would win every time, sweeping the bar 0->100% every second.
 
     It also stays ENABLED under the GUI, deliberately, rather than being quieted the way
     ``config.QUIET_SEGMENT_BAR`` quiets the segment bar: its redraws are the cooperative cancel's
@@ -63,7 +63,7 @@ def _step_iter(n: int, batch_size: int):
     ~50 ns against a MEASURED 54.87 us/step for the eager loop this path serves, i.e. under 0.1%.
 
     ⚠ ITERATE this; never hold it to call ``.close()``. The bar's close is tqdm's own ``finally``
-    inside ``__iter__``, and that is what trap C1's cancel-unwind relies on. Every call site is
+    inside ``__iter__``, and that is what the cancel's tqdm-lock unwind relies on. Every call site is
     ``for i in _step_iter(...)``, which unwinds correctly: a GeneratorExit here propagates into that
     inner ``for``, so tqdm's finally still runs.
     """
@@ -83,7 +83,8 @@ def _advance(bar, k: int) -> None:
 
 
 # --- CUDA Graph step capture ---------------------------------------------------------------------
-# Keyed on everything the capture bakes in. NOT hung off the Solver class: trap X1 requires
+# Keyed on everything the capture bakes in. NOT hung off the Solver class: the solver-failure test
+# patches the class, which requires
 # `sdeint.Solver` to be resolvable (and patchable) at call time, and a cache on a Solver instance
 # would be useless anyway -- Solver is constructed once per TIME SEGMENT, so it would recapture
 # constantly. A module-level dict is orthogonal to that seam.
