@@ -857,6 +857,56 @@ def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
     del sol, src
     return obs
 
+
+def retry_on_oom(fn, *, what: str, device: torch.device, attempts: int | None = None,
+                 delays: tuple | None = None, extra_retryable: tuple = ()):
+    """Run ``fn()``, waiting and retrying on a device out-of-memory. For NEW call sites.
+
+    One implementation of the recovery protocol the three training ladders inline: notice BEFORE
+    the release (the release can itself raise on a starved card, and once the except clause has
+    closed the exception context is gone -- printing first puts the original on the record
+    whatever the recovery manages), then release, one [mem] line, then the holder gate --
+    waiting only helps when somebody ELSE holds the memory, so when this process is the holder
+    the retry is immediate and the caller's own splitting is the remedy. The three existing
+    ladders do NOT call this: their statement order inside gen_training_data's own source is
+    pinned by tests, so the protocols are kept in step by hand instead.
+
+    ``attempts``/``delays`` default to the live config retry knobs (read via getattr, so a per-run
+    assignment to config is honoured). ``extra_retryable`` is a tuple of message substrings treated
+    as retryable alongside a genuine OOM: the Fisher passes "cudaErrorUnknown", the error that
+    actually killed a rotation on a starved card (2026-08-28) -- after one the context may be
+    poisoned, in which case the attempts exhaust quickly and the caller degrades instead of dying
+    inside its own recovery.
+
+    Narrow on RuntimeError, like the ladders: streams.WorkerCancelled is a BaseException so a GUI
+    cancel sails straight through, and a non-OOM RuntimeError re-raises immediately, traceback
+    intact.
+    """
+    n_attempts = (int(getattr(config, "TRAINING_BATCH_RETRY_ATTEMPTS", 0) or 0)
+                  if attempts is None else int(attempts))
+    delay_seq = (tuple(getattr(config, "TRAINING_BATCH_RETRY_DELAYS_S", ()) or (60.0,))
+                 if delays is None else tuple(delays))
+    for attempt in range(n_attempts + 1):
+        try:
+            return fn()
+        except RuntimeError as err:
+            retryable = _is_oom(err) or any(s in str(err) for s in extra_retryable)
+            if attempt >= n_attempts or not retryable:
+                raise
+            note = _short_err(err)
+        # Outside the except: while `err` is bound its traceback pins the failed attempt's tensors.
+        delay = delay_seq[min(attempt, len(delay_seq) - 1)]
+        print(f"{_batch_tag()}: {what} hit a device error ({attempt + 1}/{n_attempts + 1})"
+              f"{_free_gib_note(device)}. Original: {note}", file=sys.stderr, flush=True)
+        _release_device_memory(device)
+        _log_memory(device, f"after OOM in {what}")
+        if _we_are_the_holder(device):
+            print(f"{_batch_tag()}: THIS process holds most of the card, so waiting cannot free "
+                  f"anything -- retrying {what} immediately.", file=sys.stderr, flush=True)
+        else:
+            _cancellable_wait(delay, f"waiting for device memory before retrying {what}")
+
+
 @dataclasses.dataclass(frozen=True)
 class _BatchGeometry:
     """One training batch's shared state, captured once so the three mode branches can be plain

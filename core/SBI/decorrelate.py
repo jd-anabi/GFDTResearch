@@ -302,13 +302,30 @@ def build_latent_fisher_rotation(cfg, T=None, m: int = None, dz: float = None,
     with torch.no_grad():
         F_accum = np.zeros((P, P)); n_used = 0
         for k, theta_row in enumerate(points):
-            Fk = fisher_at(theta_row.to(device))
+            # Each operating point rides pipeline.retry_on_oom, and an EXHAUSTED retry skips the
+            # point rather than killing the rotation -- ~216 simulations of recovery beat losing a
+            # multi-day run's pre-training stage, and the all-points-failed raise below still stops
+            # a rotation with nothing in it. "cudaErrorUnknown" is retryable HERE only: it is what
+            # a starved card actually raised on 2026-08-28, and after one the context may be
+            # poisoned -- then the attempts exhaust fast and this degrades to a skip.
+            try:
+                Fk = pipeline.retry_on_oom(
+                    lambda row=theta_row: fisher_at(row.to(device)),
+                    what=f"Fisher operating point {k}", device=device,
+                    extra_retryable=("cudaErrorUnknown",))
+            except RuntimeError as err:
+                if not (pipeline._is_oom(err) or "cudaErrorUnknown" in str(err)):
+                    raise
+                print(f"[fisher] operating point {k} failed on device memory after retries "
+                      f"({pipeline._short_err(err, 120)}); skipping it", flush=True)
+                continue
             if Fk is None:
                 print(f"[fisher] operating point {k} gave non-finite features; skipping", flush=True)
                 continue
             F_accum += Fk; n_used += 1
     if n_used == 0:
-        raise RuntimeError("Fisher rotation: all operating points produced non-finite features.")
+        raise RuntimeError(
+            "Fisher rotation: every operating point failed (non-finite features or device errors).")
     print(f"[fisher] averaged simulation Fisher over {n_used}/{len(points)} operating points "
           f"(GT + {n_used - 1} prior draw(s))", flush=True)
     F = torch.tensor(F_accum / n_used, dtype=torch.float64, device=device)

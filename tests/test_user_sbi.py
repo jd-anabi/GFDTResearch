@@ -3420,6 +3420,112 @@ def test_the_mem_line_is_printed_on_every_oom_and_its_cadence_is_overridable():
         "the cadence must be overridable for a diagnostic run without editing a tracked file")
 
 
+def test_retry_on_oom_notices_releases_and_honours_the_holder_gate():
+    """The reusable recovery helper for NEW call sites (the Fisher, the PPC). Its protocol must
+    match the pinned ladders': notice, release, [mem] line, then wait ONLY when somebody else
+    holds the card."""
+    events = []
+    saved = (pipeline_mod._release_device_memory, pipeline_mod._cancellable_wait,
+             pipeline_mod._we_are_the_holder, pipeline_mod._log_memory)
+    calls = {"n": 0}
+
+    def _fn():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise torch.OutOfMemoryError("CUDA out of memory (stub)")
+        return "sentinel"
+
+    try:
+        pipeline_mod._release_device_memory = lambda d, **k: events.append("release")
+        pipeline_mod._cancellable_wait = lambda s, why: events.append("wait")
+        pipeline_mod._log_memory = lambda d, tag: events.append("mem")
+        pipeline_mod._we_are_the_holder = lambda d: False
+        out = pipeline_mod.retry_on_oom(_fn, what="stub", device=torch.device("cpu"),
+                                        attempts=3, delays=(0.0,))
+        assert out == "sentinel", "the successful attempt's result must be returned"
+        assert events == ["release", "mem", "wait", "release", "mem", "wait"], events
+        # When THIS process is the holder, waiting cannot help and must be skipped.
+        events.clear(); calls["n"] = 0
+        pipeline_mod._we_are_the_holder = lambda d: True
+        assert pipeline_mod.retry_on_oom(_fn, what="stub", device=torch.device("cpu"),
+                                         attempts=3, delays=(0.0,)) == "sentinel"
+        assert "wait" not in events, "the holder gate must skip the wait"
+    finally:
+        (pipeline_mod._release_device_memory, pipeline_mod._cancellable_wait,
+         pipeline_mod._we_are_the_holder, pipeline_mod._log_memory) = saved
+
+
+def test_retry_on_oom_reraises_non_oom_and_exhaustion_and_lets_cancel_through():
+    """Narrow like the ladders: a real bug re-raises immediately with no recovery theatre, an
+    exhausted retry re-raises the last OOM, and a BaseException (a GUI cancel) sails through."""
+    saved = (pipeline_mod._release_device_memory, pipeline_mod._cancellable_wait,
+             pipeline_mod._we_are_the_holder, pipeline_mod._log_memory)
+    released = []
+    try:
+        pipeline_mod._release_device_memory = lambda d, **k: released.append(1)
+        pipeline_mod._cancellable_wait = lambda s, why: None
+        pipeline_mod._log_memory = lambda d, tag: None
+        pipeline_mod._we_are_the_holder = lambda d: True
+
+        def _bug():
+            raise RuntimeError("shape mismatch (stub)")
+        try:
+            pipeline_mod.retry_on_oom(_bug, what="stub", device=torch.device("cpu"), attempts=3)
+            raise AssertionError("a non-OOM RuntimeError must re-raise")
+        except RuntimeError as e:
+            assert "shape mismatch" in str(e)
+        assert not released, "a non-OOM failure must not trigger recovery"
+
+        def _always_oom():
+            raise torch.OutOfMemoryError("CUDA out of memory (stub)")
+        try:
+            pipeline_mod.retry_on_oom(_always_oom, what="stub", device=torch.device("cpu"),
+                                      attempts=1, delays=(0.0,))
+            raise AssertionError("an exhausted retry must re-raise the OOM")
+        except torch.OutOfMemoryError:
+            pass
+
+        class _Cancel(BaseException):
+            pass
+
+        def _cancelled():
+            raise _Cancel()
+        try:
+            pipeline_mod.retry_on_oom(_cancelled, what="stub", device=torch.device("cpu"), attempts=3)
+            raise AssertionError("a BaseException must pass straight through")
+        except _Cancel:
+            pass
+
+        # And the message-substring escape hatch: retryable only when named by the caller.
+        calls = {"n": 0}
+
+        def _unknown():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("CUDA error: cudaErrorUnknown (stub)")
+            return "ok"
+        assert pipeline_mod.retry_on_oom(_unknown, what="stub", device=torch.device("cpu"),
+                                         attempts=2, delays=(0.0,),
+                                         extra_retryable=("cudaErrorUnknown",)) == "ok"
+    finally:
+        (pipeline_mod._release_device_memory, pipeline_mod._cancellable_wait,
+         pipeline_mod._we_are_the_holder, pipeline_mod._log_memory) = saved
+
+
+def test_the_fisher_wraps_each_operating_point_and_skips_on_exhausted_oom():
+    """The rotation died outright on a cudaErrorUnknown from a starved card (2026-08-28) because
+    its loop had no ladder. Each operating point must now ride retry_on_oom -- with
+    cudaErrorUnknown retryable there and only there -- and an exhausted point must be SKIPPED
+    (the all-points-failed raise still stops an empty rotation)."""
+    from core.SBI import decorrelate as _dec
+    src = _unparsed(_dec.build_latent_fisher_rotation)
+    assert "retry_on_oom" in src, "the Fisher loop must ride the recovery helper"
+    assert "cudaErrorUnknown" in src, "the error that actually killed a rotation must be retryable here"
+    i_retry = src.find("retry_on_oom")
+    i_skip = src.find("skipping it")
+    assert 0 <= i_retry < i_skip, "the exhausted-retry skip must follow the wrapped call"
+
+
 if __name__ == "__main__":
     failures = 0
     for test_name, fn in sorted(globals().items()):
