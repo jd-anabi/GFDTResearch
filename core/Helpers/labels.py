@@ -14,7 +14,7 @@ it without a cycle).
 RESCALE_LATEX = {
     "x_scale": r"x_{\mathrm{scale}}", "t_scale": r"t_{\mathrm{scale}}", "f_scale": r"f_{\mathrm{scale}}",
     "x_offset": r"x_{\mathrm{off}}",  "t_offset": r"t_{\mathrm{off}}",  "f_offset": r"f_{\mathrm{off}}",
-    # Tier-1 boxes declare T in f_scale's place (section 11.5). It is a bath temperature in
+    # Tier-1 boxes declare T in f_scale's place (f_scale is then derived). It is a bath temperature in
     # KELVIN, which is not one of the four cell-file unit tokens, so _RESCALE_KIND deliberately
     # has no entry for it and the label degrades to a bare symbol rather than inventing a unit.
     "T": r"T",

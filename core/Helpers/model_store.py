@@ -117,8 +117,8 @@ def _fmt(v: float) -> str:
 def nd_bounds(v: float) -> tuple:
     """The placeholder inference box for a parameter whose bounds the user has not set: (v-pad, v+pad)
     with pad = max(|v|, 1). PUBLIC because the model builder's 'auto' checkbox has to reproduce it
-    exactly (one rule, two callers) -- it used to be reached through the underscore, which is the
-    private-name-across-boundaries item in PRISM_HANDOFF 9.6."""
+    exactly (one rule, two callers) -- it used to be reached through the underscore across a module
+    boundary, which is what got it promoted."""
     pad = max(abs(v), 1.0)
     return (v - pad, v + pad)
 
@@ -137,7 +137,7 @@ def _forcing_bounds(pname: str, v: float) -> tuple:
 
     NOT ``nd_bounds``, which is symmetric about the value and therefore hands every small positive
     quantity a box that is mostly negative -- a drive amplitude of 0.05 got (-0.95, 1.05). That is the
-    defect PRISM_HANDOFF S-1 names for ND parameters, and it survived here after the ND half was fixed.
+    same defect the ND parameters' placeholder box once had, and it survived here after that fix.
     Three shapes, by what the parameter physically is:
 
       phase        a KNOWN box, (0, 2*pi). An angle's range is not a guess.

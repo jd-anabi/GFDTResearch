@@ -6,7 +6,7 @@ WHY THIS EXISTS -- and why it is a COUNTER rather than anything cleverer.
     coupling has one failure mode and it fired: tqdm only paints a frame carrying a rate once
     `mininterval` has elapsed, so a solver call SHORTER than its own bar's mininterval renders
     "?it/s" and nothing else, forever. When CUDA graphs took a 100k-step call from ~10 s to ~0.7 s
-    (§8.3) the meter read "-- (idle)" for entire multi-day runs. A 10x speedup made a progress bar
+    the meter read "-- (idle)" for entire multi-day runs. A 10x speedup made a progress bar
     too fast to render.
 
     A monotonically increasing count of completed steps has no such failure mode. It is correct at

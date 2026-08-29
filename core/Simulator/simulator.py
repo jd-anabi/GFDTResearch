@@ -61,7 +61,7 @@ class Simulator(ABC):
         # the LARGER of the two: this is (n_vars, batch, n_fine), ~6.95 GiB at the production
         # geometry against the solver buffer's ~2.3 GiB. get_even_ids spans the whole grid and every
         # segment writes its full slice below, so every element is overwritten and the memset is pure
-        # waste -- x segs x runs x 5000 training batches. (§8.1 listed the sdeint one and missed this.)
+        # waste -- x segs x runs x 5000 training batches.
         sol = torch.empty((n_vars, self._batch_size, self.t.shape[0]), dtype=self.t.dtype, device=self.t.device)
 
         # The SDE model indexes force with the solver's local step index (0..n_seg-1),
