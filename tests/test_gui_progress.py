@@ -392,7 +392,7 @@ def test_plus_meter_is_one_sign_per_order_of_magnitude():
 def test_the_solver_bar_never_drives_the_overall_bar_and_is_not_the_caption():
     """The solver bar must not decide the overall bar: its total is in the tens of thousands and it is
     the deepest bar there is, so it would win the election every time and drag the bar through a full
-    0->100% sweep every second instead of showing the top-level count (trap S3). It is also not a row
+    0->100% sweep every second instead of showing the top-level count. It is also not a row
     any more -- nothing is -- so it must not surface as the caption either."""
     _app()
     prog = ProgressPane()
@@ -524,7 +524,7 @@ def test_spinner_animates_and_then_reports_a_stall():
 
 
 def test_the_solver_step_iterator_closes_its_bar_when_the_consumer_raises():
-    """`sdeint._step_iter` is a GENERATOR wrapping the tqdm bar, so it adds a frame to trap C1's unwind
+    """`sdeint._step_iter` is a GENERATOR wrapping the tqdm bar, so it adds a frame to the cancel's tqdm-lock unwind
     path -- a cancel raises from inside a bar redraw, and tqdm's own `finally: self.close()` has to run
     anyway or its global write lock leaks and the NEXT `tqdm.__new__` DEADLOCKS. (C1's own test hangs
     rather than failing, which is why this cheap structural guard is worth having in front of it.)
@@ -2760,7 +2760,7 @@ def test_the_vram_ceiling_is_on_config_live_and_NOT_persisted():
     A PLAIN ASSIGNMENT IS ENOUGH, unlike every other knob the GUI exposes. The sweep and flow fields
     had to become ARGUMENTS threaded into build_prior/build_posterior, because orchestrator does
     `from .config import ...` and binds them at import, so writing to the constant is a silent no-op
-    (trap X12). pipeline.vram_ceiling_gib() does a getattr on the module every time the planner
+    (an imported name is a snapshot). pipeline.vram_ceiling_gib() does a getattr on the module every time the planner
     asks, so this one genuinely takes effect -- and this test would catch it if that ever changed.
     """
     from core.gui.panels import inference_tabs as it
@@ -2816,7 +2816,7 @@ def test_the_free_vram_readout_does_not_use_mem_get_info():
     """⚠ The readout beside the ceiling must come from nvidia-smi, never torch.cuda.mem_get_info.
 
     That reading overstates free VRAM on Windows by roughly the size of the desktop -- measured
-    15037 MiB against nvidia-smi's 5814 at the same instant (trap X6) -- and it is the number that
+    15037 MiB against nvidia-smi's 5814 at the same instant -- and it is the number that
     green-lit the batch which killed the first chi retrain. Printing it next to a field whose entire
     purpose is to bound VRAM would hand the user the exact lie the field defends against."""
     from core.gui.panels import inference_tabs as it

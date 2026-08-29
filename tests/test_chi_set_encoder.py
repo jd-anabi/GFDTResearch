@@ -358,7 +358,7 @@ def test_width_is_k_independent():
             f"`{banned}` is back in the Fisher set. A standardized Jacobian divides by an ensemble "
             f"std, so a channel that barely varies with theta is an AMPLIFIER: `u` is pure float32 "
             f"rounding, `mask` is a step, and `logcyc` is either an exact duplicate of A3_log_fpeak "
-            f"or floor() quantization. See trap CHI10 / backlog C-9/C-10.")
+            f"or floor() quantization -- an exact duplicate of A3_log_fpeak or an amplifier.")
 
 
 class _PlannerCfg:
@@ -474,7 +474,7 @@ def test_resolvable_multipliers_rescue_slow_rows_without_leaving_the_band():
     """Per-ROW placement: a slow row must be given probes it can actually resolve, and a fast row
     must be left alone.
 
-    WHY (backlog C-6, handoff 4.3.4). Probes sit at ``mult * Omega_0``, so one shared multiplier set
+    WHY. Probes sit at ``mult * Omega_0``, so one shared multiplier set
     across a prior spanning ~4 decades of Omega_0 cannot resolve for everyone: measured, 55 % of
     training rows carried ZERO live probes, 0 % live below 3 Hz against 98 % above 30 Hz. The masked
     rows are genuine oscillators, so the mask is right and the PLACEMENT is what has to move.

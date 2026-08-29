@@ -1,4 +1,4 @@
-"""The section 11 informativeness programme: conditioning repair, tier-1 consistency, TSNPE.
+"""The informativeness programme: conditioning repair, tier-1 consistency, TSNPE.
 
 Pure torch, no simulation, no Qt -- seconds. Deliberately a separate suite in the spirit of
 test_chi_set_encoder: the invariants here are the kind whose violation is INVISIBLE. A contaminated
@@ -127,7 +127,7 @@ def test_the_contaminated_channel_becomes_visible_to_the_network():
 def test_a_legacy_posterior_still_loads_and_evaluates():
     """A pre-2026-08-26 posterior unpickles with sum_mean/sum_std and no rank buffers. Without a
     branch on which buffers are present, EVERY existing artifact becomes unloadable -- including
-    posterior_08232026, which is the baseline every section 11 gate is measured against."""
+    posterior_08232026, which is the baseline every conditioning-repair gate is measured against."""
     torch.manual_seed(3)
     n_sum = 42
     net = EmbeddedNet(input_dim=n_sum, output_dim=8, layer_dims=(16, 12),
@@ -360,7 +360,7 @@ class _Gaussian:
 
 
 def test_the_proposal_is_the_TRUNCATED_PRIOR_and_not_the_posterior():
-    """⚠ THE TEST SBC CANNOT DO, and the one thing section 11.6 says must not be got wrong.
+    """⚠ THE TEST SBC CANNOT DO, and the one thing TSNPE must not get wrong.
 
     Proposing from a fitted posterior instead of the prior-restricted-to-A gives p_L ∝ L^(L+1) q --
     tempering. For a Gaussian the round-1 width then contracts by exactly 1/sqrt(2) with NO new
