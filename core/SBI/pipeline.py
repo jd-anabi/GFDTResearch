@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import os
 import shutil
@@ -856,6 +857,196 @@ def _gen_obs_one(model, params, t, inits, force, n_segs, steady_idx, fixed_dict,
     del sol, src
     return obs
 
+@dataclasses.dataclass(frozen=True)
+class _BatchGeometry:
+    """One training batch's shared state, captured once so the three mode branches can be plain
+    module-level functions instead of arms of a closure reading ~30 enclosing names (a thirty-
+    argument function is a standing invitation to a call-site drift bug -- a wrong
+    subsample_factor produces a PLAUSIBLE training row, not a crash)."""
+    model: str
+    t_fine: torch.Tensor
+    n_segs_k: int
+    steady_idx: int
+    subsample_factor: int
+    N_points_k: int
+    T_k: float
+    n_force_ch: int
+    dt_exp: float
+    forcing_idx: dict
+    sim_ridx: dict
+    fixed_dict: dict
+    state_dep_drift: bool
+    dtype: torch.dtype
+    device: torch.device
+    # chi mode only; None elsewhere
+    chi_k_pad: int = None
+    chi_f0: float = None
+    chi_freq_bounds: tuple = None
+    chi_max_cycles: float = None
+    chi_k_fixed: int = None
+    chi_gen: object = None
+    b_mults: torch.Tensor = None
+    dfrac: torch.Tensor = None
+
+
+def _chi_rows(g: _BatchGeometry, nd, resc, init_rows, x_scale, x_offset, _patho) -> torch.Tensor:
+    """One chi-mode row block: spontaneous run + K single-tone probes -> [S | log T | chi block].
+    gen_obs / gen_stats / gen_chi_block / _subset_probe_rows are read as MODULE names on purpose --
+    the test harness patches them on this module and must be honoured."""
+    (model, t_fine, n_segs_k, steady_idx, subsample_factor, N_points_k, T_k, n_force_ch,
+     dt_exp, fixed_dict, state_dep_drift, sim_ridx, forcing_idx, dtype, device) = (
+        g.model, g.t_fine, g.n_segs_k, g.steady_idx, g.subsample_factor, g.N_points_k, g.T_k,
+        g.n_force_ch, g.dt_exp, g.fixed_dict, g.state_dep_drift, g.sim_ridx, g.forcing_idx,
+        g.dtype, g.device)
+    n = nd.shape[0]
+    chi_k_pad, chi_f0, chi_freq_bounds = g.chi_k_pad, g.chi_f0, g.chi_freq_bounds
+    chi_max_cycles, chi_k_fixed, chi_gen = g.chi_max_cycles, g.chi_k_fixed, g.chi_gen
+    b_mults, dfrac = g.b_mults, g.dfrac
+    # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
+    # Conditioning [S(41, Group G zeroed) | log(T) | chi(3K)] -- chi replaces the forcing block.
+    force0 = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
+    x_nd_spont_fine = gen_obs(
+        model=model, params=nd, t=t_fine, inits=init_rows,
+        force=force0, n_segs=n_segs_k, steady_idx=steady_idx,
+        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+        batch_size=n, var_idx=0, dtype=dtype, device=device,
+    )[0, :, :]
+    x_spont_dim = helpers.rescale(
+        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+    del x_nd_spont_fine, force0
+    count_pathological(x_spont_dim, _patho)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
+                                   device=device, spontaneous_only=True)   # (run, 41), G zeroed
+    chi_block, chi_mask = gen_chi_block(
+        # init_rows, NOT inits: this one is passed POSITIONALLY, which is exactly how
+        # it survived the row-slicing sweep -- gen_obs' calls name it `inits=` and were
+        # caught. It surfaced as "Batch size: 2 cannot differ from dim 0 of parameters
+        # tensor", i.e. loudly, only because the simulator validates the two against
+        # each other; a tensor that happened to broadcast would have gone unnoticed.
+        model, nd, resc, x_spont_dim, t_fine, init_rows, sim_ridx,
+        n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
+        b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
+        k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
+        max_cycles=chi_max_cycles,
+        # THE ONLY adapt_placement=True in the codebase. Training is the one path that
+        # gets to choose where it probes; every other caller is reproducing an experiment
+        # whose frequencies are already fixed.
+        adapt_placement=True,
+        dtype=dtype, device=device)
+    # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
+    # rows that keep the probe -- and it is the only way to decouple the probe count from
+    # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
+    # drive set and different subsets, which is a direct regulariser toward K-agnosticism.
+    #   SKIPPED under chi_k_fixed: subsetting is exactly what makes the per-row count
+    #   vary, so leaving it on would silently turn a "K = 6" calibration stratum into a
+    #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
+    if chi_k_fixed is None:
+        chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
+    log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+    training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
+    return training_stats
+
+
+
+def _spontaneous_rows(g: _BatchGeometry, nd, init_rows, x_scale, x_offset, _patho) -> torch.Tensor:
+    """One spontaneous-mode row block: a single unforced run -> [S | log T]."""
+    (model, t_fine, n_segs_k, steady_idx, subsample_factor, N_points_k, T_k, n_force_ch,
+     dt_exp, fixed_dict, state_dep_drift, sim_ridx, forcing_idx, dtype, device) = (
+        g.model, g.t_fine, g.n_segs_k, g.steady_idx, g.subsample_factor, g.N_points_k, g.T_k,
+        g.n_force_ch, g.dt_exp, g.fixed_dict, g.state_dep_drift, g.sim_ridx, g.forcing_idx,
+        g.dtype, g.device)
+    n = nd.shape[0]
+    # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
+    force = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
+    x_nd_spont_fine = gen_obs(
+        model=model, params=nd, t=t_fine, inits=init_rows,
+        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
+        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+        batch_size=n, var_idx=0, dtype=dtype, device=device,
+    )[0, :, :]
+    # Rescale STRAIGHT off the strided view: helpers.rescale materialises a fresh
+    # contiguous tensor, so nothing keeps a reference to the fine buffer and the `del`
+    # genuinely releases it. Binding the view to a name first (as this used to) pins the
+    # whole (n, n_fine) storage until that name dies -- the `del` frees nothing.
+    x_spont_dim = helpers.rescale(
+        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+    del x_nd_spont_fine, force
+    count_pathological(x_spont_dim, _patho)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
+                                   device=device, spontaneous_only=True)
+        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+        # Conditioning [S | log(T)] -- no forcing block (forcing_dim = 0).
+        training_stats = torch.cat((training_stats, log_T_k_tensor), dim=-1)
+        return training_stats
+
+
+
+def _forced_rows(g: _BatchGeometry, nd, resc, init_rows, fparams, x_scale, x_offset, _patho) -> torch.Tensor:
+    """One forced-mode row block: driven + spontaneous runs -> [S | log T | theta_force]."""
+    (model, t_fine, n_segs_k, steady_idx, subsample_factor, N_points_k, T_k, n_force_ch,
+     dt_exp, fixed_dict, state_dep_drift, sim_ridx, forcing_idx, dtype, device) = (
+        g.model, g.t_fine, g.n_segs_k, g.steady_idx, g.subsample_factor, g.N_points_k, g.T_k,
+        g.n_force_ch, g.dt_exp, g.fixed_dict, g.state_dep_drift, g.sim_ridx, g.forcing_idx,
+        g.dtype, g.device)
+    n = nd.shape[0]
+    # 2. Build nondimensional force tensor at fine resolution (uses PHYSICAL rescale)
+    force = build_nondim_sin_force_tensor(
+        fparams, t_fine, resc, forcing_idx, sim_ridx
+    )
+
+    # 3. Simulate the FORCED run (drive on) -> Group G
+    x_nd_fine = gen_obs(
+        model=model, params=nd, t=t_fine, inits=init_rows,
+        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
+        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+        batch_size=n, var_idx=0, dtype=dtype, device=device,
+    )[0, :, :]
+    # 4a. Redimensionalize the forced run IMMEDIATELY (uses PHYSICAL rescale).
+    # Order matters: helpers.rescale materialises a fresh contiguous tensor, so the `del`
+    # below actually releases the fine buffer. Holding the strided VIEW in a name instead
+    # (as this used to) pinned the entire (n, n_fine) storage right across the
+    # second gen_obs call below -- two full fine trajectories resident where one
+    # subsampled slice was needed, several GB at n=2048. That also made
+    # _max_sim_batch split batches it did not need to, and k chunks cost k x wall-clock.
+    x_dim = helpers.rescale(
+        x_nd_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+    del x_nd_fine
+
+    # 3b. Simulate the SPONTANEOUS run (zero force) -> Groups A-F
+    x_nd_spont_fine = gen_obs(
+        model=model, params=nd, t=t_fine, inits=init_rows,
+        force=torch.zeros_like(force), n_segs=n_segs_k, steady_idx=steady_idx,
+        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
+        batch_size=n, var_idx=0, dtype=dtype, device=device,
+    )[0, :, :]
+    # 4b. Same treatment for the spontaneous run.
+    x_spont_dim = helpers.rescale(
+        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
+    del x_nd_spont_fine, force
+    count_pathological(x_spont_dim, _patho)
+    count_pathological(x_dim, _patho)
+
+    # 5. Stats (A-F from spontaneous, G from forced) + conditioning
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        drive_amp = fparams[:, forcing_idx["amp"]].cpu()
+        drive_freq = fparams[:, forcing_idx["freq"]].cpu()
+        drive_phase = fparams[:, forcing_idx["phase"]].cpu()
+        training_stats = gen_stats(x_spont_dim.cpu(), x_dim.cpu(), dt_exp, drive_amp, drive_freq, drive_phase, device=device)
+        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
+        # Canonical conditioning layout: [S(x_dim) | log(T) | theta_force].
+        # log(T) rides with the summary pathway; theta_force is a separate block.
+        # The embedding split in build_posterior depends on this exact order, so
+        # keep it in sync with generate_observations / validate / infer_from_experiment.
+        training_stats = torch.cat((training_stats, log_T_k_tensor, fparams.cpu()), dim=-1)
+        return training_stats
+
+
+
 def _training_inits(model: str, run_size: int, n_vars, dtype, device) -> torch.Tensor:
     """Initial conditions for a training run: the model's declared inits (user models) or the
     randint-pos/zero-prob synthesis (built-ins). Drawn from NUMPY's global RNG -- which torch seeds
@@ -1305,19 +1496,23 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                                     torch.exp(torch.rand(k_b, generator=chi_gen)
                                               * (math.log(1.0) - math.log(0.3)) + math.log(0.3)))
 
-            def _rows(lo: int, hi: int):
-                """This batch's rows [lo, hi) -> (hi-lo, W) CPU conditioning tensor.
+            geom = _BatchGeometry(
+                model=model, t_fine=t_fine, n_segs_k=n_segs_k, steady_idx=steady_idx,
+                subsample_factor=subsample_factor, N_points_k=N_points_k, T_k=T_k,
+                n_force_ch=n_force_ch, dt_exp=dt_exp, forcing_idx=forcing_idx, sim_ridx=sim_ridx,
+                fixed_dict=fixed_dict, state_dep_drift=state_dep_drift, dtype=dtype, device=device,
+                **(dict(chi_k_pad=chi_k_pad, chi_f0=chi_f0, chi_freq_bounds=chi_freq_bounds,
+                        chi_max_cycles=chi_max_cycles, chi_k_fixed=chi_k_fixed, chi_gen=chi_gen,
+                        b_mults=b_mults, dfrac=dfrac) if chi_mode else {}))
 
-                A CLOSURE, not a module-level function, because the body reads about thirty names from
-                this scope -- the geometry, the thetas, the probe set, every mode flag. A thirty-
-                argument function is a standing invitation to a call-site drift bug in code where a
-                wrong subsample_factor produces a PLAUSIBLE training row rather than a crash. The
-                logic worth testing -- the halving, the floor, the cancel pass-through -- lives in
-                _rows_with_oom_retry, which is module-level and takes a fake fn. Called synchronously
-                within this iteration and never stored, so the usual late-binding hazard of defining a
-                closure in a loop does not apply.
+            def _rows(lo: int, hi: int):
+                """Slice this batch's rows [lo, hi) and dispatch to the mode branch.
+
+                Still a CLOSURE, deliberately: the batch state is captured once, here, into a
+                _BatchGeometry, and the retry seam _rows_with_oom_retry(_rows, ...) stays
+                byte-identical. The logic worth testing -- the halving, the floor, the cancel
+                pass-through -- lives in _rows_with_oom_retry, which takes a fake fn.
                 """
-                n = hi - lo
                 resc = sim_thetas_rescale[lo:hi]
                 nd = curr_thetas_nd[lo:hi]
                 init_rows = inits[lo:hi]
@@ -1328,130 +1523,11 @@ def gen_training_data(model: str, prior: torch.distributions.Distribution, forci
                 x_scale  = resc[:, sim_ridx["x_scale"]].unsqueeze(1)
                 x_offset = (resc[:, sim_ridx["x_offset"]].unsqueeze(1)
                             if "x_offset" in sim_ridx else 0.0)
-
                 if chi_mode:
-                    # chi(omega) mode: spontaneous run (Groups A-F + Omega_0) + K single-tone forced runs.
-                    # Conditioning [S(41, Group G zeroed) | log(T) | chi(3K)] -- chi replaces the forcing block.
-                    force0 = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
-                    x_nd_spont_fine = gen_obs(
-                        model=model, params=nd, t=t_fine, inits=init_rows,
-                        force=force0, n_segs=n_segs_k, steady_idx=steady_idx,
-                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                        batch_size=n, var_idx=0, dtype=dtype, device=device,
-                    )[0, :, :]
-                    x_spont_dim = helpers.rescale(
-                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                    del x_nd_spont_fine, force0
-                    count_pathological(x_spont_dim, _patho)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
-                                                   device=device, spontaneous_only=True)   # (run, 41), G zeroed
-                    chi_block, chi_mask = gen_chi_block(
-                        # init_rows, NOT inits: this one is passed POSITIONALLY, which is exactly how
-                        # it survived the row-slicing sweep -- gen_obs' calls name it `inits=` and were
-                        # caught. It surfaced as "Batch size: 2 cannot differ from dim 0 of parameters
-                        # tensor", i.e. loudly, only because the simulator validates the two against
-                        # each other; a tensor that happened to broadcast would have gone unnoticed.
-                        model, nd, resc, x_spont_dim, t_fine, init_rows, sim_ridx,
-                        n_segs_k, steady_idx, subsample_factor, N_points_k, dt_exp,
-                        b_mults, chi_f0, state_dep_drift=state_dep_drift, fixed_dict=fixed_dict,
-                        k_pad=chi_k_pad, bounds=chi_freq_bounds, duration_frac=dfrac,
-                        max_cycles=chi_max_cycles,
-                        # THE ONLY adapt_placement=True in the codebase. Training is the one path that
-                        # gets to choose where it probes; every other caller is reproducing an experiment
-                        # whose frequencies are already fixed.
-                        adapt_placement=True,
-                        dtype=dtype, device=device)
-                    # Per-ROW subsetting of the SAME drive set. Free -- the simulation is shared with the
-                    # rows that keep the probe -- and it is the only way to decouple the probe count from
-                    # the batch's (t_scale, T) stratum. It also hands the flow pairs of rows with the same
-                    # drive set and different subsets, which is a direct regulariser toward K-agnosticism.
-                    #   SKIPPED under chi_k_fixed: subsetting is exactly what makes the per-row count
-                    #   vary, so leaving it on would silently turn a "K = 6" calibration stratum into a
-                    #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
-                    if chi_k_fixed is None:
-                        chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
-                    log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-                    training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
-                    return training_stats
+                    return _chi_rows(geom, nd, resc, init_rows, x_scale, x_offset, _patho)
                 elif spontaneous_only:
-                    # No drive: one spontaneous run (Groups A-F; Group G is zero-padded), no forcing block.
-                    force = _forcing.zero_force(n, n_force_ch, t_fine.shape[0], dtype, device)
-                    x_nd_spont_fine = gen_obs(
-                        model=model, params=nd, t=t_fine, inits=init_rows,
-                        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
-                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                        batch_size=n, var_idx=0, dtype=dtype, device=device,
-                    )[0, :, :]
-                    # Rescale STRAIGHT off the strided view: helpers.rescale materialises a fresh
-                    # contiguous tensor, so nothing keeps a reference to the fine buffer and the `del`
-                    # genuinely releases it. Binding the view to a name first (as this used to) pins the
-                    # whole (n, n_fine) storage until that name dies -- the `del` frees nothing.
-                    x_spont_dim = helpers.rescale(
-                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                    del x_nd_spont_fine, force
-                    count_pathological(x_spont_dim, _patho)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
-                                                   device=device, spontaneous_only=True)
-                        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-                        # Conditioning [S | log(T)] -- no forcing block (forcing_dim = 0).
-                        training_stats = torch.cat((training_stats, log_T_k_tensor), dim=-1)
-                        return training_stats
-                else:
-                    # 2. Build nondimensional force tensor at fine resolution (uses PHYSICAL rescale)
-                    force = build_nondim_sin_force_tensor(
-                        fparams, t_fine, resc, forcing_idx, sim_ridx
-                    )
-
-                    # 3. Simulate the FORCED run (drive on) -> Group G
-                    x_nd_fine = gen_obs(
-                        model=model, params=nd, t=t_fine, inits=init_rows,
-                        force=force, n_segs=n_segs_k, steady_idx=steady_idx,
-                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                        batch_size=n, var_idx=0, dtype=dtype, device=device,
-                    )[0, :, :]
-                    # 4a. Redimensionalize the forced run IMMEDIATELY (uses PHYSICAL rescale).
-                    # Order matters: helpers.rescale materialises a fresh contiguous tensor, so the `del`
-                    # below actually releases the fine buffer. Holding the strided VIEW in a name instead
-                    # (as this used to) pinned the entire (n, n_fine) storage right across the
-                    # second gen_obs call below -- two full fine trajectories resident where one
-                    # subsampled slice was needed, several GB at n=2048. That also made
-                    # _max_sim_batch split batches it did not need to, and k chunks cost k x wall-clock.
-                    x_dim = helpers.rescale(
-                        x_nd_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                    del x_nd_fine
-
-                    # 3b. Simulate the SPONTANEOUS run (zero force) -> Groups A-F
-                    x_nd_spont_fine = gen_obs(
-                        model=model, params=nd, t=t_fine, inits=init_rows,
-                        force=torch.zeros_like(force), n_segs=n_segs_k, steady_idx=steady_idx,
-                        fixed_dict=fixed_dict, state_dep_drift=state_dep_drift,
-                        batch_size=n, var_idx=0, dtype=dtype, device=device,
-                    )[0, :, :]
-                    # 4b. Same treatment for the spontaneous run.
-                    x_spont_dim = helpers.rescale(
-                        x_nd_spont_fine[:, ::subsample_factor][:, :N_points_k], x_scale, x_offset)
-                    del x_nd_spont_fine, force
-                    count_pathological(x_spont_dim, _patho)
-                    count_pathological(x_dim, _patho)
-
-                    # 5. Stats (A-F from spontaneous, G from forced) + conditioning
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        drive_amp = fparams[:, forcing_idx["amp"]].cpu()
-                        drive_freq = fparams[:, forcing_idx["freq"]].cpu()
-                        drive_phase = fparams[:, forcing_idx["phase"]].cpu()
-                        training_stats = gen_stats(x_spont_dim.cpu(), x_dim.cpu(), dt_exp, drive_amp, drive_freq, drive_phase, device=device)
-                        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-                        # Canonical conditioning layout: [S(x_dim) | log(T) | theta_force].
-                        # log(T) rides with the summary pathway; theta_force is a separate block.
-                        # The embedding split in build_posterior depends on this exact order, so
-                        # keep it in sync with generate_observations / validate / infer_from_experiment.
-                        training_stats = torch.cat((training_stats, log_T_k_tensor, fparams.cpu()), dim=-1)
-                        return training_stats
+                    return _spontaneous_rows(geom, nd, init_rows, x_scale, x_offset, _patho)
+                return _forced_rows(geom, nd, resc, init_rows, fparams, x_scale, x_offset, _patho)
 
             # Per-ROW element cost at THIS geometry, in the same currency _max_sim_batch plans in, so
             # an OOM here tightens the SAME learned cap the predictive guard reads rather than
