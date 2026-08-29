@@ -1,7 +1,7 @@
 """Route tqdm's terminal protocol into structured progress rows + clean log lines.
 
 Qt-free on purpose: everything here is plain Python, so it can be unit-tested by replaying the
-literal chunks tqdm writes (see the classifier tests in tests/test_gui_progress.py).
+literal chunks tqdm writes (see the classifier tests in tests/test_vt_progress.py).
 
 WHY THIS EXISTS
     The naive "split on \\r and \\n" reader that this replaces mistook tqdm's bar frames for log
