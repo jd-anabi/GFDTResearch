@@ -581,3 +581,19 @@ def split_summary_block(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``[features | flags]`` -> ``(features, flags)``. The one place the split index is written."""
     n = len(FEATURE_LABELS)
     return s[..., :n], s[..., n:n + len(VALID_FLAG_LABELS)]
+
+
+def conditioning_rows(summary: torch.Tensor, T, tail: torch.Tensor = None) -> torch.Tensor:
+    """Assemble conditioning rows in THE canonical layout: ``[S | log(T) | forcing-or-chi]``.
+
+    The one constructor for the layout every consumer must agree on -- training's three mode
+    branches, the simulated observation, the PPC, and the three experimental builders (eight call
+    sites used to spell this cat out by hand, which is how a change could reach training but not
+    the PPC). ``summary`` is gen_stats' ``[features | valid flags]`` block on the CPU; ``tail`` is
+    the forcing vector or the packed chi block (already on the CPU -- callers own the transfer),
+    or None for a spontaneous config (forcing_dim 0). log(T) rides the summary pathway; the tail
+    is EmbeddedNet's SECOND pathway, split off by input_dim -- the order is load-bearing.
+    """
+    log_T = torch.full((summary.shape[0], 1), math.log(float(T)), dtype=summary.dtype)
+    blocks = (summary, log_T) if tail is None else (summary, log_T, tail)
+    return torch.cat(blocks, dim=-1)

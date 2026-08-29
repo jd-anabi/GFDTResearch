@@ -994,9 +994,7 @@ def _chi_rows(g: _BatchGeometry, nd, resc, init_rows, x_scale, x_offset, _patho)
     #   mixture over 1..6 -- the pooled measurement the stratification exists to avoid.
     if chi_k_fixed is None:
         chi_block = _subset_probe_rows(chi_block, chi_mask, chi_k_pad, chi_gen)
-    log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-    training_stats = torch.cat((training_stats, log_T_k_tensor, chi_block.cpu()), dim=-1)
-    return training_stats
+    return statistics.conditioning_rows(training_stats, T_k, chi_block.cpu())
 
 
 
@@ -1028,10 +1026,7 @@ def _spontaneous_rows(g: _BatchGeometry, nd, init_rows, x_scale, x_offset, _path
         warnings.simplefilter("ignore")
         training_stats = gen_stats(x_spont_dim.cpu(), None, dt_exp, None, None, None,
                                    device=device, spontaneous_only=True)
-        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-        # Conditioning [S | log(T)] -- no forcing block (forcing_dim = 0).
-        training_stats = torch.cat((training_stats, log_T_k_tensor), dim=-1)
-        return training_stats
+        return statistics.conditioning_rows(training_stats, T_k)
 
 
 
@@ -1087,13 +1082,7 @@ def _forced_rows(g: _BatchGeometry, nd, resc, init_rows, fparams, x_scale, x_off
         drive_freq = fparams[:, forcing_idx["freq"]].cpu()
         drive_phase = fparams[:, forcing_idx["phase"]].cpu()
         training_stats = gen_stats(x_spont_dim.cpu(), x_dim.cpu(), dt_exp, drive_amp, drive_freq, drive_phase, device=device)
-        log_T_k_tensor = torch.full((n, 1), math.log(T_k), dtype=dtype)
-        # Canonical conditioning layout: [S(x_dim) | log(T) | theta_force].
-        # log(T) rides with the summary pathway; theta_force is a separate block.
-        # The embedding split in build_posterior depends on this exact order, so
-        # keep it in sync with generate_observations / validate / infer_from_experiment.
-        training_stats = torch.cat((training_stats, log_T_k_tensor, fparams.cpu()), dim=-1)
-        return training_stats
+        return statistics.conditioning_rows(training_stats, T_k, fparams.cpu())
 
 
 

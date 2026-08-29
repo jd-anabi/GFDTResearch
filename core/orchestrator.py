@@ -246,7 +246,6 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
 
     # Summary statistics + conditioning vector. Layout: [S | log(T) | forcing]; log(T) is grouped
     # with the summary pathway. Keep this order in sync with gen_training_data and build_posterior.
-    log_T_obs = torch.tensor([[math.log(cfg.T_obs)]], dtype=cfg.hw.dtype)
     if cfg.chi_mode:
         # [S(41, Group G zeroed) | log(T) | padded probe SET] -- probes at mult_k * Omega_0.
         # An OBSERVATION uses the deterministic grid, not the training sampler's jitter: this is a
@@ -266,18 +265,18 @@ def generate_observations(cfg: SimConfig) -> tuple[torch.Tensor, torch.Tensor, t
         # reason.
         cfg.chi_obs_freqs = (obs_mults.to(cfg.hw.device)
                              * chi.peak_freq(x_spont_dim, cfg.dt_exp).median()).detach()
-        obs_stats = torch.cat([obs_stats, log_T_obs, chi_block.cpu()], dim=-1)
+        obs_stats = statistics.conditioning_rows(obs_stats, cfg.T_obs, chi_block.cpu())
     elif cfg.has_forcing:
         obs_stats = pipeline.gen_stats(
             x_spont_dim, x_dim, cfg.dt_exp,
             forcing_gt[:, cfg.forcing_idx["amp"]], forcing_gt[:, cfg.forcing_idx["freq"]],
             forcing_gt[:, cfg.forcing_idx["phase"]], device=cfg.hw.device,
         )
-        obs_stats = torch.cat([obs_stats, log_T_obs, forcing_gt.cpu()], dim=-1)
+        obs_stats = statistics.conditioning_rows(obs_stats, cfg.T_obs, forcing_gt.cpu())
     else:
         obs_stats = pipeline.gen_stats(x_spont_dim, None, cfg.dt_exp, None, None, None,
                                        device=cfg.hw.device, spontaneous_only=True)
-        obs_stats = torch.cat([obs_stats, log_T_obs], dim=-1)
+        obs_stats = statistics.conditioning_rows(obs_stats, cfg.T_obs)
     return x_dim, obs_stats, t_dim
 
 
@@ -1605,13 +1604,12 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
 
     # Restore original sample order
     x_spont = x_spont_sorted[inv_sort_idx]
-    log_T_obs = torch.full((n_samples, 1), math.log(T_obs), dtype=dtype)
     # Layout [S | log(T) | forcing|chi] — must match the observation in generate_observations.
     if cfg.chi_mode:
         x_dim = x_spont                                 # PPC "sample trajectories" = passive spontaneous trace
         sim_stats = pipeline.gen_stats(x_spont, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True)
-        sim_stats = torch.cat([sim_stats, log_T_obs, chi_block_sorted[inv_sort_idx].cpu()], dim=-1)
+        sim_stats = statistics.conditioning_rows(sim_stats, T_obs, chi_block_sorted[inv_sort_idx].cpu())
     elif cfg.has_forcing:
         x_dim = x_dim_sorted[inv_sort_idx]
         n_drive = x_dim.shape[0]
@@ -1622,12 +1620,12 @@ def infer_and_visualize(cfg: SimConfig, posterior: DirectPosterior | Transformed
             forcing_gt[:, cfg.forcing_idx["phase"]].expand(n_drive),
             device=device,
         )
-        sim_stats = torch.cat([sim_stats, log_T_obs, forcing_gt_expanded.cpu()], dim=-1)
+        sim_stats = statistics.conditioning_rows(sim_stats, T_obs, forcing_gt_expanded.cpu())
     else:
         x_dim = x_spont                                 # the PPC "sample trajectories" are spontaneous
         sim_stats = pipeline.gen_stats(x_spont, None, cfg.dt_exp, None, None, None,
                                        device=device, spontaneous_only=True)
-        sim_stats = torch.cat([sim_stats, log_T_obs], dim=-1)
+        sim_stats = statistics.conditioning_rows(sim_stats, T_obs)
     # Conditioning layout, so the zero-variance count can be split by origin rather than reported as
     # one number. See analysis.invalid_breakdown: most of a big "invalid" count is normally empty chi
     # probe slots, which is a fact about the run's K, not a defect.

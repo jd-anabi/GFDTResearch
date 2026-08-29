@@ -122,11 +122,11 @@ def gen_stats(x_spont: torch.Tensor, x_forced: torch.Tensor, dt: float | torch.T
         _pipeline._release_device_memory(device, plans=False, graphs=False)
     feats = torch.cat(results, dim=0)
     # [features | valid flags]. Appended HERE rather than at each call site: every conditioning
-    # vector in the project is assembled as `cat([gen_stats(...), log_T, forcing-or-chi])`, in eight
-    # places across pipeline.py and orchestrator.py (training, calibration, PPC, the simulated and
-    # experimental observation paths). Widening the summary block at its single source means all
-    # eight stay in step by construction -- a flag set that reached training but not the PPC would be
-    # invisible until the two disagreed about what a row means.
+    # vector in the project is assembled by statistics.conditioning_rows over this block (training,
+    # calibration, PPC, the simulated and experimental observation paths). Widening the summary
+    # block at its single source means every consumer stays in step by construction -- a flag set
+    # that reached training but not the PPC would be invisible until the two disagreed about what
+    # a row means.
     return torch.cat([feats, statistics.derive_valid_flags(feats, dt)], dim=-1)
 
 def gen_stats_features(*args, **kwargs) -> torch.Tensor:

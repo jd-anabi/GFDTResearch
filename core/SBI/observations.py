@@ -12,7 +12,7 @@ import torch
 
 from core import config
 from core.config import SimConfig
-from core.SBI import chi, pipeline
+from core.SBI import chi, pipeline, statistics
 
 
 # ── Step 5: Inference on real experimental data ────────────────────────────
@@ -108,8 +108,7 @@ def build_experiment_obs(
     )
 
     # Build conditioning vector: [S(X_obs), log(T_obs), forcing]
-    log_T_obs = torch.tensor([[math.log(T_obs)]], dtype=dtype)
-    obs_stats = torch.cat([obs_stats, log_T_obs, forcing_t], dim=-1)
+    obs_stats = statistics.conditioning_rows(obs_stats, T_obs, forcing_t)
 
     # Record the observation context so infer_and_visualize's PPC / eye-test can simulate.
     forcing_vals = {name: float(forcing_t[0, cfg.forcing_idx[name]]) for name in cfg.force_params_dict}
@@ -147,8 +146,7 @@ def build_experiment_obs_spontaneous(
     X_batched = X_obs.to(dtype=dtype).unsqueeze(0)
     obs_stats = pipeline.gen_stats(X_batched, None, cfg.dt_exp, None, None, None,
                                    device=cfg.hw.device, spontaneous_only=True)
-    log_T_obs = torch.tensor([[math.log(T_obs)]], dtype=dtype)
-    obs_stats = torch.cat([obs_stats, log_T_obs], dim=-1)      # [S | log(T)], no forcing block
+    obs_stats = statistics.conditioning_rows(obs_stats, T_obs)
 
     cfg.set_observation_context(T_obs, {})
     N_obs = X_batched.shape[-1]
@@ -268,8 +266,7 @@ def build_experiment_obs_chi(
 
     obs_stats = pipeline.gen_stats(X_spont_b, None, cfg.dt_exp, None, None, None,
                                    device=cfg.hw.device, spontaneous_only=True)
-    log_T_obs = torch.tensor([[math.log(T_obs)]], dtype=dtype)
-    obs_stats = torch.cat([obs_stats, log_T_obs, chi_block.cpu()], dim=-1)
+    obs_stats = statistics.conditioning_rows(obs_stats, T_obs, chi_block.cpu())
 
     cfg.set_observation_context(T_obs, {})
     s_per_cell = 1.0 / cfg.get_unit_conversion_factor("s")
